@@ -1,0 +1,151 @@
+{
+  "generatedAt": "2026-10-13T06:26:05.996Z",
+  "entry": "elf3.xml",
+  "files": [
+    {
+      "path": "elf3.xml",
+      "size": 33286
+    },
+    {
+      "path": "scene_bx.xml",
+      "size": 8386
+    },
+    {
+      "path": "meshes/l_ankle_x_link.STL",
+      "size": 100084
+    },
+    {
+      "path": "meshes/l_ankle_y_link.STL",
+      "size": 39484
+    },
+    {
+      "path": "meshes/l_elbow_y_link.STL",
+      "size": 304184
+    },
+    {
+      "path": "meshes/l_hand.STL",
+      "size": 400084
+    },
+    {
+      "path": "meshes/l_hip_x_link.STL",
+      "size": 321484
+    },
+    {
+      "path": "meshes/l_hip_y_link.STL",
+      "size": 200034
+    },
+    {
+      "path": "meshes/l_hip_z_link.STL",
+      "size": 300034
+    },
+    {
+      "path": "meshes/l_knee_y_link.STL",
+      "size": 250034
+    },
+    {
+      "path": "meshes/l_shoulder_x_link.STL",
+      "size": 323784
+    },
+    {
+      "path": "meshes/l_shoulder_y_link.STL",
+      "size": 400034
+    },
+    {
+      "path": "meshes/l_shoulder_z_link.STL",
+      "size": 300034
+    },
+    {
+      "path": "meshes/l_wrist_x_link.STL",
+      "size": 500084
+    },
+    {
+      "path": "meshes/l_wrist_x_link_part.STL",
+      "size": 861784
+    },
+    {
+      "path": "meshes/l_wrist_y_link.STL",
+      "size": 400084
+    },
+    {
+      "path": "meshes/l_wrist_z_link.STL",
+      "size": 187484
+    },
+    {
+      "path": "meshes/r_ankle_x_link.STL",
+      "size": 100084
+    },
+    {
+      "path": "meshes/r_ankle_y_link.STL",
+      "size": 39484
+    },
+    {
+      "path": "meshes/r_elbow_y_link.STL",
+      "size": 304184
+    },
+    {
+      "path": "meshes/r_hand.STL",
+      "size": 400084
+    },
+    {
+      "path": "meshes/r_hip_x_link.STL",
+      "size": 321484
+    },
+    {
+      "path": "meshes/r_hip_y_link.STL",
+      "size": 200084
+    },
+    {
+      "path": "meshes/r_hip_z_link.STL",
+      "size": 300084
+    },
+    {
+      "path": "meshes/r_knee_y_link.STL",
+      "size": 250084
+    },
+    {
+      "path": "meshes/r_shoulder_x_link.STL",
+      "size": 323784
+    },
+    {
+      "path": "meshes/r_shoulder_y_link.STL",
+      "size": 400034
+    },
+    {
+      "path": "meshes/r_shoulder_z_link.STL",
+      "size": 300084
+    },
+    {
+      "path": "meshes/r_wrist_x_link.STL",
+      "size": 499984
+    },
+    {
+      "path": "meshes/r_wrist_x_link_part.STL",
+      "size": 861384
+    },
+    {
+      "path": "meshes/r_wrist_y_link.STL",
+      "size": 400084
+    },
+    {
+      "path": "meshes/r_wrist_z_link.STL",
+      "size": 187484
+    },
+    {
+      "path": "meshes/torso_link.STL",
+      "size": 1500034
+    },
+    {
+      "path": "meshes/waist_x_link.STL",
+      "size": 200034
+    },
+    {
+      "path": "meshes/waist_y_link.STL",
+      "size": 52684
+    },
+    {
+      "path": "meshes/waist_z_link.STL",
+      "size": 500034
+    }
+  ],
+  "totalBytes": 12071578
+}

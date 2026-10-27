@@ -1,0 +1,346 @@
+/* elf3 MuJoCo Web Viewer — UI 样式 */
+
+:root {
+  --bg: #0b1017;
+  --panel: rgba(16, 22, 31, 0.82);
+  --panel-line: rgba(120, 160, 200, 0.18);
+  --fg: #dce6f2;
+  --fg-dim: #8fa2b8;
+  --accent: #54d1ff;
+  --accent-2: #7ef0c0;
+  --warn: #ffb454;
+  --radius: 12px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#view {
+  position: fixed;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.hidden { display: none !important; }
+
+/* ------------------------------------------------ 通用面板 */
+.panel {
+  position: fixed;
+  z-index: 10;
+  background: var(--panel);
+  border: 1px solid var(--panel-line);
+  border-radius: var(--radius);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
+  padding: 12px 14px;
+  user-select: none;
+}
+
+/* ------------------------------------------------ 顶部 HUD */
+#hud {
+  top: 14px;
+  left: 14px;
+  min-width: 260px;
+}
+#hud .title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+#hud .title b { font-size: 18px; letter-spacing: 0.4px; }
+.tag {
+  font-size: 11px;
+  color: var(--accent);
+  border: 1px solid rgba(84, 209, 255, 0.35);
+  border-radius: 5px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+#hud dl { margin: 0; display: grid; gap: 3px; }
+#hud dl > div { display: flex; gap: 10px; }
+#hud dt { color: var(--fg-dim); min-width: 42px; font-size: 12px; }
+#hud dd { margin: 0; font-size: 12px; font-family: var(--mono); }
+
+/* ------------------------------------------------ 设置面板 */
+#panel {
+  top: 14px;
+  right: 14px;
+  width: 262px;
+  max-height: calc(100vh - 28px);
+  overflow: auto;
+  padding-top: 34px;
+}
+#panel .fold {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  line-height: 1;
+  border-radius: 6px;
+  border: 1px solid var(--panel-line);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--fg);
+  cursor: pointer;
+}
+#panel.folded { width: 46px; height: 40px; padding: 0; overflow: hidden; }
+#panel.folded .body { display: none; }
+#panel h2 {
+  font-size: 11px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin: 14px 0 7px;
+  font-weight: 600;
+}
+#panel h2:first-child { margin-top: 0; }
+
+.chk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  cursor: pointer;
+  font-size: 13px;
+}
+.chk input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+
+/* 带下拉框的一行（运动仿真：回放数据 / 倍速） */
+.rowsel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+  cursor: pointer;
+}
+.rowsel select {
+  flex: 0 0 148px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--panel-line);
+  border-radius: 7px;
+  cursor: pointer;
+  outline: none;
+}
+.rowsel select:hover { border-color: rgba(84, 209, 255, 0.45); }
+.rowsel option { background: #10161f; color: var(--fg); }
+
+.btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.btns button {
+  flex: 1 1 auto;
+  min-width: 66px;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--panel-line);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  font-family: inherit;
+}
+.btns button:hover { background: rgba(84, 209, 255, 0.16); border-color: rgba(84, 209, 255, 0.45); }
+.btns button:active { transform: translateY(1px); }
+
+.note {
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  margin: 6px 0 8px;
+  line-height: 1.5;
+}
+.note code { font-family: var(--mono); color: var(--warn); }
+
+/* ------------------------------------------------ 底部说明 */
+#help {
+  bottom: 14px;
+  left: 14px;
+  display: flex;
+  gap: 22px;
+  max-width: min(620px, 60vw);
+}
+#help h3 {
+  margin: 0 0 3px;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--accent-2);
+  text-transform: uppercase;
+}
+#help p { margin: 0 0 2px; font-size: 12px; color: var(--fg-dim); }
+
+/* ------------------------------------------------ VR 按钮挂载点 */
+#vr-slot {
+  position: fixed;
+  z-index: 11;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#vr-slot button {
+  font: 700 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+  letter-spacing: 0.8px;
+  color: #06202e;
+  background: linear-gradient(180deg, #7ef0c0, #41cf9a);
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 12px 20px;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: 0 8px 24px rgba(65, 207, 154, 0.32);
+  transition: filter 0.15s, background 0.15s, box-shadow 0.15s;
+}
+#vr-slot button:hover:not([disabled]) { filter: brightness(1.06); }
+#vr-slot button:active:not([disabled]) { transform: translateY(1px); }
+
+/* 半透明 VR（透视）：做成"磨砂玻璃"观感 —— 按钮本身就是半透明的，
+   一眼能看出这个入口会让眼镜看到外面 */
+#vr-slot button.xr-ar {
+  color: var(--fg);
+  background: rgba(84, 209, 255, 0.16);
+  border-color: rgba(84, 209, 255, 0.55);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(9px) saturate(140%);
+  -webkit-backdrop-filter: blur(9px) saturate(140%);
+}
+#vr-slot button.xr-ar:hover:not([disabled]) {
+  background: rgba(84, 209, 255, 0.28);
+  border-color: rgba(84, 209, 255, 0.8);
+  filter: none;
+}
+#vr-slot button[disabled] {
+  cursor: not-allowed;
+  opacity: 0.42;
+  filter: grayscale(0.35);
+  box-shadow: none;
+}
+#vr-slot button.active {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.55), 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+#vr-slot a {
+  display: inline-flex;
+  align-items: center;
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--panel-line);
+  border-radius: 10px;
+  padding: 12px 18px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-decoration: none;
+}
+
+/* ------------------------------------------------ 加载层 */
+#loading {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(120% 100% at 50% 0%, #132133 0%, #080c12 65%);
+}
+#loading .card {
+  width: min(560px, 88vw);
+  padding: 26px 28px 22px;
+  border: 1px solid var(--panel-line);
+  border-radius: 16px;
+  background: rgba(12, 18, 26, 0.85);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+}
+#loading h1 {
+  margin: 0 0 4px;
+  font-size: 22px;
+  letter-spacing: 0.5px;
+}
+#loading h1 span {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--accent);
+  margin-left: 8px;
+  letter-spacing: 1px;
+}
+#loading .sub { margin: 0 0 18px; color: var(--fg-dim); font-size: 13px; }
+#loading .bar {
+  height: 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+#loading .bar i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.22s ease;
+}
+#loading .row {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 9px;
+  font-size: 12.5px;
+  color: var(--fg);
+}
+#loading .row #ld-pct { font-family: var(--mono); color: var(--accent); }
+#loading .log {
+  margin: 12px 0 0;
+  max-height: 128px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+  white-space: pre-wrap;
+}
+#loading .hint {
+  margin: 14px 0 0;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  line-height: 1.6;
+}
+#loading.error .bar i { background: #ff6b6b; }
+
+/* ------------------------------------------------ toast */
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 84px;
+  transform: translateX(-50%);
+  z-index: 40;
+  padding: 9px 16px;
+  border-radius: 9px;
+  background: rgba(16, 22, 31, 0.92);
+  border: 1px solid var(--panel-line);
+  font-size: 13px;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.5);
+}
+
+@media (max-width: 860px) {
+  #help { display: none; }
+  #panel { width: 218px; }
+  #hud { min-width: 0; }
+}

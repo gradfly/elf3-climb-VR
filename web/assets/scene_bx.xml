@@ -1,0 +1,115 @@
+<mujoco model="bx scene">
+  <!-- ==========================================================================
+       场景：universal_test 紧凑地形（compact obstacles）
+       --------------------------------------------------------------------------
+       本文件原先放的是 scene_bx.xml 的「地面 + 15 级台阶」。
+       现按需求替换为官方 terrain 包里的 universal_test 紧凑地形，内容是把
+       bxi_controller_ros2/src/bxi_example_py_elf3/data/mujoco_simulation/terrains/
+       universal_test/ 下的三个文件拍平（flatten）进来的，几何尺寸 / 位置 / 摩擦
+       参数逐条照抄，未做任何改动：
+
+         assets.xml            -> <asset> 里的 ut_* 材质（skybox 不需要，网页端用
+                                  three.js 天空盒）
+         base.xml              -> <worldbody> 的平行光 + 无限地面 + 出生点标记
+         compact_obstacles.xml -> 低楼梯 / 高楼梯 / 壕沟堤岸
+
+       地形沿 +X 方向排布，前 4 m 是干净出生区（机器人默认就在 x=0 站立）：
+         x=4.80~5.36   低楼梯 3 级（级高 10 cm，进深 28 cm）+ 平台 + 2 级下
+         x=8.00~8.85   高楼梯 2 级（级高 15 cm）+ 平台 + 1 级下
+         x=11.10~12.90 壕沟堤岸（0.125 m 高台 + 中间 0.45 m 断口）
+         x=13.20       终点线
+
+       网页端由「显示 → 楼梯 / 障碍」这条复选框统一控制这些 box 的显隐
+       （js/mjscene.js 里按「worldbody 下的 box / 平面」分组，见 envGeomIds）。
+
+       注意：起点 / 终点 / 壕沟断口的标记在官方 XML 里是 <site>，本文件原样保留
+       <site>。js/mjscene.js 只渲染 geom，不渲染 site，所以它们在网页里不显示
+       （MuJoCo 原生查看器 / Python 渲染里照常可见）。
+       ========================================================================== -->
+
+  <statistic center="0 0 0.6" extent="1.3"/>
+
+  <visual>
+    <headlight diffuse="0.5 0.5 0.5" ambient="0.2 0.2 0.2" specular="0.9 0.9 0.9"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="200" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <!-- ---- 以下材质照抄 terrains/universal_test/assets.xml ---- -->
+    <texture type="skybox" name="ut_sky" builtin="gradient" rgb1="0.28 0.42 0.58" rgb2="0.02 0.03 0.05" width="512" height="3072"/>
+    <material name="ut_ground" rgba="0.25 0.27 0.28 1" reflectance="0.03" shininess="0.05"/>
+    <material name="ut_concrete" rgba="0.46 0.47 0.46 1"/>
+    <material name="ut_crack" rgba="0.07 0.065 0.06 1"/>
+    <material name="ut_tile" rgba="0.72 0.75 0.77 1" reflectance="0.55"/>
+    <material name="ut_marble" rgba="0.84 0.86 0.82 1" reflectance="0.7"/>
+    <material name="ut_tactile" rgba="0.92 0.72 0.08 1"/>
+    <material name="ut_asphalt" rgba="0.12 0.13 0.14 1"/>
+    <material name="ut_white" rgba="0.92 0.92 0.88 1"/>
+    <material name="ut_red" rgba="0.72 0.08 0.05 1"/>
+    <material name="ut_orange" rgba="0.95 0.35 0.03 1"/>
+    <material name="ut_yellow" rgba="0.96 0.78 0.05 1"/>
+    <material name="ut_blue" rgba="0.08 0.3 0.68 1"/>
+    <material name="ut_glass" rgba="0.45 0.75 0.85 0.28" reflectance="0.6"/>
+    <material name="ut_metal" rgba="0.32 0.35 0.38 1" reflectance="0.55"/>
+    <material name="ut_wood" rgba="0.38 0.20 0.08 1"/>
+    <material name="ut_oil" rgba="0.055 0.045 0.035 0.92" reflectance="0.75"/>
+    <material name="ut_sand" rgba="0.72 0.58 0.34 1"/>
+    <material name="ut_wet_sand" rgba="0.42 0.31 0.18 1"/>
+    <material name="ut_rock" rgba="0.32 0.30 0.28 1"/>
+    <material name="ut_grass" rgba="0.16 0.36 0.12 1"/>
+    <material name="ut_mud" rgba="0.22 0.12 0.055 1"/>
+    <material name="ut_snow" rgba="0.91 0.95 0.98 1" reflectance="0.35"/>
+    <material name="ut_ice" rgba="0.58 0.78 0.9 0.72" reflectance="0.85"/>
+    <material name="ut_leaf" rgba="0.45 0.19 0.035 1"/>
+    <material name="ut_water" rgba="0.05 0.34 0.56 0.42" reflectance="0.8"/>
+    <material name="ut_ash" rgba="0.07 0.065 0.06 1"/>
+    <material name="ut_rubble" rgba="0.38 0.34 0.31 1"/>
+    <material name="ut_smoke" rgba="0.20 0.20 0.20 0.13"/>
+    <material name="ut_heat" rgba="0.85 0.08 0.015 0.45"/>
+    <material name="ut_black_absorb" rgba="0.008 0.008 0.010 1" reflectance="0" shininess="0"/>
+    <material name="ut_mirror" rgba="0.82 0.86 0.90 1" reflectance="0.95" shininess="1" specular="1"/>
+    <material name="ut_white_matte" rgba="0.96 0.96 0.95 1" reflectance="0" shininess="0"/>
+    <material name="ut_rubber" rgba="0.10 0.11 0.12 1" reflectance="0.02"/>
+    <material name="ut_carpet" rgba="0.24 0.16 0.12 1" reflectance="0"/>
+    <texture type="2d" name="ut_repetitive_checker" builtin="checker" rgb1="0.72 0.72 0.70" rgb2="0.58 0.58 0.56" width="256" height="256"/>
+    <material name="ut_repetitive" texture="ut_repetitive_checker" texuniform="true" texrepeat="12 12" reflectance="0.02"/>
+  </asset>
+
+  <worldbody>
+    <!-- ---- base.xml：光照 + 无限地面 + 出生点 ---- -->
+    <light name="ut_world_light" pos="0 0 6" dir="0 0 -1" directional="true" diffuse="0.72 0.72 0.72" ambient="0.28 0.28 0.28" specular="0.08 0.08 0.08" castshadow="false"/>
+    <!-- 无限公共地面（对应 base.xml 的 ut_infinite_ground）。局部抬高的台面用来营造
+         真实的坑 / 壕沟深度。此处保留 geom 名 "floor"：elf3.xml 的 <contact> 里有 14 条
+         足底-地面 contact pair 写死了 geom2="floor"，改名会让模型编译失败。 -->
+    <geom name="floor" type="plane" pos="0 0 0" size="0 0 0.01" material="ut_ground" friction="1.0 0.01 0.001" condim="3"/>
+    <site name="ut_spawn_origin" type="cylinder" pos="0 0 0.006" size="0.22 0.006" rgba="0.1 0.8 0.25 0.65"/>
+
+    <!-- ---- compact_obstacles.xml：紧凑障碍（沿 +X 排布） ---- -->
+    <!-- 出生区标记 -->
+    <site name="ut_compact_start" type="box" pos="3.2 0 0.006" size="0.18 0.9 0.006" rgba="0.1 0.8 0.25 0.55"/>
+
+    <!-- 低矮民用楼梯：3 级，级高 10 cm，进深 28 cm -->
+    <geom name="ut_compact_low_stair_1" type="box" pos="4.80 0 0.050" size="0.14 0.60 0.050" material="ut_concrete" friction="1.05 0.01 0.001"/>
+    <geom name="ut_compact_low_stair_2" type="box" pos="5.08 0 0.100" size="0.14 0.60 0.100" material="ut_concrete" friction="1.05 0.01 0.001"/>
+    <geom name="ut_compact_low_stair_3" type="box" pos="5.36 0 0.150" size="0.14 0.60 0.150" material="ut_concrete" friction="1.05 0.01 0.001"/>
+    <geom name="ut_compact_low_landing" type="box" pos="5.86 0 0.150" size="0.36 0.60 0.150" material="ut_concrete" friction="1.05 0.01 0.001"/>
+    <geom name="ut_compact_low_stair_down_1" type="box" pos="6.36 0 0.100" size="0.14 0.60 0.100" material="ut_concrete" friction="1.05 0.01 0.001"/>
+    <geom name="ut_compact_low_stair_down_2" type="box" pos="6.64 0 0.050" size="0.14 0.60 0.050" material="ut_concrete" friction="1.05 0.01 0.001"/>
+
+    <!-- 更窄、更高的楼梯：难度更大但依然紧凑 -->
+    <geom name="ut_compact_high_stair_1" type="box" pos="8.00 0 0.075" size="0.14 0.50 0.075" material="ut_metal" friction="1.20 0.015 0.001"/>
+    <geom name="ut_compact_high_stair_2" type="box" pos="8.30 0 0.150" size="0.15 0.50 0.150" material="ut_metal" friction="1.20 0.015 0.001"/>
+    <geom name="ut_compact_high_landing" type="box" pos="8.85 0 0.150" size="0.40 0.50 0.150" material="ut_metal" friction="1.20 0.015 0.001"/>
+    <geom name="ut_compact_high_stair_down_1" type="box" pos="9.40 0 0.075" size="0.15 0.50 0.075" material="ut_metal" friction="1.20 0.015 0.001"/>
+
+    <!-- 抬高的堤岸在无限地面之上构成真正的负障碍（壕沟） -->
+    <geom name="ut_compact_trench_entry_bank" type="box" pos="11.10 0 0.125" size="0.75 0.70 0.125" material="ut_asphalt" friction="0.95 0.01 0.001"/>
+    <geom name="ut_compact_trench_exit_bank" type="box" pos="12.15 0 0.125" size="0.75 0.70 0.125" material="ut_asphalt" friction="0.95 0.01 0.001"/>
+    <geom name="ut_compact_trench_bottom_marker" type="box" pos="11.625 0 0.006" size="0.225 0.70 0.006" material="ut_crack" contype="0" conaffinity="0"/>
+    <site name="ut_compact_trench_gap" type="box" pos="11.625 0 0.135" size="0.225 0.68 0.012" rgba="1 0.08 0.04 0.30"/>
+
+    <!-- 终点线标记 -->
+    <site name="ut_compact_finish" type="box" pos="13.2 0 0.006" size="0.18 0.9 0.006" rgba="0.1 0.35 1.0 0.55"/>
+  </worldbody>
+</mujoco>

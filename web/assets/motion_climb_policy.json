@@ -1,0 +1,135 @@
+{
+  "fps": 50.0,
+  "dt": 0.02,
+  "model": "elf3.xml",
+  "scene": "universal_test 紧凑地形（10cm 低楼梯 / 15cm 高楼梯 / 壕沟）",
+  "policy": "normal_depth.onnx",
+  "camera": "body_depth_camera",
+  "jointNames": [
+    "l_shoulder_y_joint",
+    "r_shoulder_y_joint",
+    "waist_y_joint",
+    "l_shoulder_x_joint",
+    "r_shoulder_x_joint",
+    "waist_x_joint",
+    "l_shoulder_z_joint",
+    "r_shoulder_z_joint",
+    "waist_z_joint",
+    "l_elbow_y_joint",
+    "r_elbow_y_joint",
+    "l_hip_y_joint",
+    "r_hip_y_joint",
+    "l_wrist_x_joint",
+    "r_wrist_x_joint",
+    "l_hip_x_joint",
+    "r_hip_x_joint",
+    "l_wrist_y_joint",
+    "r_wrist_y_joint",
+    "l_hip_z_joint",
+    "r_hip_z_joint",
+    "l_wrist_z_joint",
+    "r_wrist_z_joint",
+    "l_knee_y_joint",
+    "r_knee_y_joint",
+    "l_ankle_y_joint",
+    "r_ankle_y_joint",
+    "l_ankle_x_joint",
+    "r_ankle_x_joint"
+  ],
+  "jointQposAdr": [
+    22,
+    29,
+    7,
+    23,
+    30,
+    8,
+    24,
+    31,
+    9,
+    25,
+    32,
+    10,
+    16,
+    26,
+    33,
+    11,
+    17,
+    27,
+    34,
+    12,
+    18,
+    28,
+    35,
+    13,
+    19,
+    14,
+    20,
+    15,
+    21
+  ],
+  "name": "climb_policy",
+  "kind": "climb",
+  "label": "爬楼梯 · normal_depth",
+  "source": "climb_stairs.py 深度视觉闭环（MuJoCo 深度渲染 → normal_depth.onnx → PD → mj_step）",
+  "stats": {
+    "policy": "normal_depth",
+    "camera": "body_depth_camera",
+    "cmdVx": 0.5,
+    "spawnX": 3.5,
+    "stepCount": 1318,
+    "fell": false,
+    "maxX": 13.404,
+    "finalX": 13.404,
+    "rootZMin": 0.9942,
+    "rootZMax": 1.3388,
+    "landmarks": [
+      {
+        "x": 4.8,
+        "name": "低楼梯第1级(10cm)",
+        "passed": true
+      },
+      {
+        "x": 5.36,
+        "name": "低楼梯第3级/平台",
+        "passed": true
+      },
+      {
+        "x": 6.93,
+        "name": "低楼梯下完",
+        "passed": true
+      },
+      {
+        "x": 8.0,
+        "name": "高楼梯第1级(15cm)",
+        "passed": true
+      },
+      {
+        "x": 8.85,
+        "name": "高楼梯平台",
+        "passed": true
+      },
+      {
+        "x": 9.85,
+        "name": "高楼梯下完",
+        "passed": true
+      },
+      {
+        "x": 11.1,
+        "name": "壕沟区入口",
+        "passed": true
+      },
+      {
+        "x": 13.2,
+        "name": "终点线",
+        "passed": true
+      }
+    ]
+  },
+  "bin": "motion_climb_policy.bin",
+  "generated": "2026-10-13T14:24:47",
+  "version": "2026-10-13T14:24:47-1318",
+  "nframes": 1318,
+  "nq": 36,
+  "duration": 26.36,
+  "qposFormat": "float32-le, row-major, (nframes, nq)"
+}

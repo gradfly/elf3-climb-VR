@@ -1,0 +1,68 @@
+schema: 1
+id: com.bxi.normal_depth
+name: 深度行走
+version: 1.1.1
+api: ">=4,<5"
+enable: true
+entrypoint: plugin:create_mod
+visibility: protected
+requires:
+  - id: com.bxi.basic_actions
+    version: ">=1,<2"
+conflicts: []
+python_exports: []
+runtime_requirements:
+  python: []
+  ros: []
+  system: []
+
+events:
+  activate:
+    slot: btn_10
+    value: 7
+
+states:
+  normal_depth:
+    manifest:
+      label: 深度行走
+      priority: 850
+      group: Advanced
+      icon: sensors
+      confirm: true
+      confirm_message: 请先确认深度相机图像持续发布且机器人前方没有人员
+    speed_profile: com.bxi.basic_actions/normal
+    params:
+      mode: origin_camera
+      # Matches the MuJoCo camera name and the hardware deployment mapping.
+      camera_name: head_depth_camera
+      topic: ""
+      camera_info_topic: ""
+      depth_uint16_scale: 0.001
+      depth_timeout_sec: 0.5
+      horizontal_fov: 45.2
+      vertical_fov: 58.0616969
+      min_dist: 0.2
+      max_dist: 3.0
+
+routes:
+  - from: com.bxi.basic_actions/normal
+    event: activate
+    to: normal_depth
+    transition:
+      profile: first_frame_switch
+      steps:
+        - type: hold
+          duration: 0.02
+        - type: entry_gain_ramp
+          duration: 0.02
+          kp_from: zero
+          kd_from: target
+  - from: normal_depth
+    event: com.bxi.basic_actions/normal
+    to: com.bxi.basic_actions/normal
+    transition:
+      profile: dual_running_blend
+      duration: 1.0
+  - from: normal_depth
+    event: com.bxi.basic_actions/zero_torque
+    to: com.bxi.basic_actions/zero_torque
