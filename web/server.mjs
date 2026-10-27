@@ -190,10 +190,27 @@ console.log(`\n  Ctrl+C 停止服务。\n${line}\n`);
 
 if (OPEN_BROWSER) {
   const url = new URL(OPEN_PATH, `http://localhost:${httpPort}/`).href;
-  const cmd = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]]
-    : process.platform === 'darwin' ? ['open', [url]]
-      : ['xdg-open', [url]];
-  try { spawn(cmd[0], cmd[1], { detached: true, stdio: 'ignore' }).unref(); } catch { /* ignore */ }
+  let command, args;
+  if (process.platform === 'win32') {
+    // process.env.comspec 必定是 cmd.exe 的绝对路径（OS 自动设置）。
+    // 托管的 Node 构建可能没把 C:\Windows\System32 放进 PATH，所以绝不能用裸 "cmd" 去查。
+    command = process.env.comspec || 'C:\\Windows\\System32\\cmd.exe';
+    args = ['/c', 'start', '', url];
+  } else if (process.platform === 'darwin') {
+    command = 'open'; args = [url];
+  } else {
+    command = 'xdg-open'; args = [url];
+  }
+  try {
+    const child = spawn(command, args, { detached: true, stdio: 'ignore' });
+    // spawn() 同步返回，但执行失败（例如 ENOENT）是以异步 'error' 事件抛出的，
+    // 必须处理，否则会崩掉整个服务器进程。
+    child.on('error', (e) => {
+      console.log(`  ! 无法自动打开浏览器（${e.message}）— 请手动打开下面的地址：`);
+      console.log(`     ${url}`);
+    });
+    child.unref();
+  } catch { /* ignore */ }
 }
 
 for (const s of servers) {
