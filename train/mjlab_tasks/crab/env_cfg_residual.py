@@ -89,7 +89,11 @@ def _rebuild_rewards(cfg) -> None:
     )
     r["yaw_drift"] = RewardTermCfg(func=X.yaw_drift, weight=-0.5, params={})
     r["lateral_drift"] = RewardTermCfg(func=X.lateral_drift, weight=-0.2, params={})
-    r["is_terminated"] = RewardTermCfg(func=X.is_terminated, weight=-5.0, params={})
+    # ⚠️ 奖励按 dt 缩放：一次性惩罚实际值 = weight × 0.02。
+    # 原来 −5 只等于每次摔倒扣 0.1 分（日志 is_terminated −0.005 = −0.1/20s），
+    # 而一个 episode 回报 ~10 分 —— 摔倒几乎免费，策略自然选择"用速度换摔"。
+    # −150 × 0.02 = −3.0/次，约占单回合回报 30%，够痛但不主导。
+    r["is_terminated"] = RewardTermCfg(func=X.is_terminated, weight=-150.0, params={})
 
 
 def _retune_commands(cfg, play: bool) -> None:
