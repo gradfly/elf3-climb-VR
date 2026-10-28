@@ -391,6 +391,9 @@ def crab_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.events.pop("push_robot", None)
         cfg.terminations.pop("out_of_terrain_bounds", None)
         cfg.curriculum = {}
+        # viser 的速度滑块写死 min=0.1，lin_vel_x=(0,0) 会让 GUI 初始化直接抛异常。
+        # 只在 play 模式放宽一点点，不影响训练用的配置。
+        cfg.commands["twist"].ranges.lin_vel_x = (0.0, 0.1)
         cfg.events["randomize_terrain"] = EventTermCfg(
             func=envs_mdp.randomize_terrain, mode="reset", params={}
         )
