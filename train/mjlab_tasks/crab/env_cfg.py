@@ -376,7 +376,11 @@ def crab_env_cfg(play: bool = False,
             njmax=1500,
             mujoco=MujocoCfg(
                 timestep=0.002,
-                iterations=10,
+                iterations=20,          # 10 太紧：脚掌冲击/台阶接触时常撞上限
+                # mujoco-warp 用 float32，tolerance=1e-8 在单精度下**永远达不到**，
+                # 求解器每步都跑满迭代并打印 "solver iterations limit reached"。
+                # 1e-6 在 float32 下可达：一旦收敛就提前退出，既安静又更快。
+                tolerance=1e-6,
                 ls_iterations=20,
                 ccd_iterations=500,
             ),
