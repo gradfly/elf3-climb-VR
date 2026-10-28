@@ -214,9 +214,35 @@ MUJOCO_GL=egl WANDB_MODE=disabled \
 
 ⚠️ 观测与动作语义都变了，**旧 checkpoint 不能加载**。
 
-### 9.4 首跑怎么判断对不对
+### 9.4 首跑怎么判断对不对（**已更正，别再按老判据**）
 
-1. `play Elf3-Crab-Residual-Play --agent zero`：零残差时机器人应能**照脚本步态走 3–5 步再倒**。
-   若第 1 步就摔 → 相位、关节顺序或 offset 语义错了。
-2. 看 `Episode_Reward/ref_tracking` 初始应接近 1（残差≈0）。
-3. 500 轮后 `forward_progress_y` 应上升、`error_vel_xy` 应 < 0.25。
+**先纠正一个错误预期**：`--agent zero` 时机器人摔倒是**必然**的，不是配置错。
+实测（本地 MuJoCo，`build_model` 同款 PD）：
+
+| 姿势 | 结果 |
+|---|---|
+| 保持默认站姿不动 | **1.24 s 摔倒**，执行器力矩仅 15 N·m（上限 150）|
+| 参考表任取一帧保持不动 | 1.6–1.8 s 摔倒 |
+| 零残差回放整周期 | 1.3–2.4 s 摔倒 |
+
+原因是 `ankle_x` 的 `kp` 只有 10 N·m/rad、力矩上限 15 N·m，纯 PD **不具备平衡能力**；
+基线任务能站住也是靠策略输出动作，不是靠 PD。所以「零残差能走」从来不是有效判据。
+
+**现在的设计用 α 课程绕开这个问题**：
+
+```
+q_ref = q_stand + α · (q_gait(phase) − q_stand)      α: 0 → 1，1500 iter 线性
+```
+
+* α=0 时参考 = 默认站姿 → 与已验证可训练的基线**完全同难度**；
+* α→1 时参考渐变为脚本步态，策略有足够时间先把平衡学会；
+* `phase_shift=33/90`：phase=0 落在**双支撑起点**（表帧 33），不会一开场就单腿支撑；
+* play 配置 `alpha_fixed=1.0`（满幅），训练配置 `-1`（走课程）。
+
+**有效的检查顺序**：
+
+1. `play Elf3-Crab-Residual-Play --agent zero` 只验证「能建环境、跑 1–2 s 不报错」，
+   **不要**把摔倒当失败。
+2. 训练看三条曲线：`Episode_Reward/ref_tracking` 应缓慢上升、
+   `Episode_Reward/forward_progress_y` > 0、`Curriculum/terrain_levels/mean` 开始涨。
+3. 1500 iter（α 到 1）之后再判断步态像不像螃蟹步。

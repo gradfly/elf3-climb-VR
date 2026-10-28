@@ -44,13 +44,11 @@ def _zeros(env, n: int) -> torch.Tensor:
 
 # ---------------------------------------------------------------- 观测
 def joint_pos_ref_err(env, action_name: str = "joint_pos") -> torch.Tensor:
-    """12 条腿相对参考轨迹的偏差 [B,12]。"""
+    """12 条腿相对参考轨迹的偏差 [B,12]（按 target 顺序对齐，避开实体排序差异）。"""
     t = _term(env, action_name)
-    ids = t.leg_joint_ids
-    if not ids:
-        return _zeros(env, 12)
-    q = _data(env).joint_pos[:, ids]
-    return q - t.ref_joint_pos[:, t.leg_pos]
+    ids = t.leg_pos
+    q = _data(env).joint_pos[:, t.target_joint_ids]
+    return q[:, ids] - t.ref_joint_pos[:, ids]
 
 
 def phase_sincos(env, action_name: str = "joint_pos") -> torch.Tensor:
@@ -99,11 +97,9 @@ def ref_tracking(env, action_name: str = "joint_pos",
                  sigma: float = 0.35) -> torch.Tensor:
     """12 腿关节跟踪参考的 exp 核（用 exp 而非 L2，避免退化成行为克隆）。"""
     t = _term(env, action_name)
-    ids = t.leg_joint_ids
-    if not ids:
-        return torch.zeros(env.num_envs, device=env.device)
-    q = _data(env).joint_pos[:, ids]
-    err = ((q - t.ref_joint_pos[:, t.leg_pos]) ** 2).mean(dim=-1)
+    ids = t.leg_pos
+    q = _data(env).joint_pos[:, t.target_joint_ids]
+    err = ((q[:, ids] - t.ref_joint_pos[:, ids]) ** 2).mean(dim=-1)
     return torch.exp(-err / (2.0 * sigma * sigma))
 
 

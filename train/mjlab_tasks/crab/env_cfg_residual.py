@@ -25,7 +25,7 @@ from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from . import mdp_extra as X
 from .env_cfg import crab_env_cfg
 from .residual_action import ResidualGaitActionCfg
-from .robot_cfg import ACTION_SCALE_MAP, REPO
+from .robot_cfg import ACTION_SCALE_MAP, DEFAULT_JOINT_POS, REPO
 
 SCAN_SIZE = (1.2, 2.0)          # 前后 ±0.6 / 左右 ±1.0（螃蟹步加宽侧向）
 TABLE_PATH = str(REPO / "train/assets/ref_tables/crab_ref_v1.npz")
@@ -134,6 +134,14 @@ def crab_residual_env_cfg(play: bool = False):
         terrain_refresh_steps=5,
         v_rate_range=(0.6, 1.6),
         phase_offset_choices=(0.0, 0.5),
+        # 相位平移：phase=0 -> 表帧 33（双支撑起点），phase=0.5 -> 帧 78，
+        # 避免 episode 一开头就要求单腿支撑。
+        phase_shift=33.0 / 90.0,
+        # α=0 时参考退化为默认站姿 —— 与基线任务「动作全零」等价，
+        # 早期训练难度和已验证的基线一致，再随课程渐变为脚本步态。
+        ref_stand=tuple(DEFAULT_JOINT_POS),
+        ramp_steps=1500 * 24,           # 1500 iter 线性升到满幅
+        alpha_fixed=1.0 if play else -1.0,   # play 直接用满幅步态
     )
 
     _rebuild_observations(cfg)

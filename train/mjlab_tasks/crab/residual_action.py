@@ -63,6 +63,14 @@ class ResidualGaitActionCfg(JointPositionActionCfg):
     rise_ema_alpha: float = 0.5
     v_rate_range: tuple[float, float] = (0.6, 1.6)
     phase_offset_choices: tuple[float, ...] = (0.0, 0.5)
+    # 表第 33 帧 / 第 78 帧是双支撑起点；相位平移后 phase=0 落在双支撑上，
+    # phase=0.5 正好落在另一个双支撑（0.5+0.3667 -> 帧 78）。
+    phase_shift: float = 0.3667
+    # 站立基准（表顺序的 29 个关节角）。α=0 时参考退化成这个姿势。
+    ref_stand: tuple[float, ...] = ()
+    # 参考幅度课程：α 从 0 线性升到 1 所需的 env step 数；0 表示不做课程。
+    ramp_steps: int = 36000
+    alpha_fixed: float = -1.0               # >=0 则固定 α（play 用 1.0）
     debug: bool = False
 
     def build(self, env) -> "ResidualGaitAction":
@@ -97,10 +105,28 @@ class ResidualGaitAction(JointPositionAction):
             perm = torch.arange(self._D, device=dev)
         self._perm = perm
 
-        # 12 条腿：在 target 顺序里的位置，以及 entity 里的 joint id
+        # target 顺序对应的 entity 关节 id（观测/奖励按它取 q，避免顺序错位）
+        raw_ids = getattr(self, "_target_ids", None)
+        self._target_ids_t = torch.as_tensor(
+            list(raw_ids) if raw_ids is not None else range(self._D),
+            dtype=torch.long, device=dev,
+        )
+
+        # ---- 站立基准（表顺序 -> target 顺序）----
+        # α=0 时 q_ref 退化成这个姿势：与基线任务「动作全零 = 默认站姿」等价，
+        # 于是残差任务在训练早期和已验证可训练的基线完全同难度。
+        if cfg.ref_stand and len(cfg.ref_stand) == len(table_names):
+            stand = torch.tensor(list(cfg.ref_stand), dtype=torch.float32, device=dev)
+            self._stand = stand[self._perm].unsqueeze(0)
+        else:
+            self._stand = None
+        self._alpha = max(0.0, float(cfg.alpha_fixed)) if cfg.alpha_fixed >= 0.0 else 0.0
+
+        # 12 条腿在 target 顺序里的位置
         self._leg_pos = torch.tensor(
             [names.index(n) for n in LEG_JOINTS if n in names], dtype=torch.long, device=dev
         ) if names else torch.arange(12, dtype=torch.long, device=dev)
+
         try:
             jn_all = getattr(self._entity, "joint_names", None) or []
             self._leg_joint_ids = [jn_all.index(n) for n in LEG_JOINTS if n in jn_all]
@@ -130,10 +156,10 @@ class ResidualGaitAction(JointPositionAction):
         # offset 必须是张量，父类在 use_default_offset=False 时会留成 float
         self._offset = torch.zeros(self._B, self._D, device=dev)
 
-        # 初始站姿：rise=0、中间 tread 的第 0 帧
-        q0 = self._table.frame0(0.0, self._table.mid_tread).to(dev)
-        self._ref_q.copy_(q0[self._perm].unsqueeze(0).expand(self._B, -1))
+        # 初始参考 = 站立基准（α=0）；alpha_fixed>=0 时直接给最终参考
+        self._ref_q.copy_(self._compose_ref(self._alpha))
         self._offset.copy_(self._ref_q)
+        self._ref_v.fill_(float(self._table.v_ref.mean()))
 
         if cfg.debug:
             print(f"[residual] target_joints={names}")
@@ -142,6 +168,11 @@ class ResidualGaitAction(JointPositionAction):
 
     # ------------------------------------------------------------ 辅助
     def _target_joint_names(self):
+        # 父类 BaseAction 在 __init__ 里给出了 _target_names（target 顺序的关节名），
+        # 这是最权威的来源，避免用 _target_ids 去索引 entity.joint_names 时的排序歧义。
+        tn = getattr(self, "_target_names", None)
+        if tn:
+            return list(tn)
         try:
             ent = self._entity
             jn = getattr(ent, "joint_names", None)
@@ -158,6 +189,23 @@ class ResidualGaitAction(JointPositionAction):
             return [jn[i] for i in idx]
         except Exception:
             return None
+
+    def _alpha_now(self) -> float:
+        """参考幅度系数 α ∈ [0,1]：线性课程，防止一开始就被步态拽倒。"""
+        if self.cfg.alpha_fixed >= 0.0:
+            return float(self.cfg.alpha_fixed)
+        n = int(self.cfg.ramp_steps)
+        if n <= 0:
+            return 1.0
+        return min(1.0, self._step_i / float(n))
+
+    def _compose_ref(self, alpha: float) -> torch.Tensor:
+        """q_ref = q_stand + α · (q_gait(phase) − q_stand)，返回 target 顺序 [B,J]。"""
+        q_gait, _ = self._table.select(self._rise, self._tread, self.effective_phase)
+        q_gait = q_gait[:, self._perm]
+        if self._stand is None:
+            return q_gait
+        return self._stand + alpha * (q_gait - self._stand)
 
     def _read_heights(self) -> torch.Tensor | None:
         """从 terrain_scan 传感器取「躯干高出地形」的高度（米），[B,N]。"""
@@ -227,9 +275,14 @@ class ResidualGaitAction(JointPositionAction):
         if self._step_i % max(1, int(self.cfg.terrain_refresh_steps)) == 0:
             self._update_terrain()
 
-        # ② 取当前相位的参考（先取，再推进）
-        q_ref, v_ref = self._table.select(self._rise, self._tread, self._phase)
-        self._ref_q.copy_(q_ref[:, self._perm])
+        # ② 取当前相位的参考（先取，再推进）；α 课程把参考从站姿渐变到步态
+        alpha = self._alpha_now()
+        self._alpha = alpha
+        q_ref, v_ref = self._table.select(self._rise, self._tread, self.effective_phase)
+        q_ref = q_ref[:, self._perm]
+        if self._stand is not None:
+            q_ref = self._stand + alpha * (q_ref - self._stand)
+        self._ref_q.copy_(q_ref)
         self._ref_v.copy_(v_ref)
 
         # ③ 相位速率：指令速度 / 参考步速；起步 HOLD 段冻结
@@ -272,6 +325,20 @@ class ResidualGaitAction(JointPositionAction):
         return self._phase
 
     @property
+    def effective_phase(self) -> torch.Tensor:
+        """实际用于查表的相位（含双支撑平移）。观测与查表必须用同一个。"""
+        return torch.remainder(self._phase + float(self.cfg.phase_shift), 1.0)
+
+    @property
+    def target_joint_ids(self) -> torch.Tensor:
+        """target 顺序的 entity 关节 id，供观测/奖励按同一顺序取 q。"""
+        return self._target_ids_t
+
+    @property
+    def ref_alpha(self) -> float:
+        return float(self._alpha)
+
+    @property
     def rise_est(self) -> torch.Tensor:
         return self._rise
 
@@ -281,5 +348,5 @@ class ResidualGaitAction(JointPositionAction):
 
     @property
     def phase_sincos(self) -> torch.Tensor:
-        ang = self._phase * (2.0 * 3.141592653589793)
+        ang = self.effective_phase * (2.0 * 3.141592653589793)
         return torch.stack([torch.sin(ang), torch.cos(ang)], dim=-1)
