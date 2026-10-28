@@ -14,10 +14,15 @@ phys 物理回放：用 PD + 重力前馈去跟踪这条 qpos 轨迹，跑真实
             脚本控制器补不上。摔得越晚说明轨迹越接近可行。
 
 policy 策略回放：加载训练导出的 ONNX 策略，闭环跑真实物理。
-            观测按 mjlab 训练时的 290 维布局拼装：
-              base_lin_vel(3) + base_ang_vel(3) + projected_gravity(3)
-              + joint_pos(31) + joint_vel(31) + last_action(29)
-              + command(3) + height_scan(187)
+            两套观测布局，必须与训练任务对应：
+              --policy onnx          基线任务 290 维：
+                lin_vel(3)+ang_vel(3)+gravity(3)+joint_pos(31)+joint_vel(31)
+                +last_action(29)+command(3)+height_scan(187)
+              --policy onnx-residual 残差任务 393 维：
+                lin_vel(3)+ang_vel(3)+gravity(3)+joint_pos(31)+ref_err(12)
+                +joint_vel(31)+last_action(29)+command(3)+phase(2)
+                +ref_meta(3)+height_scan(273)
+                动作走 q_target = q_ref(rise,tread,phase) + clip(scale·a, ±clip_rad)
             执行器用 mjlab 同款 <position>（kp/kv 取自 elf3_play 真值）。
 
 用法
@@ -27,7 +32,9 @@ policy 策略回放：加载训练导出的 ONNX 策略，闭环跑真实物理�
   python crab_replay.py --mode phys           # 物理回放（看它什么时候摔）
   python crab_replay.py --record out/crab     # 离屏渲染，存 PNG 序列
   python crab_replay.py --traj xxx.npz --scene xxx.xml
-  python crab_replay.py --policy onnx --onnx policy.onnx   # 跑训练好的策略
+  python crab_replay.py --policy onnx --onnx policy.onnx   # 基线策略（290 维）
+  python crab_replay.py --policy onnx-residual --onnx res.onnx --cmd-vy 0.18
+                                              # 残差策略（393 维，会自己估 rise）
 
 窗口快捷键
 ----------
@@ -48,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -468,6 +476,274 @@ def run_policy(m, d, *, onnx_path, cmd=(0.0, 0.25, 0.0), steps=2000,
     return dy
 
 
+# ---------------------------------------------------------------- 残差策略回放
+# 观测布局必须与 train/mjlab_tasks/crab/env_cfg_residual.py 的 ACTOR_ORDER 严格一致：
+#   base_lin_vel(3) + base_ang_vel(3) + projected_gravity(3) + joint_pos(31)
+#   + joint_pos_ref_err(12) + joint_vel(31) + actions(29) + command(3)
+#   + phase(2) + ref_meta(3) + height_scan(273)  =  393
+# 动作：q_target = q_ref(rise,tread,phase) + clip(scale·a, ±clip_rad)
+RES_SCAN_SIZE = (1.2, 2.0)          # 前后 ±0.6 / 左右 ±1.0（与训练一致）
+RES_SCAN_RES = 0.1                  # -> 13 x 21 = 273
+RES_PHASE_SHIFT = 33.0 / 90.0       # phase=0 落在双支撑起点（表帧 33）
+RES_PERIOD_FRAMES = 90
+RES_HOLD_STEPS = 25                 # 前 0.5 s 冻结相位，与训练一致
+RES_V_RATE = (0.6, 1.6)
+_CLIP_LEGS, _CLIP_WAIST, _CLIP_ARMS = 0.30, 0.15, 0.15
+_WAIST_JOINTS = ("waist_y_joint", "waist_x_joint", "waist_z_joint")
+
+
+def _clip_rad_for(name: str) -> float:
+    if name in K.LEG_JOINTS:
+        return _CLIP_LEGS
+    if name in _WAIST_JOINTS:
+        return _CLIP_WAIST
+    return _CLIP_ARMS
+
+
+def _find_repo_file(rel: str):
+    """从脚本位置向上找仓库内文件；也支持 ELF3_REPO 环境变量。"""
+    here = Path(__file__).resolve()
+    for p in (here, *here.parents):
+        if (p / rel).is_file():
+            return p / rel
+    env = os.environ.get("ELF3_REPO")
+    if env and (Path(env) / rel).is_file():
+        return Path(env) / rel
+    return None
+
+
+def _load_ref_table():
+    """直接按文件加载 ref_table.py（它只依赖 numpy/torch，不 import mjlab）。"""
+    import importlib.util
+    tbl = _find_repo_file("train/assets/ref_tables/crab_ref_v1.npz")
+    mod = _find_repo_file("train/mjlab_tasks/crab/ref_table.py")
+    if tbl is None or mod is None:
+        raise SystemExit(
+            "[错误] 找不到参考表或 ref_table.py。\n"
+            "       期望 train/assets/ref_tables/crab_ref_v1.npz 与 train/mjlab_tasks/crab/ref_table.py\n"
+            "       若仓库不在脚本上层目录，设 ELF3_REPO=<仓库根>")
+    spec = importlib.util.spec_from_file_location("crab_ref_table", mod)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m.RefTable(tbl)
+
+
+def run_policy_residual(m, d, *, onnx_path, cmd=(0.0, 0.20, 0.0), steps=2000,
+                        dt=0.02, decimation=10, torso_id=0, dist=2.8, az=160.0,
+                        el=-14.0, track=True, record=None, every=4, gui=True,
+                        width=640, height=360, spawn_y=0.30, spawn_z=1.0339,
+                        max_dist=5.0, table=None):
+    """残差策略闭环：q_target = q_ref(相位) + 限幅残差。返回躯干 y 位移。"""
+    import onnxruntime as ort
+    import torch
+
+    sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    inp = sess.get_inputs()[0]
+    print(f"[policy] ONNX {Path(onnx_path).name}  输入 {inp.name} {inp.shape}")
+
+    tb = table if table is not None else _load_ref_table()
+    names29 = list(_JOINT_NAMES)
+    scale29 = np.asarray(_ACTION_SCALE, dtype=float)
+    default29 = np.asarray(_DEFAULT_JOINT_POS, dtype=float)
+    clip29 = np.array([_clip_rad_for(n) for n in names29])
+    leg_pos = np.array([names29.index(n) for n in K.LEG_JOINTS])
+
+    # 机器人几何体 -> group 1；height_scan 只打地形（group 0）
+    for g in range(m.ngeom):
+        if m.geom_bodyid[g] != 0:
+            m.geom_group[g] = 1
+
+    # 31 个铰链关节（模型顺序）与 29 个执行器关节（_JOINT_NAMES 顺序）
+    hinge = [j for j in range(m.njnt) if m.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE]
+    j_names = [m.joint(j).name for j in hinge]
+    q_adr = np.array([m.jnt_qposadr[j] for j in hinge])
+    v_adr = np.array([m.jnt_dofadr[j] for j in hinge])
+    default_all = np.zeros(len(hinge))
+    for i, n in enumerate(j_names):
+        if n in names29:
+            default_all[i] = default29[names29.index(n)]
+
+    mid = mujoco.mj_name2id
+    q29_adr = np.array([m.jnt_qposadr[mid(m, mujoco.mjtObj.mjOBJ_JOINT, n)] for n in names29])
+    v29_adr = np.array([m.jnt_dofadr[mid(m, mujoco.mjtObj.mjOBJ_JOINT, n)] for n in names29])
+    act_joint = [m.actuator(i).trnid[0] for i in range(m.nu)]
+    act_names = [m.joint(j).name for j in act_joint]
+    assert act_names == names29, f"执行器顺序与 _JOINT_NAMES 不一致：{act_names[:3]}..."
+
+    # 扫描网格：y 外层、x 内层（与 mjlab GridPattern 一致）
+    nx = int(round(RES_SCAN_SIZE[0] / RES_SCAN_RES)) + 1     # 13
+    ny = int(round(RES_SCAN_SIZE[1] / RES_SCAN_RES)) + 1     # 21
+    xs = -RES_SCAN_SIZE[0] / 2 + np.arange(nx) * RES_SCAN_RES
+    ys = -RES_SCAN_SIZE[1] / 2 + np.arange(ny) * RES_SCAN_RES
+    gy, gx = np.meshgrid(ys, xs, indexing="ij")              # [ny, nx]
+    scan_off = np.stack([gx.ravel(), gy.ravel()], axis=1)    # 行 = iy*nx+ix
+    down = np.array([0.0, 0.0, -1.0])
+    gmask = np.array([1, 0, 0, 0, 0, 0], dtype=np.uint8)
+    gid = np.zeros(1, dtype=np.int32)
+    nrm = np.zeros(3, dtype=np.float64)
+
+    def scan_raw():
+        """返回米制高度（躯干 z - 命中 z），miss -> max_dist。"""
+        r = d.xmat[torso_id].reshape(3, 3)
+        yaw = _yaw_only(r)
+        p0 = d.xpos[torso_id]
+        out = np.empty(scan_off.shape[0])
+        for i, (ox, oy) in enumerate(scan_off):
+            p = p0 + yaw @ np.array([ox, oy, 0.0])
+            dist = mujoco.mj_ray(m, d, p, down, gmask, True, -1, gid, nrm)
+            out[i] = dist if dist >= 0.0 else max_dist
+        return out
+
+    # ---- 初始状态：参考表 phase=0（含双支撑平移）的姿势 ----
+    phase = 0.0
+    rise, tread = 0.0, float(tb.mid_tread)
+    v_ref = float(tb.v_ref[0, tb.T // 2])
+    q_ref = tb.select(torch.tensor([rise]), torch.tensor([tread]),
+                      torch.tensor([phase + RES_PHASE_SHIFT]))[0][0].numpy()
+
+    d.qpos[:] = 0.0
+    d.qpos[0:3] = [0.0, spawn_y, spawn_z]
+    d.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
+    for i, n in enumerate(j_names):
+        d.qpos[q_adr[i]] = q_ref[names29.index(n)] if n in names29 else 0.0
+    d.qvel[:] = 0.0
+    d.ctrl[:] = q_ref
+    mujoco.mj_forward(m, d)
+
+    last_action = np.zeros(29)
+    cmd_vec = np.asarray(cmd, dtype=float)
+
+    def ref_meta():
+        return np.array([rise * 5.0, tread * 2.5, v_ref * 5.0])
+
+    def build_obs():
+        lin = _sensor_vec(m, d, "torso_lin_vel", "imu_lin_vel")
+        ang = _sensor_vec(m, d, "torso_ang_vel", "imu_ang_vel")
+        r = d.xmat[torso_id].reshape(3, 3)
+        grav = r.T @ np.array([0.0, 0.0, -1.0])
+        q_all = d.qpos[q_adr] - default_all
+        qd_all = d.qvel[v_adr]
+        q29 = d.qpos[q29_adr]
+        err = q29[leg_pos] - q_ref[leg_pos]
+        ang_p = 2.0 * np.pi * ((phase + RES_PHASE_SHIFT) % 1.0)
+        ph = np.array([np.sin(ang_p), np.cos(ang_p)])
+        hs = scan_raw() / max_dist
+        return np.concatenate([lin, ang, grav, q_all, err, qd_all,
+                               last_action, cmd_vec, ph, ref_meta(), hs])
+
+    obs = build_obs()
+    print(f"  残差模式：obs_dim={obs.size}（训练 393）  表 {tb.R}x{tb.T} "
+          f"phase_shift={RES_PHASE_SHIFT:.3f}")
+    if inp.shape and len(inp.shape) == 2 and inp.shape[1] not in (-1, obs.size):
+        raise SystemExit(f"[错误] ONNX 输入维度 {inp.shape[1]} != 观测 {obs.size}")
+
+    renderer = cam = None
+    v = None
+    if record is not None:
+        from PIL import Image
+        rec = Path(record)
+        rec.mkdir(parents=True, exist_ok=True)
+        w = int(min(width, int(m.vis.global_.offwidth) or 640))
+        h = int(min(height, int(m.vis.global_.offheight) or 480))
+        renderer = mujoco.Renderer(m, h, w)
+        cam = make_cam(lookat=d.xpos[torso_id], dist=dist, az=az, el=el)
+        print(f"  离屏 {w}x{h} -> {rec}")
+    elif gui:
+        try:
+            if mj_viewer is None:
+                raise RuntimeError("mujoco.viewer 不可用")
+            v = mj_viewer.launch_passive(m, d)
+            v.cam.lookat[:] = d.xpos[torso_id]
+            v.cam.distance, v.cam.azimuth, v.cam.elevation = dist, az, el
+        except Exception as e:
+            print(f"[跳过] 打不开窗口（{e}），改为无窗口运行")
+
+    y0 = float(d.xpos[torso_id][1])
+    z0 = float(d.xpos[torso_id][2])
+    dt_sim = float(m.opt.timestep) * decimation
+    t_wall = time.perf_counter()
+    fell_at = None
+
+    for k in range(steps):
+        out = sess.run(None, {inp.name: obs[None].astype(np.float32)})
+        raw = np.asarray(out[0]).reshape(-1)[:29].astype(float)
+        # 与训练一致：先限幅到 action 空间，再乘 scale（等效残差 <= clip_rad）
+        action = np.clip(raw, -clip29 / scale29, clip29 / scale29)
+        last_action = action.copy()
+
+        delta = np.clip(scale29 * action, -clip29, clip29)
+        target = q_ref + delta
+        for i, n in enumerate(names29):
+            j = mid(m, mujoco.mjtObj.mjOBJ_JOINT, n)
+            if m.jnt_limited[j]:
+                target[i] = float(np.clip(target[i], *m.jnt_range[j]))
+        d.ctrl[:] = target
+        for _ in range(decimation):
+            mujoco.mj_step(m, d)
+
+        # 地形估计（每 5 步）+ 相位推进（与训练同逻辑）
+        if k % 5 == 0:
+            hs_raw = scan_raw()
+            with torch.no_grad():
+                rr, tt, ok = tb.estimate(torch.tensor(hs_raw[None], dtype=torch.float32),
+                                         nx=nx, ny=ny, size_y=float(RES_SCAN_SIZE[1]),
+                                         res=float(RES_SCAN_RES))
+            rr, tt, ok = float(rr[0]), float(tt[0]), bool(ok[0])
+            if ok:
+                rise = 0.5 * rr + 0.5 * rise
+                tread = tt
+            else:
+                rise = 0.9 * rise
+            rise = float(np.clip(rise, float(tb.rise[0]), float(tb.rise[-1])))
+            v_ref = float(tb.select(torch.tensor([rise]), torch.tensor([tread]),
+                                    torch.tensor([0.0]))[1][0])
+        rate = float(np.clip(abs(cmd_vec[1]) / max(v_ref, 1e-3), *RES_V_RATE))
+        if k < RES_HOLD_STEPS:
+            rate = 0.0
+        phase = (phase + rate / RES_PERIOD_FRAMES) % 1.0
+        q_ref = tb.select(torch.tensor([rise]), torch.tensor([tread]),
+                          torch.tensor([(phase + RES_PHASE_SHIFT) % 1.0]))[0][0].numpy()
+
+        obs = build_obs()
+
+        if renderer is not None and k % max(1, every) == 0:
+            from PIL import Image
+            cam.lookat[:] = d.xpos[torso_id]
+            renderer.update_scene(d, camera=cam)
+            Image.fromarray(renderer.render()).save(rec / f"policy_{k:05d}.png")
+        elif v is not None:
+            if track:
+                v.cam.lookat[:] = d.xpos[torso_id]
+            v.sync()
+            if not v.is_running():
+                break
+            want = t_wall + (k + 1) * dt_sim
+            slp = want - time.perf_counter()
+            if slp > 0:
+                time.sleep(slp)
+
+        z = float(d.xpos[torso_id][2])
+        if fell_at is None and (z < 0.55 or float(d.xpos[torso_id][1]) < spawn_y - 0.5):
+            fell_at = k * dt_sim
+        if k % 100 == 0:
+            print(f"  t={k * dt_sim:5.1f}s  y={d.xpos[torso_id][1]:.2f}  "
+                  f"z={z:.2f}  rise={rise:.2f}  tread={tread:.2f}  "
+                  f"phase={(phase + RES_PHASE_SHIFT) % 1.0:.2f}", end="\r", flush=True)
+
+    if v is not None:
+        v.close()
+    dy = float(d.xpos[torso_id][1]) - y0
+    dz = float(d.xpos[torso_id][2]) - z0
+    print(f"\n[OK] 残差回放 {steps} 控制步（{steps * dt_sim:.1f}s）  "
+          f"Δy={dy:+.2f} m  Δz={dz:+.2f} m  末帧 z={d.xpos[torso_id][2]:.2f}")
+    if fell_at is not None:
+        print(f"[!] 第 {fell_at:.2f} s 判定为摔倒（z<0.55 或偏离 >0.5 m）")
+    if renderer is not None:
+        print(f"     PNG -> {rec}  合成: ffmpeg -framerate {1.0 / (dt_sim * max(1, every)):.0f} "
+              f"-i policy_%05d.png -pix_fmt yuv420p policy.mp4")
+    return dy
+
+
 # ---------------------------------------------------------------- 入口
 def load_traj(path: Path):
     z = np.load(str(path), allow_pickle=True)
@@ -500,17 +776,19 @@ def main() -> None:
     ap.add_argument("--kd-scale", type=float, default=1.0, help="phys: 微分增益缩放")
     ap.add_argument("--max-time", type=float, default=None, help="phys: 最长仿真时间 s")
     # policy 专用
-    ap.add_argument("--policy", default="none", choices=["none", "onnx"],
-                    help="onnx=用训练好的 ONNX 策略闭环跑（不读 npz）")
+    ap.add_argument("--policy", default="none", choices=["none", "onnx", "onnx-residual"],
+                    help="onnx=基线策略(290 维)；onnx-residual=残差策略(393 维)")
     ap.add_argument("--onnx", default=None, help="policy: ONNX 策略路径")
     ap.add_argument("--cmd-vy", type=float, default=0.25, help="policy: 侧向速度指令 m/s")
     ap.add_argument("--spawn-y", type=float, default=0.30, help="policy: 初始 y 位置 m")
+    ap.add_argument("--spawn-z", type=float, default=1.0339,
+                    help="policy: 初始基座高度 m（残差任务训练也是 1.0339）")
     ap.add_argument("--steps", type=int, default=2000, help="policy: 控制步数（50Hz，2000=40s）")
     args = ap.parse_args()
 
-    if args.policy == "onnx":
+    if args.policy in ("onnx", "onnx-residual"):
         if not args.onnx:
-            raise SystemExit("[错误] --policy onnx 需要 --onnx <policy.onnx>")
+            raise SystemExit(f"[错误] --policy {args.policy} 需要 --onnx <policy.onnx>")
         onnx_path = Path(args.onnx)
         if not onnx_path.is_file():
             raise SystemExit(f"[错误] 找不到 ONNX {onnx_path}")
@@ -521,12 +799,16 @@ def main() -> None:
         d = mujoco.MjData(m)
         torso = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "torso_link")
         print(f"场景 {Path(args.scene).name}   策略 {onnx_path.name}")
-        run_policy(m, d, onnx_path=onnx_path, cmd=(0.0, args.cmd_vy, 0.0),
-                   steps=args.steps, decimation=10, torso_id=torso,
-                   dist=args.dist, az=args.az, el=args.el,
-                   track=not args.no_track, record=args.record,
-                   every=max(1, args.every), gui=not args.no_gui,
-                   width=args.width, height=args.height, spawn_y=args.spawn_y)
+        runner = run_policy_residual if args.policy == "onnx-residual" else run_policy
+        kw = dict(onnx_path=onnx_path, cmd=(0.0, args.cmd_vy, 0.0),
+                  steps=args.steps, decimation=10, torso_id=torso,
+                  dist=args.dist, az=args.az, el=args.el,
+                  track=not args.no_track, record=args.record,
+                  every=max(1, args.every), gui=not args.no_gui,
+                  width=args.width, height=args.height, spawn_y=args.spawn_y)
+        if args.policy == "onnx-residual":
+            kw["spawn_z"] = args.spawn_z
+        runner(m, d, **kw)
         return
 
     tp = Path(args.traj)

@@ -164,10 +164,11 @@ python web/tools/bake_crab.py
 ## 8. 后续可做（按优先级）
 
 1. **残差动作**：把 `q_ref(t)`（`crab_climb.py` 的四相位轨迹）作为基准，策略只输出 Δq。
-   比从零学快很多，也更稳。需要自定义 `ActionTerm`。
+   ✅ **已实现**，见第 9 节。
 2. **落脚点奖励**：用 `terrain_scan` 查踏面中心，惩罚踩边。
 3. **侧向专门塑形**：直接奖励 world +Y 位移，而不只靠速度跟踪。
-4. 把 ONNX 接进 `crab_replay.py --policy onnx`。
+   ✅ 已实现 `forward_progress_y`。
+4. ONNX 回放 ✅ 已实现：`--policy onnx`（290 维）与 `--policy onnx-residual`（393 维）。
 
 ---
 
@@ -246,3 +247,30 @@ q_ref = q_stand + α · (q_gait(phase) − q_stand)      α: 0 → 1，1500 iter
 2. 训练看三条曲线：`Episode_Reward/ref_tracking` 应缓慢上升、
    `Episode_Reward/forward_progress_y` > 0、`Curriculum/terrain_levels/mean` 开始涨。
 3. 1500 iter（α 到 1）之后再判断步态像不像螃蟹步。
+
+### 9.5 本地回放残差策略（393 维 ONNX）
+
+```bash
+python train/export_onnx.py --task Elf3-Crab-Residual \
+  --checkpoint logs/rsl_rl/elf3_crab/<run>/model_XXXX.pt \
+  --out train/checkpoints/elf3_crab_residual.onnx
+
+python sim/vendor/bxi_controller_ros2/src/bxi_example_py_elf3/launch/crab_replay.py \
+  --policy onnx-residual --onnx train/checkpoints/elf3_crab_residual.onnx \
+  --cmd-vy 0.18 --steps 2000 --no-gui
+```
+
+`--policy onnx-residual` 与 `--policy onnx` 的区别：
+
+| | 基线（onnx） | 残差（onnx-residual） |
+|---|---|---|
+| 观测 | 290 维，height_scan 1.6×1.0 = 187 | **393 维**，height_scan 1.2×2.0 = **273** |
+| 额外观测 | — | `joint_pos_ref_err(12)`、`phase sin/cos(2)`、`ref_meta(3)` |
+| 动作 | `default + scale·a` | **`q_ref(rise,tread,phase) + clip(scale·a, ±clip_rad)`** |
+| 地形 | 无关 | 用 273 条射线实时估 `rise/tread`，EMA 平滑 |
+
+残差限幅：腿 ±0.30 rad、腰 ±0.15、臂 ±0.15；相位速率 = `clip(|cmd_y|/v_ref, 0.6, 1.6)`，
+前 25 步冻结（与训练一致）。`--spawn-z` 默认 `1.0339`，和训练 reset 一致。
+
+> 找不到参考表时会提示设 `ELF3_REPO=<仓库根>`；表本身在
+> `train/assets/ref_tables/crab_ref_v1.npz`。
