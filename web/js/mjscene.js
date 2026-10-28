@@ -44,12 +44,14 @@ export class MjScene {
     this.objs = new Array(model.ngeom); // gi -> THREE.Mesh | null
     this.meshGeomIds = [];
     this.envGeomIds = [];   // worldbody 下的盒子等（楼梯）
+    this.crabGeomIds = [];  // worldbody 下名字以 crab_ 开头的盒子（螃蟹步台阶，独立分组）
     this.floorGeomIds = []; // worldbody 下的平面
     this.robotGeomIds = [];
 
     this.opts = {
       showRobot: true,
       showStairs: true,
+      showCrab: false,      // 螃蟹步台阶默认隐藏：它离出生点较远，平时只会碍眼
       showFloor: true,
       showCollision: false,
     };
@@ -122,7 +124,13 @@ export class MjScene {
           roughness: 0.78,
           envMapIntensity: 0.5,
         });
-        if (inWorld) this.envGeomIds.push(gi);
+        if (inWorld) {
+          // 螃蟹步台阶按名字前缀单独分组：两套地形相距 4 m 以上，但共用同一个
+          // 编译好的模型，回放时只显示当前这一段用到的那套。
+          const gname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM.value, gi) || '';
+          if (gname.startsWith('crab_')) this.crabGeomIds.push(gi);
+          else this.envGeomIds.push(gi);
+        }
       } else if (type === GEOM_SPHERE) {
         geometry = new THREE.SphereGeometry(model.geom_size[gi * 3], 28, 18);
       } else if (type === GEOM_CAPSULE) {
@@ -311,6 +319,10 @@ export class MjScene {
     for (const gi of this.envGeomIds) {
       const obj = this.objs[gi];
       if (obj) obj.visible = o.showStairs;
+    }
+    for (const gi of this.crabGeomIds) {
+      const obj = this.objs[gi];
+      if (obj) obj.visible = o.showCrab;
     }
     for (const gi of this.floorGeomIds) {
       const obj = this.objs[gi];

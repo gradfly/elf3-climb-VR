@@ -39,7 +39,9 @@ HERE = Path(__file__).resolve().parent      # web/tools
 WEB = HERE.parent                           # web/
 ASSETS = WEB / "assets"
 
-DEFAULT_WS = Path(r"E:/mujoco/climb stairs")
+# 工作区 = 包含 vendor/ 的目录（本仓库里是 <repo>/sim）。
+#   bake_climb.py 在 <repo>/web/tools/ 下，故 HERE.parent.parent = <repo>
+DEFAULT_WS = HERE.parent.parent / "sim"
 
 
 def setup_climb_env(ws: Path):

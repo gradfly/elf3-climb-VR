@@ -5,10 +5,21 @@ __pycache__/
 .venv/
 venv/
 
+# ---- node ----
+node_modules/
+
 # ---- logs / build artifacts ----
 *.log
 *.rknn
 *.rknn.build.lock
+# MuJoCo 编译出的二进制模型，71 MB，由 XML 现场编译，不入库
+*.mjb
+
+# ---- 本地自签证书（web/tools/selfsign.mjs 每次启动自动生成）----
+web/certs/*.pem
+
+# ---- 本地工具/截图 ----
+.workbuddy/
 
 # ---- editor / OS ----
 .DS_Store

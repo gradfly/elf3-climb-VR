@@ -111,5 +111,12 @@
 
     <!-- 终点线标记 -->
     <site name="ut_compact_finish" type="box" pos="13.2 0 0.006" size="0.18 0.9 0.006" rgba="0.1 0.35 1.0 0.55"/>
+
+    <!-- ---- 螃蟹步横移楼梯（另一套地形，沿 +Y 上升，与上面的 +X 障碍区不重叠） ----
+         文件由 web/tools/bake_crab.py 从 gen_crab_stairs.py 的输出自动抽取，
+         geom 名统一以 crab_ 开头；js/mjscene.js 按这个名字前缀分组，
+         由「显示 → 螃蟹步台阶」复选框单独控制显隐。
+         地形本身在 y≈1.5~6.0、x∈[-0.6,0.6]，与 x≈4.5~13.2 的紧凑障碍区互不干扰。 -->
+    <include file="scene_crab.xml"/>
   </worldbody>
 </mujoco>

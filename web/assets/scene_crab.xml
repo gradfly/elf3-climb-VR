@@ -1,0 +1,19 @@
+<mujocoinclude>
+  <!-- 自动生成，勿手工编辑。
+       来源：sim/.../terrains/universal_test/crab_stairs_obstacles.xml
+       由 web/tools/bake_crab.py 生成（seed=42）。
+       本片段被 scene_bx.xml 的 <worldbody> 末尾 include，材质 ut_concrete
+       已在那里定义；网页端按名字前缀 crab_ 单独分组显隐。 -->
+  <geom name="crab_up_0" type="box" pos="0 1.6774 0.0885" size="0.6000 0.1774 0.0885" material="ut_concrete" friction="1.05 0.01 0.001"/>
+  <geom name="crab_up_1" type="box" pos="0 2.0407 0.1939" size="0.6000 0.1859 0.1939" material="ut_concrete" friction="1.05 0.01 0.001"/>
+  <geom name="crab_up_2" type="box" pos="0 2.3359 0.3173" size="0.6000 0.1094 0.3173" material="ut_concrete" friction="1.05 0.01 0.001"/>
+  <geom name="crab_up_3" type="box" pos="0 2.6215 0.4284" size="0.6000 0.1761 0.4284" material="ut_concrete" friction="1.05 0.01 0.001"/>
+  <geom name="crab_up_4" type="box" pos="0 2.9104 0.5176" size="0.6000 0.1128 0.5176" material="ut_concrete" friction="1.05 0.01 0.001"/>
+  <geom name="crab_up_5" type="box" pos="0 3.1603 0.6379" size="0.6000 0.1371 0.6379" material="ut_concrete" friction="1.05 0.01 0.001"/>
+  <geom name="crab_landing" type="box" pos="0 3.4731 0.6379" size="0.6000 0.1758 0.6379" material="ut_concrete" friction="1.05 0.01 0.001"/>
+  <geom name="crab_dn_0" type="box" pos="0 3.8120 0.5194" size="0.6000 0.1632 0.5194" material="ut_concrete" friction="1.05 0.01 0.001"/>
+  <geom name="crab_dn_1" type="box" pos="0 4.1510 0.4148" size="0.6000 0.1758 0.4148" material="ut_concrete" friction="1.05 0.01 0.001"/>
+  <geom name="crab_dn_2" type="box" pos="0 4.4623 0.3181" size="0.6000 0.1355 0.3181" material="ut_concrete" friction="1.05 0.01 0.001"/>
+  <geom name="crab_dn_3" type="box" pos="0 4.7948 0.2094" size="0.6000 0.1971 0.2094" material="ut_concrete" friction="1.05 0.01 0.001"/>
+  <geom name="crab_dn_4" type="box" pos="0 5.1812 0.1187" size="0.6000 0.1893 0.1187" material="ut_concrete" friction="1.05 0.01 0.001"/>
+</mujocoinclude>

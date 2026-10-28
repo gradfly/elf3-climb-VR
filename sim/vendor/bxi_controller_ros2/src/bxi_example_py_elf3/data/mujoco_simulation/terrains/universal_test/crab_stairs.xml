@@ -1,0 +1,6 @@
+<mujocoinclude>
+  <!-- 螃蟹步横移楼梯入口。台阶由 gen_crab_stairs.py 生成，勿手工编辑。 -->
+  <include file="assets.xml"/>
+  <include file="base.xml"/>
+  <include file="crab_stairs_obstacles.xml"/>
+</mujocoinclude>

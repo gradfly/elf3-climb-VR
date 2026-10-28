@@ -23,7 +23,10 @@ from types import SimpleNamespace
 
 import numpy as np
 
-WS = Path(r"E:/mujoco/climb stairs")
+# 工作区 = 包含 vendor/ 的目录（本仓库里是 sim/）。由 __file__ 推导，避免硬编码绝对路径失效。
+#   __file__ = <WS>/vendor/bxi_controller_ros2/src/bxi_example_py_elf3/launch/climb_stairs.py
+#   parents: [0]=launch [1]=bxi_example_py_elf3 [2]=src [3]=bxi_controller_ros2 [4]=vendor [5]=<WS>
+WS = Path(__file__).resolve().parents[5]
 FW = WS / "vendor" / "bxi_controller_ros2" / "src" / "bxi_example_py_elf3"
 # depth.py / depth_projection.py / assets/*.onnx 现已归入 mod 目录（2026-10-13 搬迁后）
 MOD = FW / "mods" / "com.bxi.normal_depth"
@@ -199,7 +202,7 @@ def run(args):
 
     # ---------- 初始化：默认站姿 ----------
     mujoco.mj_resetData(model, data)
-    data.qpos[0:3] = [args.spawn_x, 0.0, 1.10]
+    data.qpos[0:3] = [args.spawn_x, 0.0, args.spawn_z]
     data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
     data.qpos[qadr] = q_default
     mujoco.mj_forward(model, data)
@@ -393,6 +396,9 @@ def main():
     ap.add_argument("--depth-period", type=float, default=0.04,
                     help="深度图渲染周期 s（策略默认更新周期 0.05）")
     ap.add_argument("--spawn-x", type=float, default=0.0, help="出生点 x（平地区 0~4m）")
+    ap.add_argument("--spawn-z", type=float, default=1.0339,
+                    help="出生高度 m。ISAAC 默认位形(hip_y=-0.3/knee=0.6/ankle_y=-0.3)下"
+                         "脚底贴地的实测值；旧值 1.10 会让脚悬空 6.6cm")
     ap.add_argument("--yaw-hold", action=argparse.BooleanOptionalAction, default=True,
                     help="航向保持（推荐开，防步态漂移）")
     ap.add_argument("--record", action=argparse.BooleanOptionalAction, default=False,

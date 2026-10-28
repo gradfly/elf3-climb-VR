@@ -157,6 +157,11 @@ const VIEWS = {
   side:  { pos: [2.90, 1.35, 0.0], target: [0, 0.95, 0] },
   head:  { pos: [0.95, 1.42, 1.35], target: [0, 1.22, 0] },
   top:   { pos: [0.01, 5.20, 3.10], target: [0, 0.80, 0] },
+  // 螃蟹步台阶沿 MuJoCo +Y 上升，剖面在 YZ 平面上，所以虚拟相机要站在 +X 侧
+  // （three 的 -Z 方向）才看得见"台阶"而不是一堵斜面墙。下面这组等于
+  // "机器人中心 +（0, 1.5, -6.0）"，既适合开视角跟随时做追尾机位，
+  // 关掉跟随时也能看到起步段和左侧整条楼梯。
+  crab:  { pos: [-1.35, 2.50, -6.00], target: [-1.35, 1.00, 0] },
   wide:  { pos: [7.20, 4.60, 10.5], target: [1.6, 0.90, 0] },
 };
 
@@ -336,7 +341,7 @@ async function boot() {
 }
 
 // ---------------------------------------------------------------- 运动仿真回放
-/** URL 参数：?motion=<off|fight_policy|fight_ref|1> &speed=0.5 &follow=0/1 */
+/** URL 参数：?motion=<off|fight_policy|fight_ref|climb_policy|crab|1> &speed=0.5 &follow=0/1 */
 async function applyMotionFromQuery() {
   const q = new URLSearchParams(location.search);
   const speed = q.get('speed');
@@ -366,6 +371,14 @@ function restoreStandPose() {
   renderer.shadowMap.needsUpdate = true;
 }
 
+/** 切换两套地形的显隐（见 index.html 的「显示」区） */
+function setTerrain({ stairs, crab }) {
+  const s = $('opt-stairs');
+  const c = $('opt-crab');
+  if (s && s.checked !== stairs) { s.checked = stairs; s.dispatchEvent(new Event('change')); }
+  if (c && c.checked !== crab) { c.checked = crab; c.dispatchEvent(new Event('change')); }
+}
+
 /**
  * 切换回放数据（'off' = 关闭）。
  * 回放与本地 mj_step 物理互斥：开回放会自动关掉物理开关。
@@ -378,11 +391,14 @@ async function setMotion(name, { hideStairs = true } = {}) {
   if (name === 'off' || !name) {
     motion = null;
     restoreStandPose();
+    setTerrain({ stairs: true, crab: false });      // 回到默认：只显示紧凑障碍
     $('hud-motion').textContent = '—';
     refreshHudMode();
     renderer.shadowMap.autoUpdate = simulating;
-    $('motion-note').textContent =
-      '回放数据由 tools/bake_motion.py 在本机跑一遍 MuJoCo 仿真后录制。';
+    $('motion-note').innerHTML =
+      '回放数据由 <code>tools/bake_motion.py</code>（打拳）/ '
+      + '<code>tools/bake_climb.py</code>（爬楼梯）/ '
+      + '<code>tools/bake_crab.py</code>（螃蟹步横移）在本机跑一遍仿真后录制。';
     return null;
   }
 
@@ -415,18 +431,18 @@ async function setMotion(name, { hideStairs = true } = {}) {
   motion.restart();
   $('btn-motion-pause').textContent = '暂停';
 
-  // 录制的打拳回放是在平地上跑的；网页场景里的地形只是静态摆设，隐藏掉避免视觉穿模。
-  // 「策略仿真 · 爬楼梯」那段回放本身就踩在这块地形上：不但不能隐藏，还要确保它是显示的。
-  const stairsEl = $('opt-stairs');
-  if (motion.kind === 'climb') {
-    if (!stairsEl.checked) {
-      stairsEl.checked = true;
-      stairsEl.dispatchEvent(new Event('change'));
-    }
-  } else if (hideStairs && stairsEl.checked) {
-    stairsEl.checked = false;
-    stairsEl.dispatchEvent(new Event('change'));
-  }
+  // 两套地形共用同一个编译好的模型：紧凑障碍沿 +X（爬楼梯策略用的），
+  // 螃蟹步台阶沿 +Y（脚本步态用的）。回放哪一段就只显示那一段 ——
+  // 否则另一套地形会出现在画面里，看着像"走错路"，也白白拉低帧率。
+  //   打拳 / 参考动作：平地录的，默认两套都藏起来（hideStairs=false 时保留障碍）
+  //   爬楼梯策略：显示紧凑障碍
+  //   螃蟹步横移：显示 crab_ 台阶
+  const isCrab = motion.kind === 'crab';
+  setTerrain({
+    stairs: motion.kind === 'climb' || (!isCrab && !hideStairs),
+    crab: isCrab,
+  });
+  if (isCrab) applyView('crab');      // 换成能看清台阶剖面的侧视机位
 
   renderer.shadowMap.autoUpdate = true;
   renderer.shadowMap.needsUpdate = true;
@@ -436,14 +452,19 @@ async function setMotion(name, { hideStairs = true } = {}) {
   const s = motion.meta.stats;
   const note = motion.kind === 'ref'
     ? '参考动作：<code>fight.npz</code> 里重定向后的运动，纯运动学装配（无物理）。'
-    : motion.kind === 'climb'
-      ? '策略仿真：本机跑 MuJoCo + <code>normal_depth.onnx</code> 深度视觉闭环录制'
-        + '（躯干俯视深度相机；地形 = <code>universal_test</code> 紧凑障碍）。'
-        + (s ? `<br>最远 x = ${s.maxX} m（终点线 13.2 m），躯干高度 `
-          + `${s.rootZMin} ~ ${s.rootZMax} m，${s.fell ? '末段摔倒' : '全程未摔倒'}。` : '')
-      : '策略仿真：本机跑 MuJoCo + <code>policy.onnx</code> 闭环录制。'
-        + (s ? `跟踪误差：均值 ${s.anchorErrMean} m / 最大 ${s.anchorErrMax} m，`
-          + `躯干最大倾角 ${s.tiltMax}°。` : '');
+    : motion.kind === 'crab'
+      ? '脚本步态：<code>crab_climb.py</code> 的四相位准静态控制器解出的关节轨迹'
+        + '（闭式 IK + DLS 精修，<b>没有策略网络</b>）。机器人朝 +X，沿 +Y 侧向横移上楼。'
+        + (s ? `<br>台阶 ${s.steps} 级 · 级高 ${s.riseMin}~${s.riseMax} m · 进深 `
+          + `${s.treadMin}~${s.treadMax} m · 最高 ${s.maxTop} m · 横移 ${s.travelY} m。` : '')
+      : motion.kind === 'climb'
+        ? '策略仿真：本机跑 MuJoCo + <code>normal_depth.onnx</code> 深度视觉闭环录制'
+          + '（躯干俯视深度相机；地形 = <code>universal_test</code> 紧凑障碍）。'
+          + (s ? `<br>最远 x = ${s.maxX} m（终点线 13.2 m），躯干高度 `
+            + `${s.rootZMin} ~ ${s.rootZMax} m，${s.fell ? '末段摔倒' : '全程未摔倒'}。` : '')
+        : '策略仿真：本机跑 MuJoCo + <code>policy.onnx</code> 闭环录制。'
+          + (s ? `跟踪误差：均值 ${s.anchorErrMean} m / 最大 ${s.anchorErrMax} m，`
+            + `躯干最大倾角 ${s.tiltMax}°。` : '');
   $('motion-note').innerHTML = note
     + `<br>${motion.nframes} 帧 @ ${motion.fps} fps = ${motion.duration.toFixed(1)} s。`;
   toast(`已载入回放：${motion.label}`);
@@ -571,6 +592,7 @@ function setupUI() {
   };
   bind('opt-robot', 'showRobot');
   bind('opt-stairs', 'showStairs');
+  bind('opt-crab', 'showCrab');
   bind('opt-floor', 'showFloor');
   bind('opt-collision', 'showCollision');
 

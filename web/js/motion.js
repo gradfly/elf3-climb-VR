@@ -150,7 +150,10 @@ export class MotionPlayer {
 
   /** 供 HUD 显示 */
   describe() {
-    return `${this.label} · ${this.kind === 'ref' ? '参考动作' : '策略仿真'}`
+    const kindText = this.kind === 'ref' ? '参考动作'
+      : this.kind === 'crab' ? '脚本步态'
+        : '策略仿真';
+    return `${this.label} · ${kindText}`
       + ` · ${this.time.toFixed(1)}/${this.duration.toFixed(1)} s`;
   }
 }

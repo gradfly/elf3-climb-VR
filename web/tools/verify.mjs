@@ -116,8 +116,8 @@ try {
   check('半透明 VR 按钮带独立样式类（磨砂玻璃观感）',
     (ui.xrBtns.find((b) => b.id === 'xr-ar') || {}).cls === 'xr-btn xr-ar',
     (ui.xrBtns.find((b) => b.id === 'xr-ar') || {}).cls);
-  check('6 个视角预设齐全', ui.views.length === 6, ui.views.join(','));
-  const wantOpts = ['opt-robot', 'opt-stairs', 'opt-floor', 'opt-shadow',
+  check('7 个视角预设齐全', ui.views.length === 7, ui.views.join(','));
+  const wantOpts = ['opt-robot', 'opt-stairs', 'opt-crab', 'opt-floor', 'opt-shadow',
     'opt-collision', 'opt-sim', 'opt-follow'];
   check('显示/物理/跟随开关齐全', wantOpts.every((id) => ui.opts.includes(id)), ui.opts.join(','));
   check('运动仿真控件齐全（回放/倍速/暂停）',
@@ -152,7 +152,7 @@ try {
       out[b.dataset.view]=[+c.x.toFixed(2),+c.y.toFixed(2),+c.z.toFixed(2),+t.y.toFixed(2)];
     } return out;})()`);
   const allMoved = Object.values(views).every((v) => v.some((x) => x !== 0));
-  check('6 个视角预设均可用', Object.keys(views).length === 6 && allMoved, JSON.stringify(views));
+  check('7 个视角预设均可用', Object.keys(views).length === 7 && allMoved, JSON.stringify(views));
 
   // 5. 物理开关 + 复位
   const phys = await evalJs(ws, `(async()=>{
@@ -281,6 +281,36 @@ try {
     return { beforeHide, afterPick, checked:$('opt-stairs').checked };})()`);
   check('选“策略仿真 · 爬楼梯”会自动打开“楼梯 / 障碍”',
     climb2.beforeHide === false && climb2.afterPick === true, JSON.stringify(climb2));
+
+  // 5.6 螃蟹步横移回放（脚本步态，另一套地形）
+  const crab = await evalJs(ws, `(async()=>{const $=id=>document.getElementById(id);
+    __elf.setMotion('off');
+    const r = await __elf.setMotion('crab');
+    const s0 = __elf.getMotion();
+    const q0 = Array.from(__elf.data.qpos);
+    await new Promise(x=>setTimeout(x,1600));
+    const q1 = Array.from(__elf.data.qpos);
+    const out = { loaded: !!r, kind: s0.kind, nframes: s0.nframes, stats: s0.stats,
+      crabOn: __elf.mjScene.opts.showCrab, stairsOn: __elf.mjScene.opts.showStairs,
+      nCrab: __elf.mjScene.crabGeomIds.length,
+      movedY: +(Math.abs(q1[1] - q0[1])).toFixed(3),
+      mode: $('hud-mode').textContent.trim(),
+      hud: $('hud-motion').textContent.trim(),
+      camZ: +__elf.camera.position.z.toFixed(2) };
+    __elf.setMotion('off');
+    return out;})()`);
+  check('螃蟹步回放加载成功（kind=crab，帧数合理）',
+    crab.loaded && crab.kind === 'crab' && crab.nframes > 500, `${crab.nframes} 帧｜${crab.hud}`);
+  check('螃蟹步回放显示 crab_ 台阶、隐藏紧凑障碍',
+    crab.crabOn === true && crab.stairsOn === false && crab.nCrab > 0,
+    `showCrab=${crab.crabOn} showStairs=${crab.stairsOn} / ${crab.nCrab} 个台阶 geom`);
+  check('螃蟹步回放真的在横移（y 增大）', crab.movedY > 0.02, `Δy=${crab.movedY} m`);
+  check('螃蟹步回放自动切到“螃蟹步”机位（相机在 -Z 侧）',
+    crab.camZ < -3, `camera.z=${crab.camZ}`);
+  check('螃蟹步回放 HUD 显示“脚本步态”',
+    crab.mode.includes('运动仿真') && crab.hud.includes('脚本步态'), `${crab.mode} · ${crab.hud}`);
+  console.log(`  （螃蟹步回放统计: ${JSON.stringify(crab.stats && {
+    steps: crab.stats.steps, maxTop: crab.stats.maxTop, travelY: crab.stats.travelY })}）`);
 
   // 6. 渲染循环确实在出帧
   const frames = await evalJs(ws, `(async()=>{const r=__elf.renderer;const a=r.info.render.frame;

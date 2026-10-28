@@ -1,0 +1,233 @@
+{
+  "seed": 42,
+  "width": 1.2,
+  "rise_range": [
+    0.12,
+    0.25
+  ],
+  "tread_range": [
+    0.2,
+    0.4
+  ],
+  "n_up": 6,
+  "n_down": 3,
+  "landing": true,
+  "start_y": 1.5,
+  "end_y": 5.726161894682782,
+  "spawn": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 1.0339
+  },
+  "max_top": 1.2758,
+  "treads": [
+    {
+      "name": "crab_up_0",
+      "section": "up",
+      "y0": 1.5,
+      "y1": 1.8548,
+      "top": 0.1771,
+      "rise": 0.1771,
+      "depth": 0.3548,
+      "center": 1.6774,
+      "off": 0.1174,
+      "tilt": 0.0,
+      "hip_h_window": [
+        0.6286,
+        0.6765
+      ]
+    },
+    {
+      "name": "crab_up_1",
+      "section": "up",
+      "y0": 1.8548,
+      "y1": 2.2265,
+      "top": 0.3877,
+      "rise": 0.2107,
+      "depth": 0.3717,
+      "center": 2.0407,
+      "off": 0.1259,
+      "tilt": 0.058,
+      "hip_h_window": [
+        0.6554,
+        0.6861
+      ]
+    },
+    {
+      "name": "crab_up_2",
+      "section": "up",
+      "y0": 2.2265,
+      "y1": 2.4453,
+      "top": 0.6345,
+      "rise": 0.2468,
+      "depth": 0.2188,
+      "center": 2.3359,
+      "off": 0.05,
+      "tilt": 0.172,
+      "hip_h_window": [
+        0.6727,
+        0.7033
+      ]
+    },
+    {
+      "name": "crab_up_3",
+      "section": "up",
+      "y0": 2.4453,
+      "y1": 2.7976,
+      "top": 0.8567,
+      "rise": 0.2222,
+      "depth": 0.3522,
+      "center": 2.6215,
+      "off": 0.1161,
+      "tilt": 0.098,
+      "hip_h_window": [
+        0.6612,
+        0.6918
+      ]
+    },
+    {
+      "name": "crab_up_4",
+      "section": "up",
+      "y0": 2.7976,
+      "y1": 3.0232,
+      "top": 1.0353,
+      "rise": 0.1786,
+      "depth": 0.2256,
+      "center": 2.9104,
+      "off": 0.0528,
+      "tilt": 0.0,
+      "hip_h_window": [
+        0.6305,
+        0.6765
+      ]
+    },
+    {
+      "name": "crab_up_5",
+      "section": "up",
+      "y0": 3.0232,
+      "y1": 3.2974,
+      "top": 1.2758,
+      "rise": 0.2405,
+      "depth": 0.2742,
+      "center": 3.1603,
+      "off": 0.0771,
+      "tilt": 0.156,
+      "hip_h_window": [
+        0.6688,
+        0.6995
+      ]
+    },
+    {
+      "name": "crab_landing",
+      "section": "landing",
+      "y0": 3.2974,
+      "y1": 3.6489,
+      "top": 1.2758,
+      "rise": 0.0,
+      "depth": 0.3515,
+      "center": 3.4731,
+      "off": 0.1158,
+      "tilt": 0.0,
+      "hip_h_window": [
+        0.451,
+        0.678
+      ]
+    },
+    {
+      "name": "crab_dn_0",
+      "section": "down",
+      "y0": 3.6489,
+      "y1": 3.9752,
+      "top": 1.0387,
+      "rise": -0.237,
+      "depth": 0.3263,
+      "center": 3.812,
+      "off": 0.1032,
+      "tilt": 0.146,
+      "hip_h_window": [
+        0.6669,
+        0.6976
+      ]
+    },
+    {
+      "name": "crab_dn_1",
+      "section": "down",
+      "y0": 3.9752,
+      "y1": 4.3268,
+      "top": 0.8295,
+      "rise": -0.2092,
+      "depth": 0.3516,
+      "center": 4.151,
+      "off": 0.1158,
+      "tilt": 0.05,
+      "hip_h_window": [
+        0.6535,
+        0.6842
+      ]
+    },
+    {
+      "name": "crab_dn_2",
+      "section": "down",
+      "y0": 4.3268,
+      "y1": 4.5977,
+      "top": 0.6361,
+      "rise": -0.1934,
+      "depth": 0.2709,
+      "center": 4.4623,
+      "off": 0.0755,
+      "tilt": 0.0,
+      "hip_h_window": [
+        0.6458,
+        0.6765
+      ]
+    },
+    {
+      "name": "crab_dn_3",
+      "section": "down",
+      "y0": 4.5977,
+      "y1": 4.9919,
+      "top": 0.4188,
+      "rise": -0.2174,
+      "depth": 0.3941,
+      "center": 4.7948,
+      "off": 0.1371,
+      "tilt": 0.08,
+      "hip_h_window": [
+        0.6573,
+        0.688
+      ]
+    },
+    {
+      "name": "crab_dn_4",
+      "section": "down",
+      "y0": 4.9919,
+      "y1": 5.3705,
+      "top": 0.2374,
+      "rise": -0.1814,
+      "depth": 0.3786,
+      "center": 5.1812,
+      "off": 0.1293,
+      "tilt": 0.0,
+      "hip_h_window": [
+        0.6343,
+        0.6765
+      ]
+    },
+    {
+      "name": "crab_dn_5",
+      "section": "down",
+      "y0": 5.3705,
+      "y1": 5.7262,
+      "top": 0.0,
+      "rise": -0.2374,
+      "depth": 0.3557,
+      "center": 5.5483,
+      "off": 0.1178,
+      "tilt": 0.148,
+      "hip_h_window": [
+        0.6669,
+        0.6995
+      ]
+    }
+  ]
+}

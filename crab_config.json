@@ -1,0 +1,55 @@
+{
+  "_readme": [
+    "螃蟹步横移爬楼梯 —— 启动参数。改这个文件即可长期生效。",
+    "命令行优先级更高：--preset < --set 组.键=值 < --seed/--step-time 等快捷参数。",
+    "单位统一是米(m)、秒(s)、弧度不适用(角度内部换算)。",
+    "查看最终生效值： python run_crab.py --show-config"
+  ],
+
+  "terrain": {
+    "_note": "台阶几何。改这里 = 换一套楼梯。",
+    "seed": 42,
+    "n_up": 6,
+    "n_down": 3,
+    "landing": true,
+    "landing_depth": 0.30,
+    "rise_min": 0.12,
+    "rise_max": 0.25,
+    "tread_min": 0.20,
+    "tread_max": 0.40,
+    "width": 1.2,
+    "out_xml": "crab_stairs_obstacles.xml",
+    "out_json": "crab_stairs.json"
+  },
+
+  "gait": {
+    "_note": "步态时序。走不稳就把 step_time 调大。",
+    "step_time": 0.9,
+    "dt": 0.02,
+    "clearance": 0.055,
+    "hold": 0.5,
+    "scene": "elf3_crab.xml",
+    "out": "crab_climb_traj.npz"
+  },
+
+  "replay": {
+    "_note": "回放。record 给目录就离屏存 PNG（不弹窗）。",
+    "enabled": true,
+    "mode": "kin",
+    "speed": 1.0,
+    "loop": false,
+    "track": true,
+    "dist": 2.8,
+    "az": 160.0,
+    "el": -14.0,
+    "record": null,
+    "every": 1
+  },
+
+  "run": {
+    "_note": "流水线。stages 可写成 [\"gen\",\"plan\"] 跳过回放。",
+    "stages": ["gen", "plan", "replay"],
+    "check_only": false,
+    "dry_run": false
+  }
+}

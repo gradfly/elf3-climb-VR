@@ -170,18 +170,28 @@ python web/tools/bake_motion.py --steps 1500          # 只录前 30 s
 python web/tools/bake_motion.py --only ref            # 只录参考动作
 python web/tools/bake_motion.py --stop-on tracking    # 改用 mjlab 严格跟踪判据截断
 
-# —— 爬楼梯（climb_stairs.py 深度视觉链路，需本机有 E:/mujoco/climb stairs 工作区）——
+# —— 爬楼梯（climb_stairs.py 深度视觉链路）——
 python web/tools/bake_climb.py                        # 默认 34 s，楼梯前 1.2 m 出生
 python web/tools/bake_climb.py --duration 20          # 只录前 20 s
 python web/tools/bake_climb.py --cmd-vx 0.4           # 走慢一点
 python web/tools/bake_climb.py --spawn-x 0            # 从世界原点出发（先走 4.6 m 平地）
+
+# —— 螃蟹步横移上楼（crab_climb.py 脚本步态，无策略网络）——
+python web/tools/bake_crab.py                         # 全链：生成随机台阶 → 规划轨迹 → 烘焙
+python web/tools/bake_crab.py --seed 7 --rise-max 0.18        # 换一套台阶重录
+python web/tools/bake_crab.py --step-time 1.2                 # 走慢一点（更容易站住）
+python web/tools/bake_crab.py --skip-gen --skip-plan          # 只重烘焙已有轨迹
 ```
+
+> `bake_crab.py` 除了写 `motion_crab.*`，还会把台阶几何同步成
+> `assets/scene_crab.xml` 并刷新 `manifest.json` —— 网页端是"一次编译"的模型，
+> 地形必须和回放数据一起就位。
 
 面板上的控件：
 
 | 控件 | 说明 |
 | --- | --- |
-| 回放 | 关闭（静止站立）/ 策略仿真 · 打拳 / 参考动作 · 打拳 / **策略仿真 · 爬楼梯** |
+| 回放 | 关闭（静止站立）/ 策略仿真 · 打拳 / 参考动作 · 打拳 / 策略仿真 · 爬楼梯 / **脚本步态 · 螃蟹步横移上楼** |
 | 倍速 | 0.25× / 0.5× / 1× / 1.5× |
 | 视角跟随机器人 | 机器人会满场走动（世界坐标约 ±5 m），打开后镜头自动跟住它 |
 | 从头播放 / 暂停 | 控制回放进度（「复位姿态」在回放中也等价于从头播放） |
@@ -192,6 +202,11 @@ python web/tools/bake_climb.py --spawn-x 0            # 从世界原点出发（
   视觉穿模；想看地形可以自己再勾回来。
 - **爬楼梯那段**回放本身就**踩在这块地形上**：选它时不会隐藏「楼梯 / 障碍」，而且
   如果之前被关掉了还会自动打开（录制起点在低楼梯前约 1.2 m，一路爬过终点线）。
+- **螃蟹步横移**用的是**另一套地形**（楼梯沿 +Y 上升，不是沿 +X）。选它时会自动
+  勾上「螃蟹步台阶」、同时取消「楼梯 / 障碍」，并切到「螃蟹步」机位 —— 台阶剖面在
+  YZ 平面上，只有站在机器人侧方（MuJoCo +X 侧）才看得见台阶而不是一堵斜面墙。
+  两套地形在同一个模型里互不重叠（一套在 x≈4.8~13.2，一套在 y≈1.5~6.0），
+  所以也可以手动两个都勾上看全景。
 - 爬楼梯回放的机器人**从 x≈3.5 m 出发**，不在世界原点；开着「视角跟随机器人」
   镜头会自动跟过去（默认开着）。想看全景可以点「全景」预设。
 - 开启回放会**自动关掉「运行 MuJoCo 物理」**：两者互斥（一个是回放录好的 qpos，
@@ -203,7 +218,7 @@ python web/tools/bake_climb.py --spawn-x 0            # 从世界原点出发（
   完全不动，跑出这个范围才慢慢把它拉回正前方 —— 不会和你自己的摇杆移动打架。
   A / X「把机器人摆到正前方」也按它的**实际位置**摆位（回放时它不在世界原点）。
 - URL 参数：`?motion=fight_policy&speed=0.5&follow=0`
-  （一键脚本用的就是这条；爬楼梯用 `?motion=climb_policy`）。
+  （一键脚本用的就是这条；爬楼梯用 `?motion=climb_policy`，螃蟹步用 `?motion=crab`）。
 
 ---
 
@@ -290,10 +305,12 @@ web/
 ├── assets/
 │   ├── elf3.xml          机器人模型（第 463 行 <include file="scene_bx.xml"/>）
 │   ├── scene_bx.xml      地形：universal_test 紧凑障碍（地面 + 低楼梯 / 高楼梯 / 壕沟堤岸）
+│   ├── scene_crab.xml    地形：螃蟹步横移台阶（沿 +Y 上升，bake_crab.py 生成）
 │   ├── meshes/*.STL      34 个网格
 │   ├── motion_fight_policy.bin/.json   策略仿真回放数据（bake_motion.py 生成）
 │   ├── motion_fight_ref.bin/.json      参考动作回放数据
 │   ├── motion_climb_policy.bin/.json   爬楼梯回放数据（bake_climb.py 生成）
+│   ├── motion_crab.bin/.json           螃蟹步横移回放数据（bake_crab.py 生成）
 │   └── manifest.json     资源清单（加载进度用；不含回放数据）
 ├── certs/                自签证书（首次启动自动生成）
 ├── server.mjs            本地服务器：HTTP + HTTPS 双监听
@@ -393,6 +410,38 @@ onSeeThrough` 三个回调里接 UI。`setSeeThrough()` 幂等且不依赖真头
 
 ---
 
+### 7.7 螃蟹步横移回放（`motion_crab`）
+
+这一段和前两段的性质不同：**没有策略网络**。轨迹由
+`sim/.../launch/crab_climb.py` 的四相位准静态控制器解出来 ——
+闭式 IK 给种子、DLS 数值精修到 0.00 mm，每 20 ms 一帧，网页端照常插值回放。
+
+三个要点：
+
+1. **多了一套地形** —— 螃蟹步的楼梯沿 **+Y** 上升（机器人朝 +X，侧身横移），
+   和沿 +X 排布的紧凑障碍是两回事。网页端的 MuJoCo 模型在启动时一次编译完成，
+   不能中途换地形，所以台阶被抽成独立的 `assets/scene_crab.xml`，由
+   `scene_bx.xml` 的 `<worldbody>` 末尾 `<include>` 进来。
+   两套地形在空间上不重叠，靠 geom 名前缀 `crab_` 分成两组显隐
+   （`js/mjscene.js` 的 `crabGeomIds` / `showCrab`）。
+2. **台阶是生成的，不是手写的** —— `gen_crab_stairs.py` 按 seed 随机生成
+   级高 12~25 cm / 进深 20~40 cm 的台阶，同时给出每级的 `tilt`（骨盆侧倾）和
+   `off`（双脚落点偏移）真值表。改 seed 就换一套楼梯，控制器自动适配。
+   所以 `bake_crab.py` 每次都会重写 `scene_crab.xml` 并刷新 `manifest.json`
+   —— 地形和回放数据必须成对更新，否则机器人会踩空。
+   注意 `web/tools/make-manifest.mjs` 也已同步加上这个文件；手工跑它同样安全。
+3. **机位** —— 台阶剖面在 YZ 平面上，所以虚拟相机必须站在机器人**侧方**
+   （MuJoCo +X 侧，three 里是 -Z 方向）才看得见"台阶"；站在沿台阶轴的方向
+   只会看到一堵斜面墙。`VIEWS.crab` 就是按这个算的，选这段回放时自动切过去。
+
+一个已知的物理事实（不是 bug）：这个步态**本质上是动态的**。站姿间距约等于
+踏面进深（20~40 cm），而脚掌沿行进方向只有 8 cm 宽，重心完全移到支撑脚时后腿
+的侧移需求 ρ ≈ 0.71 m > 腿长 0.64 m —— 够不到。所以抬脚与重心转移必须同时进行：
+体检里约 43% 的帧质心落在支撑面外，最长连续 0.24 s。纯运动学回放看不出来，
+真跑 `mj_step` 会摔 —— 这正是后续 RL 要解决的问题。
+
+---
+
 ## 8. 工具（`tools/`）
 
 | 脚本                  | 用途                                                   |
@@ -403,6 +452,7 @@ onSeeThrough` 三个回调里接 UI。`setSeeThrough()` 幂等且不依赖真头
 | `make-manifest.mjs` | 重新生成 `assets/manifest.json`                          |
 | `bake_motion.py`    | 本机跑 MuJoCo + `policy.onnx`，把每步 qpos 录成 `assets/motion_*.bin` |
 | `bake_climb.py`     | 本机跑 MuJoCo + `normal_depth.onnx` 深度视觉闭环（复用 climb stairs 工作区的 `climb_stairs.py`），把爬楼梯的每步 qpos 录成 `assets/motion_climb_policy.bin` |
+| `bake_crab.py`      | 跑 `gen_crab_stairs.py` + `crab_climb.py`（脚本步态，无策略网络），录成 `assets/motion_crab.bin`，并把台阶几何同步到 `assets/scene_crab.xml` |
 | `fetch-three.mjs`   | 下载 three.js 与 addons                                 |
 | `selfsign.mjs`      | 纯 JS 生成自签证书（无 openssl 依赖，SAN 含本机所有内网 IP）             |
 | `make-cert.mjs`     | 证书生成的封装                                              |
@@ -458,9 +508,19 @@ A：缺 `assets/motion_fight_policy.bin`。跑一次 `python web/tools/bake_moti
 
 **Q：面板里选「策略仿真 · 爬楼梯」提示"加载失败"？**  
 A：缺 `assets/motion_climb_policy.bin`。跑一次 `python web/tools/bake_climb.py`
-生成即可。注意它是**深度视觉闭环**，需要本机有 `E:/mujoco/climb stairs` 工作区
-（提供 `climb_stairs.py`、`normal_depth.onnx` 和 `universal_test` 地形）；换目录用
-`--ws <路径>` 指定。
+生成即可。注意它是**深度视觉闭环**，需要 vendor 里的 `climb_stairs.py` +
+`normal_depth.onnx` + `universal_test` 地形；工作区路径默认由脚本自身位置推导，
+目录搬过家也不用改，特殊情况才用 `--ws <路径>` 指定。
+
+**Q：面板里选「脚本步态 · 螃蟹步横移上楼」提示"加载失败"？**  
+A：缺 `assets/motion_crab.bin`（或 `assets/scene_crab.xml`）。跑一次
+`python web/tools/bake_crab.py` 生成即可，它会顺带写好台阶几何和 `manifest.json`。
+换一套台阶：`python web/tools/bake_crab.py --seed 7`。
+
+**Q：选「脚本步态 · 螃蟹步横移上楼」后看不到台阶？**  
+A：地形由「显示 → **螃蟹步台阶**」这个复选框控制，选回放时会自动勾上。
+如果手动取消了，机器人会像在踏空 —— 再勾回来即可。注意它和「楼梯 / 障碍」是
+两套独立地形，选不同回放时脚本会自动切换，也可以两个都勾上看全景。
 
 **Q：选了「策略仿真 · 爬楼梯」，但机器人脚下没有地形？**  
 A：正常情况下选这一项会自动把「楼梯 / 障碍」勾上。如果你手动取消勾选，地形就会

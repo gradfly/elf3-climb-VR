@@ -34,8 +34,8 @@ elf3-climb-VR/
     ├── index.html
     ├── js/  (main.js / mjscene.js / vrnav.js / xr.js / motion.js)
     ├── vendor/  (mujoco.wasm / three.module.js)
-    ├── assets/  (elf3.xml / 地形 scene_bx.xml / 回放 motion_*.bin|json)
-    ├── tools/  (verify.mjs 自检 / 证书生成)
+    ├── assets/  (elf3.xml / 地形 scene_bx.xml + scene_crab.xml / 回放 motion_*.bin|json)
+    ├── tools/  (verify.mjs 自检 / bake_*.py 烘焙 / 证书生成)
     └── start.bat / start_vr_motion.bat
 ```
 
@@ -71,11 +71,59 @@ run_sim.bat onnx stairs
 
 - 运行：`start.bat`（本地静态服务器 + 浏览器）或 `start_vr_motion.bat`（VR 运动模式）。
 - 在「显示 → 楼梯 / 障碍」里查看 universal_test 紧凑地形；
-  「运动仿真」可选「打拳」(`motion_fight_*`) 或「爬楼梯」(`motion_climb_policy`) 回放。
-- 自检验证：`node tools/verify.mjs http://localhost:8123/`（51 项）。
+  「运动仿真」可选「打拳」(`motion_fight_*`)、「爬楼梯」(`motion_climb_policy`)
+  或「螃蟹步横移上楼」(`motion_crab`) 回放。
+- 自检验证：`node tools/verify.mjs http://localhost:8123/`（56 项）。
 
 网页模型 `nq=36`（老版 elf3.xml），官方场景 `nq=38`（多 head_z/head_y），
 前 36 个 qpos 关节顺序一致，故仿真闭环轨迹可直接回放。
+
+---
+
+## 3. 螃蟹步横移爬楼梯（一键启动）
+
+侧身沿 +Y 横移上下楼，**脚本控制器**（四相位时序 + 闭式解种子 + DLS 数值 IK），
+不依赖 ONNX 策略。台阶随机生成，级高 12–25 cm、进深 20–40 cm。
+
+```bat
+run_crab.bat                      :: 一键：生成地形 -> 规划轨迹 -> 弹回放窗口
+run_crab.bat --preset easy        :: 简单地形（级高 12-16cm / 进深 30-40cm）
+run_crab.bat --show-config        :: 只打印最终生效参数，不执行
+run_crab.bat --stages gen,plan    :: 不弹窗，只出地形和轨迹
+```
+
+Git Bash / Linux 用 `./run_crab.sh`，参数完全相同。
+
+**改参数**（优先级从低到高）：`crab_config.json`（长期生效）< `--preset` < `--set 组.键=值` < 快捷参数。
+
+| 想改什么 | 怎么改 |
+|---|---|
+| 换一套台阶 | `--seed 7` |
+| 级高范围 | `--rise-min 0.12 --rise-max 0.20` |
+| 踏面进深 | `--tread-min 0.25 --tread-max 0.40` |
+| 走慢一点更稳 | `--step-time 1.2` |
+| 不弹回放窗口 | `--no-replay` |
+| 存 PNG 序列 | `--record out/crab` |
+| 物理回放（预期会摔） | `--mode phys` |
+
+脚本分工（都在 `launch/` 下）：
+`gen_crab_stairs.py` 随机台阶 → MJCF + 真值表 ｜ `crab_ik.py` 可行性回归 + IK
+（`--grid` / `--tilt` / `--verify` 自检）｜ `crab_climb.py` 四相位轨迹
+（`--check-only` 只体检）｜ `crab_replay.py` 回放（kin / phys / 离屏 PNG）｜
+`run_crab.py` 上面的流水线。
+
+体检基线（seed 42，13 级，最高 1.276 m）：1285 帧 / 25.7 s，位置误差 0.97 mm，
+脚掌严格平贴，全程不超关节限位；但 **43% 的帧质心在支撑面外**（最长连续 0.24 s），
+纯准静态站不住，这部分需要 RL 兜底。
+
+**在网页里看**（`web/`）：面板「回放 → 脚本步态 · 螃蟹步横移上楼」，或直接
+`http://localhost:8080/?motion=crab`。这一项用的是**另一套地形**（沿 +Y 上升），
+`bake_crab.py` 会把它同步成 `web/assets/scene_crab.xml` —— 生成 + 规划 + 烘焙一条命令：
+
+```bash
+python web/tools/bake_crab.py                  # 全链约 20 s
+python web/tools/bake_crab.py --seed 7         # 换一套台阶重录
+```
 
 ---
 
