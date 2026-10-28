@@ -86,7 +86,9 @@ def forward_progress_y(env, command_name: str = "twist") -> torch.Tensor:
         vmax = 1.5 * v_cmd
     except Exception:
         vmax = torch.full_like(v, 0.3)
-    r = torch.clamp(v, min=0.0, max=vmax)
+    # clamp 要求 min/max 同为标量或同为张量；vmax 是逐环境张量，故用 minimum
+    vmax = torch.as_tensor(vmax, dtype=v.dtype, device=v.device)
+    r = torch.minimum(torch.clamp(v, min=0.0), vmax)
     # episode 刚 reset 的那一步 dy 跨了重置，丢弃
     if hasattr(env, "episode_length_buf"):
         r = torch.where(env.episode_length_buf <= 1, torch.zeros_like(r), r)
