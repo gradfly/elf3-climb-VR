@@ -12,6 +12,9 @@ node_modules/
 *.log
 *.rknn
 *.rknn.build.lock
+# 训练产物：logs/ 下有成百上千个 checkpoint，只挑最终的放 train/checkpoints/
+logs/
+wandb/
 # MuJoCo 编译出的二进制模型，71 MB，由 XML 现场编译，不入库
 *.mjb
 # mjlab 训练用的派生机型 XML（由 train/assets/make_robot_xml.py 生成）
