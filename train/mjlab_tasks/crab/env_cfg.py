@@ -83,12 +83,12 @@ def crab_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     actor_terms = {
         "base_lin_vel": ObservationTermCfg(
             func=mdp.builtin_sensor,
-            params={"sensor_name": "robot/imu_lin_vel"},
+            params={"sensor_name": "robot/torso_lin_vel"},
             noise=Unoise(n_min=-0.5, n_max=0.5),
         ),
         "base_ang_vel": ObservationTermCfg(
             func=mdp.builtin_sensor,
-            params={"sensor_name": "robot/imu_ang_vel"},
+            params={"sensor_name": "robot/torso_ang_vel"},
             noise=Unoise(n_min=-0.2, n_max=0.2),
         ),
         "projected_gravity": ObservationTermCfg(
@@ -170,9 +170,8 @@ def crab_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             debug_vis=True,
             ranges=UniformVelocityCommandCfg.Ranges(
                 lin_vel_x=(0.0, 0.0),      # 不允许前后走
-                lin_vel_y=(0.10, 0.25),    # 只允许侧向 +Y（螃蟹步）
+                lin_vel_y=(0.15, 0.35),    # 只允许侧向 +Y（螃蟹步）
                 ang_vel_z=(-0.1, 0.1),
-                heading=(-math.pi, math.pi),
             ),
         )
     }
@@ -253,7 +252,7 @@ def crab_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "track_linear_velocity": RewardTermCfg(
             func=mdp.track_linear_velocity,
             weight=2.0,
-            params={"command_name": "twist", "std": math.sqrt(0.25)},
+            params={"command_name": "twist", "std": 0.15},
         ),
         "track_angular_velocity": RewardTermCfg(
             func=mdp.track_angular_velocity,
@@ -285,7 +284,7 @@ def crab_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=mdp.feet_clearance,
             weight=-2.0,
             params={
-                "target_height": 0.10,
+                "target_height": 0.18,
                 "height_sensor_name": "foot_height_scan",
                 "command_name": "twist",
                 "command_threshold": 0.05,
@@ -298,7 +297,7 @@ def crab_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "sensor_name": "feet_ground_contact",
                 "height_sensor_name": "foot_height_scan",
-                "target_height": 0.10,
+                "target_height": 0.18,
                 "command_name": "twist",
                 "command_threshold": 0.05,
             },
@@ -330,6 +329,18 @@ def crab_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "terrain_levels": CurriculumTermCfg(
             func=mdp.terrain_levels_vel,
             params={"command_name": "twist"},
+        ),
+        # 从零学步态：先把指令速度压低，站稳后再逐步提速
+        "command_vel": CurriculumTermCfg(
+            func=mdp.commands_vel,
+            params={
+                "command_name": "twist",
+                "velocity_stages": [
+                    {"step": 0, "lin_vel_y": (0.05, 0.12)},
+                    {"step": 400 * 24, "lin_vel_y": (0.10, 0.22)},
+                    {"step": 1200 * 24, "lin_vel_y": (0.15, 0.35)},
+                ],
+            },
         ),
     }
 
