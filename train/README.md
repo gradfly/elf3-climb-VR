@@ -122,9 +122,16 @@ python launch/crab_replay.py --mode phys
 python web/tools/bake_crab.py
 ```
 
-> 注意：`crab_replay.py` 当前播放的是**脚本轨迹 npz**，不是神经网络策略。
-> 要把 ONNX 接进回放，需要给 `crab_replay.py` 加一个 `--policy onnx` 分支
-> （参考 `elf3_play.py` 的 ONNX 加载方式）。这一步尚未实现。
+> 导出的 ONNX 可以直接在 MuJoCo 里闭环回放（不依赖 mjlab / GPU）：
+>
+> ```bash
+> python crab_replay.py --policy onnx \
+>   --onnx train/checkpoints/elf3_crab_policy.onnx \
+>   --cmd-vy 0.25 --steps 2000 --record out/policy
+> ```
+>
+> 观测按训练时的 290 维布局拼装（含 187 维 height_scan），执行器换成 mjlab 同款
+> `<position>`。`--record` 出 PNG 序列，`--no-gui` 无窗口跑完。
 
 ---
 

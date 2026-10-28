@@ -2,7 +2,7 @@
 
 把 crab_climb.py 规划出来的 qpos 序列（.npz）灌回 MuJoCo 场景里播放。
 
-==================== 两种模式 ====================
+==================== 三种模式 ====================
 kin （默认）纯运动学回放：直接把 qpos 写进 data，不跑物理。
             用来检查"轨迹本身对不对"——脚有没有踩在踏面上、有没有穿模、
             身体姿态看着自不自然。这一路一定能放完，因为它不做物理。
@@ -13,6 +13,13 @@ phys 物理回放：用 PD + 重力前馈去跟踪这条 qpos 轨迹，跑真实
             支撑面外（单腿支撑期最长 0.24 s），那段需要动力学/RL 兜底，
             脚本控制器补不上。摔得越晚说明轨迹越接近可行。
 
+policy 策略回放：加载训练导出的 ONNX 策略，闭环跑真实物理。
+            观测按 mjlab 训练时的 290 维布局拼装：
+              base_lin_vel(3) + base_ang_vel(3) + projected_gravity(3)
+              + joint_pos(31) + joint_vel(31) + last_action(29)
+              + command(3) + height_scan(187)
+            执行器用 mjlab 同款 <position>（kp/kv 取自 elf3_play 真值）。
+
 用法
 ----
   python crab_replay.py                       # 回放默认轨迹，开窗
@@ -20,6 +27,7 @@ phys 物理回放：用 PD + 重力前馈去跟踪这条 qpos 轨迹，跑真实
   python crab_replay.py --mode phys           # 物理回放（看它什么时候摔）
   python crab_replay.py --record out/crab     # 离屏渲染，存 PNG 序列
   python crab_replay.py --traj xxx.npz --scene xxx.xml
+  python crab_replay.py --policy onnx --onnx policy.onnx   # 跑训练好的策略
 
 窗口快捷键
 ----------
@@ -62,6 +70,14 @@ sys.path.insert(0, str(HERE.parent))
 import crab_ik as K                                              # noqa: E402
 from bxi_example_py_elf3.policies.joints import (                # noqa: E402
     ELF3_ISAAC_PARAMETERS as P,
+)
+# 复用 elf3_play 的模型构建：把 <motor> 换成 mjlab 训练时用的 <position> 执行器
+from elf3_play import (                                          # noqa: E402
+    TrainParams,
+    build_model,
+    JOINT_NAMES as _JOINT_NAMES,
+    _DEFAULT_JOINT_POS,
+    _ACTION_SCALE,
 )
 
 DATA = HERE.parent / "data" / "mujoco_simulation"
@@ -276,6 +292,182 @@ def run_phys(m, d, qpos, dt, *, kp_scale=1.0, kd_scale=1.0, track=True,
     return fell_at
 
 
+# ---------------------------------------------------------------- 策略回放（ONNX）
+# 观测布局必须与 train/mjlab_tasks/crab/env_cfg.py 的 actor 组严格一致：
+#   base_lin_vel(3) + base_ang_vel(3) + projected_gravity(3)
+#   + joint_pos(31) + joint_vel(31) + last_action(29) + command(3) + height_scan(187)
+#   = 290
+_GRID_XS = np.arange(-0.8, 0.8 + 0.05, 0.1)      # 17
+_GRID_YS = np.arange(-0.5, 0.5 + 0.05, 0.1)      # 11
+_GY, _GX = np.meshgrid(_GRID_XS, _GRID_YS, indexing="xy")   # mjlab: 先 y 后 x
+_SCAN_OFFSETS = np.stack([_GX.ravel(), _GY.ravel()], axis=1)
+_SCAN_DOWN = np.array([0.0, 0.0, -1.0])
+_SCAN_GMASK = np.array([1, 0, 0, 0, 0, 0], dtype=np.uint8)   # 只打 group 0（地形）
+_RAY_GEOMID = np.zeros(1, dtype=np.int32)                    # mj_ray 输出缓冲
+_RAY_NORMAL = np.zeros(3, dtype=np.float64)
+
+
+def _sensor_vec(m, d, name, fallback):
+    sid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SENSOR, name)
+    if sid < 0:
+        sid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SENSOR, fallback)
+    if sid < 0:
+        raise KeyError(f"模型里没有传感器 {name} / {fallback}")
+    adr, dim = m.sensor_adr[sid], m.sensor_dim[sid]
+    return d.sensordata[adr:adr + dim].copy()
+
+
+def _yaw_only(r_mat):
+    """取旋转矩阵的偏航分量（与 mjlab ray_alignment='yaw' 一致）。"""
+    x_axis = r_mat[:, 0]
+    n = float(np.linalg.norm(x_axis[:2]))
+    xp = x_axis[:2] / n if n > 1e-6 else np.array([1.0, 0.0])
+    return np.array([[xp[0], -xp[1], 0.0],
+                     [xp[1],  xp[0], 0.0],
+                     [0.0,    0.0,    1.0]])
+
+
+def run_policy(m, d, *, onnx_path, cmd=(0.0, 0.25, 0.0), steps=2000,
+               dt=0.02, decimation=10, torso_id=0, dist=2.8, az=160.0, el=-14.0,
+               track=True, record=None, every=4, gui=True, width=640, height=360,
+               spawn_y=0.30, max_dist=5.0):
+    """加载 ONNX 策略闭环跑仿真。返回最终躯干 y 位移。"""
+    import onnxruntime as ort
+
+    sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    inp_name = sess.get_inputs()[0].name
+
+    # 机器人几何体挪到 group 1，height_scan 只打地形（group 0）
+    for g in range(m.ngeom):
+        if m.geom_bodyid[g] != 0:
+            m.geom_group[g] = 1
+
+    # 31 个铰链关节（按模型顺序，与训练观测一致）
+    hinge = [j for j in range(m.njnt) if m.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE]
+    j_names = [m.joint(j).name for j in hinge]
+    q_adr = np.array([m.jnt_qposadr[j] for j in hinge])
+    v_adr = np.array([m.jnt_dofadr[j] for j in hinge])
+    default_all = np.zeros(len(hinge))
+    default29 = np.asarray(_DEFAULT_JOINT_POS, dtype=float)
+    scale29 = np.asarray(_ACTION_SCALE, dtype=float)
+    for i, n in enumerate(j_names):
+        if n in _JOINT_NAMES:
+            default_all[i] = default29[_JOINT_NAMES.index(n)]
+
+    # 初始位姿：地面 y=spawn_y，朝 +X，默认站姿
+    d.qpos[:] = 0.0
+    d.qpos[0:3] = [0.0, spawn_y, 1.0339]
+    d.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
+    for i, n in enumerate(j_names):
+        d.qpos[q_adr[i]] = default_all[i]
+    d.qvel[:] = 0.0
+    mujoco.mj_forward(m, d)
+
+    ctrl_lo = np.full(29, -np.inf)
+    ctrl_hi = np.full(29, np.inf)
+    for i, n in enumerate(_JOINT_NAMES):
+        j = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, n)
+        if j >= 0 and m.jnt_limited[j]:
+            ctrl_lo[i], ctrl_hi[i] = m.jnt_range[j]
+
+    last_action = np.zeros(29)
+    cmd_vec = np.asarray(cmd, dtype=float)
+
+    def height_scan():
+        r = d.xmat[torso_id].reshape(3, 3)
+        yaw = _yaw_only(r)
+        p0 = d.xpos[torso_id]
+        vals = np.empty(_SCAN_OFFSETS.shape[0])
+        for i, (ox, oy) in enumerate(_SCAN_OFFSETS):
+            p = p0 + yaw @ np.array([ox, oy, 0.0])
+            dist = mujoco.mj_ray(m, d, p, _SCAN_DOWN, _SCAN_GMASK,
+                                 True, -1, _RAY_GEOMID, _RAY_NORMAL)
+            vals[i] = dist if dist >= 0.0 else max_dist
+        return vals / max_dist
+
+    def build_obs():
+        lin = _sensor_vec(m, d, "torso_lin_vel", "imu_lin_vel")
+        ang = _sensor_vec(m, d, "torso_ang_vel", "imu_ang_vel")
+        r = d.xmat[torso_id].reshape(3, 3)
+        grav = r.T @ np.array([0.0, 0.0, -1.0])
+        q = d.qpos[q_adr] - default_all
+        qd = d.qvel[v_adr]
+        return np.concatenate([lin, ang, grav, q, qd, last_action, cmd_vec, height_scan()])
+
+    obs = build_obs()
+    print(f"[policy] ONNX {Path(onnx_path).name}   obs_dim={obs.size}   "
+          f"cmd=(vx={cmd_vec[0]:.2f}, vy={cmd_vec[1]:.2f}, wz={cmd_vec[2]:.2f})")
+
+    renderer = cam = None
+    v = None
+    if record is not None:
+        from PIL import Image
+        rec = Path(record)
+        rec.mkdir(parents=True, exist_ok=True)
+        w = int(min(width, int(m.vis.global_.offwidth) or 640))
+        h = int(min(height, int(m.vis.global_.offheight) or 480))
+        renderer = mujoco.Renderer(m, h, w)
+        cam = make_cam(lookat=d.xpos[torso_id], dist=dist, az=az, el=el)
+        print(f"  离屏 {w}x{h} -> {rec}")
+    elif gui:
+        try:
+            if mj_viewer is None:
+                raise RuntimeError("mujoco.viewer 不可用")
+            v = mj_viewer.launch_passive(m, d)
+            v.cam.lookat[:] = d.xpos[torso_id]
+            v.cam.distance, v.cam.azimuth, v.cam.elevation = dist, az, el
+        except Exception as e:
+            print(f"[跳过] 打不开窗口（{e}），改为无窗口运行")
+
+    y0 = float(d.xpos[torso_id][1])
+    z0 = float(d.xpos[torso_id][2])
+    dt_sim = float(m.opt.timestep) * decimation
+    t_wall = time.perf_counter()
+
+    for k in range(steps):
+        out = sess.run(None, {inp_name: obs[None].astype(np.float32)})
+        action = np.asarray(out[0]).reshape(-1)[:29].astype(float)
+        last_action = action.copy()
+
+        target = np.clip(default29 + scale29 * action, ctrl_lo, ctrl_hi)
+        d.ctrl[:] = target
+        for _ in range(decimation):
+            mujoco.mj_step(m, d)
+        obs = build_obs()
+
+        if renderer is not None and k % max(1, every) == 0:
+            from PIL import Image
+            cam.lookat[:] = d.xpos[torso_id]
+            renderer.update_scene(d, camera=cam)
+            Image.fromarray(renderer.render()).save(rec / f"policy_{k:05d}.png")
+        elif v is not None:
+            if track:
+                v.cam.lookat[:] = d.xpos[torso_id]
+            v.sync()
+            if not v.is_running():
+                break
+            # 实时播放：控制在 50 Hz，落后就补睡
+            want = t_wall + (k + 1) * dt_sim
+            sleep = want - time.perf_counter()
+            if sleep > 0:
+                time.sleep(sleep)
+
+        if k % 100 == 0:
+            print(f"  t={k * dt_sim:5.1f}s  y={d.xpos[torso_id][1]:.2f}  "
+                  f"z={d.xpos[torso_id][2]:.2f}", end="\r", flush=True)
+
+    if v is not None:
+        v.close()
+    dy = float(d.xpos[torso_id][1]) - y0
+    dz = float(d.xpos[torso_id][2]) - z0
+    print(f"\n[OK] 跑完 {steps} 控制步（{steps * dt_sim:.1f}s）  "
+          f"Δy={dy:+.2f} m  Δz={dz:+.2f} m  末帧 z={d.xpos[torso_id][2]:.2f}")
+    if renderer is not None:
+        print(f"     PNG -> {rec}  合成: ffmpeg -framerate {1.0 / (dt_sim * max(1, every)):.0f} "
+              f"-i policy_%05d.png -pix_fmt yuv420p policy.mp4")
+    return dy
+
+
 # ---------------------------------------------------------------- 入口
 def load_traj(path: Path):
     z = np.load(str(path), allow_pickle=True)
@@ -307,7 +499,35 @@ def main() -> None:
     ap.add_argument("--kp-scale", type=float, default=1.0, help="phys: 比例增益缩放")
     ap.add_argument("--kd-scale", type=float, default=1.0, help="phys: 微分增益缩放")
     ap.add_argument("--max-time", type=float, default=None, help="phys: 最长仿真时间 s")
+    # policy 专用
+    ap.add_argument("--policy", default="none", choices=["none", "onnx"],
+                    help="onnx=用训练好的 ONNX 策略闭环跑（不读 npz）")
+    ap.add_argument("--onnx", default=None, help="policy: ONNX 策略路径")
+    ap.add_argument("--cmd-vy", type=float, default=0.25, help="policy: 侧向速度指令 m/s")
+    ap.add_argument("--spawn-y", type=float, default=0.30, help="policy: 初始 y 位置 m")
+    ap.add_argument("--steps", type=int, default=2000, help="policy: 控制步数（50Hz，2000=40s）")
     args = ap.parse_args()
+
+    if args.policy == "onnx":
+        if not args.onnx:
+            raise SystemExit("[错误] --policy onnx 需要 --onnx <policy.onnx>")
+        onnx_path = Path(args.onnx)
+        if not onnx_path.is_file():
+            raise SystemExit(f"[错误] 找不到 ONNX {onnx_path}")
+        params = TrainParams()
+        # build_model 会把 <motor> 换成 mjlab 训练用的 <position> 执行器，并保留地形
+        m = build_model(params, scene="stairs", xml_path=Path(args.scene).resolve())
+        m.opt.timestep = 0.002          # 与训练一致：500 Hz 物理 x 10 步 -> 50 Hz 控制
+        d = mujoco.MjData(m)
+        torso = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "torso_link")
+        print(f"场景 {Path(args.scene).name}   策略 {onnx_path.name}")
+        run_policy(m, d, onnx_path=onnx_path, cmd=(0.0, args.cmd_vy, 0.0),
+                   steps=args.steps, decimation=10, torso_id=torso,
+                   dist=args.dist, az=args.az, el=args.el,
+                   track=not args.no_track, record=args.record,
+                   every=max(1, args.every), gui=not args.no_gui,
+                   width=args.width, height=args.height, spawn_y=args.spawn_y)
+        return
 
     tp = Path(args.traj)
     if not tp.is_file():
