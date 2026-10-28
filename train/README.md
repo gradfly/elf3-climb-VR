@@ -168,3 +168,55 @@ python web/tools/bake_crab.py
 2. **落脚点奖励**：用 `terrain_scan` 查踏面中心，惩罚踩边。
 3. **侧向专门塑形**：直接奖励 world +Y 位移，而不只靠速度跟踪。
 4. 把 ONNX 接进 `crab_replay.py --policy onnx`。
+
+---
+
+## 9. 残差任务 `Elf3-Crab-Residual`（第 1 条已实现）
+
+旧任务 `Elf3-Crab-Stairs` 保持不动，可继续用 `model_9297.pt` 对比。
+新任务把 `crab_climb.py` 的步态离线做成参考表，策略只输出限幅残差。
+
+### 9.1 生成参考表（纯 CPU，约 90 s）
+
+```bash
+python train/assets/build_ref_tables.py
+# 48 组（rise 0–0.22 步长 0.02 × tread 0.24/0.30/0.36/0.40）
+# 全部通过后写出 train/assets/ref_tables/crab_ref_v1.npz（约 0.2 MB）
+```
+
+自检项：IK 误差、帧间二阶差（不是一阶——抬腿快是正常钟形加速）、
+`dy_cycle ≈ tread`、限位余量、以及 rise 0.12 vs 0.22 的敏感性 ≈0.37 rad。
+
+单独验证选表逻辑（不需要 mjlab）：
+
+```bash
+python train/mjlab_tasks/crab/ref_table.py
+```
+
+### 9.2 安装与训练
+
+```bash
+bash train/install_task.sh          # 会注册 4 个任务
+MUJOCO_GL=egl WANDB_MODE=disabled \
+  .venv/bin/train Elf3-Crab-Residual --env.scene.num-envs 1024 \
+  --agent.max-iterations 1000
+```
+
+### 9.3 与旧任务的区别
+
+| 项 | Elf3-Crab-Stairs | Elf3-Crab-Residual |
+|---|---|---|
+| 动作 | 绝对关节位置（默认站姿 offset） | **q_ref(相位) + 限幅残差** |
+| 观测 | 290（height_scan 1.6×1.0） | **393（height_scan 1.2×2.0 + 相位/参考）** |
+| 侧向感知 | ±0.5 m | **±1.0 m** |
+| 奖励 | 速度跟踪为主 | 速度 + **世界 +Y 进度** + **参考跟踪** + 转身/横漂惩罚 |
+| 指令 | 0.15–0.35 | **0.15–0.24**（与参考步速 0.18 匹配） |
+
+⚠️ 观测与动作语义都变了，**旧 checkpoint 不能加载**。
+
+### 9.4 首跑怎么判断对不对
+
+1. `play Elf3-Crab-Residual-Play --agent zero`：零残差时机器人应能**照脚本步态走 3–5 步再倒**。
+   若第 1 步就摔 → 相位、关节顺序或 offset 语义错了。
+2. 看 `Episode_Reward/ref_tracking` 初始应接近 1（残差≈0）。
+3. 500 轮后 `forward_progress_y` 应上升、`error_vel_xy` 应 < 0.25。

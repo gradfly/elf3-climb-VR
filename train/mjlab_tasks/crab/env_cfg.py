@@ -47,12 +47,13 @@ FOOT_BODIES = (r"^l_ankle_x_link$", r"^r_ankle_x_link$")
 FOOT_GEOMS = tuple(f"{s}_foot{i}_collision" for s in ("l", "r") for i in range(1, 8))
 
 
-def crab_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def crab_env_cfg(play: bool = False,
+                 scan_size: tuple[float, float] = (1.6, 1.0)) -> ManagerBasedRlEnvCfg:
     terrain_scan = RayCastSensorCfg(
         name="terrain_scan",
         frame=ObjRef(type="body", name="torso_link", entity="robot"),
         ray_alignment="yaw",
-        pattern=GridPatternCfg(size=(1.6, 1.0), resolution=0.1),
+        pattern=GridPatternCfg(size=scan_size, resolution=0.1),
         max_distance=5.0,
         exclude_parent_body=True,
         include_geom_groups=(0,),
