@@ -71,16 +71,20 @@ def _rebuild_rewards(cfg) -> None:
     r.pop("feet_swing_height", None)
     r.pop("track_angular_velocity", None)
 
-    # 残差动的幅度本来就小，平滑惩罚减半
+    # 2000 轮实测（每步加权值）：upright 0.92 + ref_tracking 0.49 + track_lin 0.86
+    # 合计 2.3 分几乎不用动就能拿到，而"走快"只多拿 forward_progress 0.107。
+    # 结果就是策略优先生存而不是前进 —— 这里把"站着也能拿的分"压下去。
+    if "upright" in r:
+        r["upright"].weight = 0.5          # 1.0 -> 0.5（原值 0.92/步，白送分）
     if "action_rate_l2" in r:
-        r["action_rate_l2"].weight = -0.05
+        r["action_rate_l2"].weight = -0.03  # -0.05 -> -0.03（原 -0.80/步，压步幅）
 
     r["forward_progress_y"] = RewardTermCfg(
-        func=X.forward_progress_y, weight=1.0,
+        func=X.forward_progress_y, weight=3.0,     # 1.0 -> 3.0，位移成为主奖励
         params={"command_name": "twist"},
     )
     r["ref_tracking"] = RewardTermCfg(
-        func=X.ref_tracking, weight=0.6,
+        func=X.ref_tracking, weight=0.3,           # 0.6 -> 0.3（原值已 0.81 饱和）
         params={"action_name": "joint_pos", "sigma": 0.35},
     )
     r["yaw_drift"] = RewardTermCfg(func=X.yaw_drift, weight=-0.5, params={})
@@ -97,6 +101,13 @@ def _retune_commands(cfg, play: bool) -> None:
 
 
 def _retune_curriculum(cfg) -> None:
+    # 地形升级默认要求 distance > 0.8 × commanded_distance，而 commanded_distance
+    # 含"早摔剩余时间应走的距离"。2000 轮时 81% 的回合在 9.3 s 摔掉，几乎必然降级，
+    # terrain 卡在 0.08、看不到台阶。放宽到 0.6，让"能走一段"的 env 先升上去。
+    tl = cfg.curriculum.get("terrain_levels") if cfg.curriculum else None
+    if tl is not None:
+        tl.params = {**(tl.params or {}), "promotion_fraction": 0.6}
+
     if "command_vel" not in cfg.curriculum:
         return
     cfg.curriculum["command_vel"] = CurriculumTermCfg(
