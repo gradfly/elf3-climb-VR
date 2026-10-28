@@ -104,14 +104,29 @@ def main() -> int:
     if base == head:
         print("已一致，无需推送")
         return 0
-    if not has_object(base):
-        sys.exit(
-            "[ERR] 远端 base 在本地不存在，无法计算差异。\n"
-            "      先执行: git fetch origin（网络允许时），或用 --base 指定一个本地存在的提交"
-        )
+
+    base_info = api("GET", f"/git/commits/{base}", tok=tok)
+    base_tree = base_info["tree"]["sha"]
+
+    # 远端 base 可能由 API 创建、本地没有该对象。此时找一个 tree 完全相同的
+    # 本地提交来算差异；新提交的父仍指向远端 base。
+    if has_object(base):
+        diff_base = base
+    else:
+        diff_base = None
+        for line in git("rev-list", "HEAD").decode().split():
+            if git("rev-parse", f"{line}^{{tree}}").decode().strip() == base_tree:
+                diff_base = line
+                break
+        if diff_base is None:
+            sys.exit(
+                "[ERR] 远端 base 在本地不存在，且没有 tree 相同的本地提交可作参照。\n"
+                "      先 git fetch origin 再试"
+            )
+        print(f"[INFO] 远端 base 本地缺失，改用同 tree 的本地提交 {diff_base[:10]} 计算差异")
 
     # 差异清单
-    out = git("diff", "--name-status", base, head).decode().strip()
+    out = git("diff", "--name-status", diff_base, head).decode().strip()
     if not out:
         print("[!] base..HEAD 无文件差异，但提交不同（可能只差元数据）。仍会推送。")
     entries, deletions = [], 0
@@ -137,7 +152,6 @@ def main() -> int:
     if deletions > MAX_DELETIONS:
         sys.exit(f"[ERR] 删除 {deletions} 个文件，超过安全阈值 {MAX_DELETIONS}，已中止")
 
-    base_tree = api("GET", f"/git/commits/{base}", tok=tok)["tree"]["sha"]
     tree = api("POST", "/git/trees", {"base_tree": base_tree, "tree": entries}, tok=tok)["sha"]
     if tree != local_tree:
         sys.exit(
