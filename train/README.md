@@ -86,6 +86,22 @@ MUJOCO_GL=egl uv run train Elf3-Crab-Stairs \
 - 课程：地形已带 `curriculum=True`，从近平地逐级升到 rise 0.22。
 - 日志：`logs/rsl_rl/elf3_crab/<时间戳>/`，每 50 iter 存 checkpoint。
 
+### 4.1 续训（可选）
+
+```bash
+MUJOCO_GL=egl WANDB_MODE=disabled \
+  .venv/bin/train Elf3-Crab-Stairs --env.scene.num-envs 1024 \
+  --agent.max-iterations 3000 --agent.resume True
+```
+
+三个**实测**结论（与直觉相反，别按累计理解）：
+
+- `--agent.max-iterations` 是**本次运行再跑多少轮**。从 800 轮的 checkpoint 续训写 2500，
+  会再跑 2500 轮，**不是**跑到 2500 总共。
+- checkpoint 命名是 `model_<本次轮数>.pt`（如 `model_2500.pt`），不是全局累计编号。
+- **课程会重置**：速度课程回到 0.05–0.12、地形等级回到 0。所以尽量一次跑够
+  （用 `tmux` / `screen` 挂着），少做多次续训，否则每次都要重新爬课程。
+
 ---
 
 ## 5. 导出可部署文件
