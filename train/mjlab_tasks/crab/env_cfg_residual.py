@@ -80,7 +80,13 @@ def _rebuild_rewards(cfg) -> None:
     if "upright" in r:
         r["upright"].weight = 0.5          # 1.0 -> 0.5（原值 0.92/步，白送分）
     if "action_rate_l2" in r:
-        r["action_rate_l2"].weight = -0.03  # -0.05 -> -0.03（原 -0.80/步，压步幅）
+        # -0.05 -> -0.03 -> **-0.01**（2026-10-29 第二次实测）
+        # 471 轮日志：action_rate_l2 = -0.1444 × 20 = **-2.89/回合**，
+        # 而 forward_progress_y 只有 0.0657 × 20 = **+1.31/回合** ——
+        # 平滑惩罚是前进奖励的 2.2 倍，等于在奖励它"别动"。
+        # α 到 1 之后参考步态满幅，残差需要更大幅度的调整，这个惩罚会更伤人。
+        # 再往下降没必要：0.01 时约 -0.96/回合，仍是前进奖励的 73%，够抑制抖动。
+        r["action_rate_l2"].weight = -0.01
 
     r["forward_progress_y"] = RewardTermCfg(
         func=X.forward_progress_y, weight=3.0,     # 1.0 -> 3.0，位移成为主奖励
@@ -90,7 +96,13 @@ def _rebuild_rewards(cfg) -> None:
         func=X.ref_tracking, weight=0.3,           # 0.6 -> 0.3（原值已 0.81 饱和）
         params={"action_name": "joint_pos", "sigma": 0.35},
     )
-    r["yaw_drift"] = RewardTermCfg(func=X.yaw_drift, weight=-0.5, params={})
+    # sin(yaw)²：转身就罚。螃蟹步的定义是「朝向不变 + 侧向平移」，
+    # 所以这条不是微调，是任务约束本身。
+    # -0.5 太轻：偏 30° 时每步 -0.5×0.25×0.02 = -0.0025，500 步才 -1.2，
+    # 而走完全程 +1.3 —— 转个身和走完全程代价相当，等于鼓励它转身走。
+    # -1.5 让 30° 偏转 ≈ -3.7/回合，明显痛于前进收益。注意 sin² 在 0 附近是
+    # 平的（二次），小角度几乎无罚，不会妨碍平衡调整。
+    r["yaw_drift"] = RewardTermCfg(func=X.yaw_drift, weight=-1.5, params={})
     r["lateral_drift"] = RewardTermCfg(func=X.lateral_drift, weight=-0.2, params={})
     # ⚠️ 奖励按 dt 缩放：一次性惩罚实际值 = weight × 0.02。
     # 原来 −5 只等于每次摔倒扣 0.1 分（日志 is_terminated −0.005 = −0.1/20s），
