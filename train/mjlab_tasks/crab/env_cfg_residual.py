@@ -71,8 +71,25 @@ def _rebuild_rewards(cfg) -> None:
     r = cfg.rewards
 
     # 去掉与参考步态冲突/无意义的项
-    r.pop("feet_swing_height", None)
+    #
+    # ⚠️ 2026-10-29 修一个静默 bug：这里原来写的是 "feet_swing_height"（多一个 s），
+    # 而 `crab_env_cfg` 的奖励字典里键名是 **"foot_swing_height"** —— pop 从来没
+    # 匹配上，这条惩罚一直在跑（日志里就有 Episode_Reward/foot_swing_height）。
+    #
+    # 它和 α 课程是直接打架的：α<1 时参考步态只抬 5~12 cm，而这条的
+    # target_height 是 0.18，等于一手要求"跟随参考"、一手罚"没抬到 18 cm"。
+    #
+    # 处理方式不是简单删掉 —— 删了抬脚就完全没人管，会退化成贴地蹭
+    # （实测 Metrics/peak_height_mean 只有 1.6 cm，正是这个退化的指纹）。
+    # 而是把两个高度项的目标统一压到 0.10 m：α=1 时参考抬约 18 cm，
+    # 0.10 只作为"必须真的离地"的下界，不再和参考抢梯度。
+    r.pop("feet_swing_height", None)          # 旧拼写，留着无害、也防止将来加回来
     r.pop("track_angular_velocity", None)
+
+    for _name in ("foot_swing_height", "foot_clearance"):
+        _term = r.get(_name)
+        if _term is not None and isinstance(getattr(_term, "params", None), dict):
+            _term.params["target_height"] = 0.10   # 0.18 -> 0.10（见上面的说明）
 
     # 2000 轮实测（每步加权值）：upright 0.92 + ref_tracking 0.49 + track_lin 0.86
     # 合计 2.3 分几乎不用动就能拿到，而"走快"只多拿 forward_progress 0.107。
@@ -222,13 +239,25 @@ def _retune_viewer(cfg) -> None:
 
 
 def _retune_curriculum(cfg) -> None:
-    # 地形升级默认要求 distance > 0.8 × commanded_distance，而 commanded_distance
-    # 含"早摔剩余时间应走的距离"。2000 轮时 81% 的回合在 9.3 s 摔掉，几乎必然降级，
-    # terrain 卡在 0.08、看不到台阶。放宽到 0.6，让"能走一段"的 env 先升上去。
-    tl = cfg.curriculum.get("terrain_levels") if cfg.curriculum else None
-    if tl is not None:
-        want = {**(tl.params or {}), "promotion_fraction": 0.6}
-        tl.params = _params_for(tl.func, want)
+    # ⚠️ 2026-10-29：不再靠 promotion_fraction 调门槛，**直接换掉整个课程项**。
+    # 内置 terrain_levels_vel 的 commanded_distance 会把「摔倒后剩余时间应走的
+    # 距离」补进去，等于摔得越早要求越高：实测 200 轮 ep_len=4.2 s 时要求走
+    # 3.04 m，实际只走 0.42 m -> 永远升不上去且必然降级 -> 永远卡在 flat，
+    # 一辈子见不到台阶。详见 mdp_extra.terrain_levels_time 的注释。
+    if cfg.curriculum is not None and "terrain_levels" in cfg.curriculum:
+        cfg.curriculum["terrain_levels"] = CurriculumTermCfg(
+            func=X.terrain_levels_time,
+            params={"promote_frac": 0.25, "demote_frac": 0.10, "min_dist": 0.30},
+        )
+
+    # 让一部分 env 开局就落在 easy 档（level 0~4），不用等课程从 0 慢慢爬。
+    # 旧版 mjlab 可能没有这个字段，setattr 失败就跳过。
+    terr = getattr(getattr(cfg, "scene", None), "terrain", None)
+    if terr is not None and hasattr(terr, "max_init_terrain_level"):
+        try:
+            terr.max_init_terrain_level = 4
+        except Exception as e:
+            print(f"[curriculum][warn] 设置 max_init_terrain_level 失败：{e}")
 
     if "command_vel" not in cfg.curriculum:
         return

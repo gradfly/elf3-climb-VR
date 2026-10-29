@@ -175,3 +175,79 @@ def ref_probe(env, action_name: str = "joint_pos") -> torch.Tensor:
     except Exception:
         pass
     return torch.zeros(env.num_envs, device=dev)
+
+
+def terrain_levels_time(env, env_ids, promote_frac: float = 0.25,
+                        demote_frac: float = 0.10, min_dist: float = 0.30,
+                        **kwargs) -> dict:
+    """按「活够久 + 真的挪了」升降地形，取代内置的「走够远」。
+
+    为什么必须换掉内置 terrain_levels_vel
+    ------------------------------------
+    内置的判据是：
+
+        time_left = max_episode_length_s - ep_len
+        commanded_distance = |cmd| * time_left + 已走距离   # 约等于 |cmd| * 20 s
+        move_up   = distance > 0.8 * commanded_distance
+        move_down = distance < 0.5 * commanded_distance
+
+    那段 `time_left` 的设计意图是「早摔不该减轻要求」，但后果是
+    **摔得越早、要求反而越高**。实测 200 轮 ep_len = 4.2 s：
+
+        要求走 0.8 × 3.8 m = 3.04 m，实际只走 0.42 m（|v_y| ≈ 0.1 m/s）
+
+    于是 `move_up` 永远 False、`move_down` 永远 True -> 全部 env 钉死在
+    level 0（flat，台阶 0~2 cm），策略一辈子见不到真台阶，只能学会在平地
+    上踉跄。2026-10-29 之前那 12000 轮无效训练是同一个机理。
+
+    现在的判据
+    ---------
+        升级：活到 max_episode_length 的 25%（5 s）**且**离开出生点 >= 0.30 m
+        降级：活不到 10%（2 s）
+        其余：保持不变
+
+    升降不对称（25% vs 10%），避免偶尔摔一次就被打回 level 0。
+    `min_dist` 那一条专门防「原地罚站也能升级」——站着不动拿不到难地形。
+
+    ⚠️ 副作用：这条判据只保证「站得住」，不保证「走得远」。推进靠
+    `forward_progress_y` 奖励项拉动；如果训练后 v_y 一直上不去，说明
+    该加重它，而不是把这条课程判据改回距离。
+    """
+    terrain = getattr(getattr(env, "scene", None), "terrain", None)
+    if terrain is None or not hasattr(terrain, "update_env_origins"):
+        return {}
+
+    step_dt = float(getattr(env, "step_dt", 0.02))
+    t_max = float(getattr(env, "max_episode_length_s", 20.0))
+
+    # 注意：本函数在 `_reset_idx` 里被调用，此时 episode_length_buf 还是
+    # 「刚结束那一回合的长度」，尚未清零 —— 内置实现也是这么用的。
+    t_alive = env.episode_length_buf[env_ids].to(torch.float32) * step_dt
+
+    # 离开出生点的水平距离（env_origins 此刻还是本回合的出生点）
+    try:
+        pos = _root_pos(env)[env_ids, :2]
+        origins = getattr(env.scene, "env_origins", None)
+        if origins is not None:
+            dist = torch.norm(pos - origins[env_ids, :2].to(pos.dtype), dim=1)
+        else:
+            dist = torch.zeros_like(t_alive)
+    except Exception:
+        dist = torch.zeros_like(t_alive)
+
+    move_up = (t_alive >= t_max * float(promote_frac)) & (dist >= float(min_dist))
+    move_down = (~move_up) & (t_alive < t_max * float(demote_frac))
+
+    # 首次 reset（还没走过一步）时 distance 无意义，冻结，否则会把所有 env 平白升级
+    if int(getattr(env, "common_step_counter", 1) or 0) == 0:
+        move_up = torch.zeros_like(move_up)
+        move_down = torch.zeros_like(move_down)
+
+    try:
+        terrain.update_env_origins(env_ids, move_up, move_down)
+    except TypeError as e:
+        print(f"[curriculum][ERR] update_env_origins 调用失败（版本差异？）：{e}")
+        return {}
+
+    levels = terrain.terrain_levels.float()
+    return {"mean": levels.mean(), "max": levels.max()}
