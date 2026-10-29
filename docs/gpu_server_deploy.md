@@ -170,17 +170,23 @@ bash train/install_task.sh              # 期望：已注册 4 个 Elf3-Crab-* �
 `install_task.sh` 会把 `train/mjlab_tasks/crab/*.py` 拷进 mjlab 的 `tasks/crab/`
 （mjlab 只自动导入自己 `tasks/` 下的子包）。**每次改完任务代码都要重跑一次。**
 
-### 4.6 生成残差参考表（残差任务必需）
+### 4.6 确认残差参考表
 
-参考表是派生产物，不入库，新机器必须重算一次（纯 CPU，约 90 s）：
+`train/assets/ref_tables/crab_ref_v1.npz`（约 207 KB，48 组 rise × tread）**已随仓库提供**，
+clone 下来即可用。确认一下它在：
+
+```bash
+ls -l train/assets/ref_tables/crab_ref_v1.npz   # 期望约 207 KB
+```
+
+只有在「改了几何参数域、要按新范围重建」或「文件缺失」时才需要重算（纯 CPU，约 90 s）：
 
 ```bash
 python train/assets/build_ref_tables.py
-# 产出 train/assets/ref_tables/crab_ref_v1.npz（48 组 rise × tread，约 0.2 MB）
 ```
 
-自检会验证 IK 误差、帧间二阶差、`dy_cycle ≈ tread`、限位余量，任一不过会直接报错。
-不生成就跑 `Elf3-Crab-Residual`，会在 reset 时报找不到参考表。
+自检会验证 IK 误差、帧间二阶差（不是一阶——抬腿快是正常钟形加速）、`dy_cycle ≈ tread`、
+限位余量，任一不过会直接报错。文件缺失时跑 `Elf3-Crab-Residual`，会在 reset 时报找不到参考表。
 
 ---
 
@@ -266,7 +272,7 @@ WANDB_MODE=disabled train Elf3-Crab-Residual \
 2. [ ] `bash scripts/bootstrap_gpu.sh` 末尾两行校验全绿（EGL + CUDA）
 3. [ ] `make_robot_xml.py` 输出 `nq=38 nv=37 nu=0`
 4. [ ] `install_task.sh` 输出 4 个任务
-5. [ ] `build_ref_tables.py` 跑通（残差任务）
+5. [ ] `train/assets/ref_tables/crab_ref_v1.npz` 存在（仓库自带，207 KB）
 6. [ ] 三层冒烟全过
 7. [ ] **`uv pip freeze > requirements.lock.txt` 并提交**——否则下次换机版本又会漂
 8. [ ] `logs/` 指向数据盘；`sync_back.sh` 定时回传配好
@@ -299,7 +305,7 @@ python train/export_onnx.py --task Elf3-Crab-Residual \
 | 2000 轮 | 约 1–3 h | 同上 |
 | 完整课程到可用策略 | 1–2 天 | 同上 |
 | 环境搭建（含下载） | 10–20 min | 视镜像与网络 |
-| 参考表重算 | 约 90 s（CPU） | `build_ref_tables.py` |
+| 参考表重建（仅改参数域时） | 约 90 s（CPU） | `build_ref_tables.py` |
 
 实际吞吐以训练日志里的 `fps` 为准，上表只用于估预算。
 
