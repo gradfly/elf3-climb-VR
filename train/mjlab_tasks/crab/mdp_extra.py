@@ -68,7 +68,16 @@ def ref_joint_pos(env, action_name: str = "joint_pos") -> torch.Tensor:
 
 # ---------------------------------------------------------------- 奖励
 def forward_progress_y(env, command_name: str = "twist") -> torch.Tensor:
-    """世界系 +Y 的推进速度（正数才给分），堵住「扭身横漂也拿分」。"""
+    """世界系 +Y 的推进速度（正数给分、倒退扣分），堵住「绕圈蹭分」。
+
+    ⚠️ 2026-10-30 修：原来末尾是 `clamp(v, min=0.0)`，负向直接抹成 0。
+    绕圈走的时候 dy 时正时负 —— 负的丢掉、正的照收，**净位移为 0 也拿满分**。
+    实测（6000 轮 checkpoint，play 无扰动 20 s）：净位移只有 0.53 m（0.026 m/s），
+    累计偏航 367°，而这条奖励报 0.113 m/s，差了 4 倍多。
+
+    现在倒退按 30% 计负分：绕圈的期望收益归零，但也不至于把策略吓成不敢动
+    （全额负分会让「原地站住」变成最优，那是另一个坑）。
+    """
     y = _root_pos(env)[:, 1]
     prev = getattr(env, "_crab_prev_y", None)
     if prev is None or prev.shape != y.shape:
@@ -86,7 +95,8 @@ def forward_progress_y(env, command_name: str = "twist") -> torch.Tensor:
         vmax = torch.full_like(v, 0.3)
     # clamp 要求 min/max 同为标量或同为张量；vmax 是逐环境张量，故用 minimum
     vmax = torch.as_tensor(vmax, dtype=v.dtype, device=v.device)
-    r = torch.minimum(torch.clamp(v, min=0.0), vmax)
+    v = torch.maximum(torch.minimum(v, vmax), -vmax)
+    r = torch.where(v >= 0.0, v, 0.3 * v)      # 倒退只罚 30%
     # episode 刚 reset 的那一步 dy 跨了重置，丢弃
     if hasattr(env, "episode_length_buf"):
         r = torch.where(env.episode_length_buf <= 1, torch.zeros_like(r), r)
@@ -104,14 +114,34 @@ def ref_tracking(env, action_name: str = "joint_pos",
 
 
 def yaw_drift(env) -> torch.Tensor:
-    """sin(yaw)^2：转身就罚。当前「步态怪异」的主要嫌疑之一。"""
+    """帧间偏航角速度的平方 (rad/s)²：转圈要走不动。
+
+    ⚠️ 2026-10-30 换实现。原来是 `sin(yaw)**2`，它对 yaw 和 yaw+2π 取值相同 ——
+    **原地绕一整圈回到原点就「无罪」**。实测（6000 轮 checkpoint，play 20 s）
+    累计偏航 367°，而这条只报 sin²=0.018（等价于净偏航 7.5°），等于完全没罚。
+
+    现在看「每步的 yaw 变化」：先用 atan2(sinΔ, cosΔ) 把帧间差 wrap 到 [-π, π]
+    （否则 ±π 处会跳变），再除 dt 得 rad/s，最后取平方 —— 平方让小抖动几乎不罚、
+    大转动重罚，比绝对值更不容易把正常步态的轻微摆动也一起压死。
+    """
     try:
         q = _root_quat(env)
         w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
         yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-        return torch.sin(yaw) ** 2
     except Exception:
         return torch.zeros(env.num_envs, device=env.device)
+
+    prev = getattr(env, "_crab_prev_yaw", None)
+    if prev is None or prev.shape != yaw.shape:
+        env._crab_prev_yaw = yaw.clone()
+        return torch.zeros_like(yaw)
+    d = torch.atan2(torch.sin(yaw - prev), torch.cos(yaw - prev))
+    env._crab_prev_yaw = yaw.clone()
+    # reset 那一步跨了 episode，丢弃
+    if hasattr(env, "episode_length_buf"):
+        d = torch.where(env.episode_length_buf <= 1, torch.zeros_like(d), d)
+    dt = float(getattr(env, "step_dt", 0.02))
+    return (d / max(dt, 1e-6)) ** 2
 
 
 def lateral_drift(env) -> torch.Tensor:

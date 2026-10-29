@@ -105,6 +105,10 @@ def _rebuild_rewards(cfg) -> None:
         # 再往下降没必要：0.01 时约 -0.96/回合，仍是前进奖励的 73%，够抑制抖动。
         r["action_rate_l2"].weight = -0.01
 
+    # 世界 +Y 的净推进（倒退按 30% 扣分）。
+    # ⚠️ 2026-10-30：原来这条只收正向（clamp min=0），绕圈走时 dy 时正时负，
+    # 负的丢掉、正的照收 -> 净位移为 0 也能拿满分。实测 play 20 s 净位移
+    # 0.53 m（0.026 m/s）而这条报 0.113 m/s，差 4 倍。现在倒退要扣分了。
     r["forward_progress_y"] = RewardTermCfg(
         func=X.forward_progress_y, weight=3.0,     # 1.0 -> 3.0，位移成为主奖励
         params={"command_name": "twist"},
@@ -113,12 +117,14 @@ def _rebuild_rewards(cfg) -> None:
         func=X.ref_tracking, weight=0.3,           # 0.6 -> 0.3（原值已 0.81 饱和）
         params={"action_name": "joint_pos", "sigma": 0.35},
     )
-    # sin(yaw)²：转身就罚。螃蟹步的定义是「朝向不变 + 侧向平移」，
-    # 所以这条不是微调，是任务约束本身。
-    # -0.5 太轻：偏 30° 时每步 -0.5×0.25×0.02 = -0.0025，500 步才 -1.2，
-    # 而走完全程 +1.3 —— 转个身和走完全程代价相当，等于鼓励它转身走。
-    # -1.5 让 30° 偏转 ≈ -3.7/回合，明显痛于前进收益。注意 sin² 在 0 附近是
-    # 平的（二次），小角度几乎无罚，不会妨碍平衡调整。
+    # 帧间偏航角速度平方 (rad/s)²：转身/绕圈就罚。螃蟹步的定义是
+    # 「朝向不变 + 侧向平移」，所以这条不是微调，是任务约束本身。
+    # ⚠️ 2026-10-30 换了实现。原用 sin(yaw)²，它对 yaw 和 yaw+2π 取值相同 ——
+    # 原地绕一整圈回到原点就「无罪」：实测 6000 轮 checkpoint 在 play 里 20 s
+    # 累计转了 367°，这条只报 sin²=0.018（等价净偏航 7.5°），等于完全没罚。
+    # 现在看每步的 (Δyaw/dt)²，绕圈会持续累计。
+    # 标定：0.7 rad/s -> 0.49 -> 每步 -0.735，一回合（约 600 步）≈ -8.8 分，
+    # 相对单回合回报 20 分够痛但不主导；0.1 rad/s 只 -0.015/步，不干扰正常步态。
     r["yaw_drift"] = RewardTermCfg(func=X.yaw_drift, weight=-1.5, params={})
     r["lateral_drift"] = RewardTermCfg(func=X.lateral_drift, weight=-0.2, params={})
     # ⚠️ 奖励按 dt 缩放：一次性惩罚实际值 = weight × 0.02。
