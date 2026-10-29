@@ -278,6 +278,32 @@ def _retune_curriculum(cfg) -> None:
     )
 
 
+def _alpha_fixed(play: bool) -> float:
+    """参考幅度 α 的取值：<0 表示走课程，>=0 表示固定。
+
+    优先级：环境变量 ELF3_ALPHA > play 默认 1.0 > 训练走课程(-1)。
+
+    ⚠️ 为什么训练也得能固定：续训时动作项是**新建**的，内部 `_step_i` 从 0
+    开始，`_alpha_now()` 于是把 α 退回 0（参考 = 纯站姿）。可策略是在 α=1 下
+    训出来的，残差量级、相位节奏全按满幅步态长出来 —— 参考突然变回站姿，
+    两者错位，行为当场崩，等于把学会的东西又打回去。
+
+    所以续训一个 α 已经满幅的 checkpoint，必须 `ELF3_ALPHA=1.0` 把它钉住：
+
+        ELF3_ALPHA=1.0 .venv/bin/train Elf3-Crab-Residual --agent.resume True ...
+
+    另一个方向也成立：想复现「第 N 轮时的真实水平」做录像/对拍，
+    就用当时的 `Metrics/ref_alpha`（见 README 10.2.0）。
+    """
+    raw = os.environ.get("ELF3_ALPHA")
+    if raw is not None and raw.strip() != "":
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            print(f"[cfg][warn] ELF3_ALPHA={raw!r} 不是数字，忽略")
+    return 1.0 if play else -1.0
+
+
 def crab_residual_env_cfg(play: bool = False):
     cfg = crab_env_cfg(play=play, scan_size=SCAN_SIZE)
 
@@ -310,9 +336,9 @@ def crab_residual_env_cfg(play: bool = False):
         # play 默认满幅（α=1），但训练是走课程的：790 轮时 ref_alpha 才 0.527。
         # 直接回放等于「满幅参考 + 为半幅参考训出来的残差」，残差补不上差额，
         # 画面会明显比训练时差 —— 别据此判断策略退步。
-        # 想复现第 N 轮的真实行为：ELF3_ALPHA=<当时的 Metrics/ref_alpha>，
-        # 例如 ELF3_ALPHA=0.527。
-        alpha_fixed=(float(os.environ.get("ELF3_ALPHA", 1.0)) if play else -1.0),
+        # 训练和 play 都可被 ELF3_ALPHA 覆盖（-1 以外的值 = 固定 α），
+        # 续训 α 已满幅的 checkpoint 时必须 `ELF3_ALPHA=1.0`，理由见 _alpha_fixed。
+        alpha_fixed=_alpha_fixed(play),
     )
 
     _rebuild_observations(cfg)
