@@ -376,6 +376,25 @@ ELF3_ALPHA=0.527 ...          # 取日志里同轮次的 Metrics/ref_alpha
 
 不设则按 1.0。**看最终成品时反而应该不设**（那时 α 课程也早满幅了）。
 
+#### 10.2.0.1 续训时：`ELF3_ALPHA` 是「固定」，不是「接上」
+
+三个变量容易混：
+
+| 变量 | 语义 | 用在哪 |
+|---|---|---|
+| `ELF3_ALPHA` | **固定** α，训练和 play 都吃 | 回放某一版 checkpoint |
+| `ELF3_ALPHA_START` | 课程的**起点**，从它线性升到 1.0 | 续训一个 α 已涨到一半的 checkpoint |
+| `ELF3_RAMP_ITERS` | 课程总长（iteration，默认 1500） | 想快/慢点走完课程 |
+
+⚠️ 2026-10-30 踩过：resume 时写 `ELF3_ALPHA=0.70` 想「接上进度」，而它的语义是
+**固定** —— 结果整个 4049 轮的 α 都锁在 0.70，步幅只有脚本步态的七成，
+爬 22 cm 台阶不够用。正确写法是让课程从 0.70 接着走：
+
+```bash
+ELF3_ALPHA_START=0.70 ELF3_RAMP_ITERS=600 \
+  .venv/bin/train Elf3-Crab-Residual --agent.resume True ...
+```
+
 #### 10.2.1 方式 A：诊断脚本录 mp4（推荐）
 
 一条命令同时拿到**视频 + 全部数字**（`v_y` / yaw 速率 / `rise_est` / 基座 z），  

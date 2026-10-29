@@ -404,6 +404,40 @@ def _alpha_fixed(play: bool) -> float:
     return 1.0 if play else -1.0
 
 
+def _alpha_start() -> float:
+    """α 课程的起点（只在 alpha_fixed<0 的课程模式下生效）。
+
+    为什么需要它：续训一个 α 已经涨到 0.70 的 checkpoint 时，
+    · 不设任何环境变量 -> ramp 从 0 重来，参考打回站姿，策略当场崩；
+    · 设 `ELF3_ALPHA=0.70` -> 那是「固定」语义，永远到不了 1.0（实测 4049 轮
+      全部锁在 0.70，步幅只有脚本步态的七成，爬 22 cm 台阶不够用）。
+    正确做法是 `ELF3_ALPHA_START=0.70`：从 0.70 继续线性升到 1.0。
+    """
+    raw = os.environ.get("ELF3_ALPHA_START")
+    if raw is None or raw.strip() == "":
+        return 0.0
+    try:
+        return min(1.0, max(0.0, float(raw)))
+    except ValueError:
+        print(f"[cfg][warn] ELF3_ALPHA_START={raw!r} 不是数字，按 0 处理")
+        return 0.0
+
+
+def _ramp_steps(play: bool) -> int:
+    """α 课程总步数。可用 `ELF3_RAMP_ITERS`（单位 iteration，内部 ×24）覆盖。"""
+    default = 1500 * 24
+    if play:
+        return default
+    raw = os.environ.get("ELF3_RAMP_ITERS")
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return max(1, int(float(raw))) * 24
+    except ValueError:
+        print(f"[cfg][warn] ELF3_RAMP_ITERS={raw!r} 不是数字，用默认 1500")
+        return default
+
+
 def crab_residual_env_cfg(play: bool = False):
     cfg = crab_env_cfg(play=play, scan_size=SCAN_SIZE)
 
@@ -434,7 +468,8 @@ def crab_residual_env_cfg(play: bool = False):
         # α=0 时参考退化为默认站姿 —— 与基线任务「动作全零」等价，
         # 早期训练难度和已验证的基线一致，再随课程渐变为脚本步态。
         ref_stand=tuple(DEFAULT_JOINT_POS),
-        ramp_steps=1500 * 24,           # 1500 iter 线性升到满幅
+        ramp_steps=_ramp_steps(play),   # 默认 1500 iter，ELF3_RAMP_ITERS 可覆盖
+        alpha_start=_alpha_start(),      # 课程起点，ELF3_ALPHA_START 可覆盖
         # play 默认满幅（α=1），但训练是走课程的：790 轮时 ref_alpha 才 0.527。
         # 直接回放等于「满幅参考 + 为半幅参考训出来的残差」，残差补不上差额，
         # 画面会明显比训练时差 —— 别据此判断策略退步。
