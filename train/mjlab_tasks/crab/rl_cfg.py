@@ -4,8 +4,34 @@ from __future__ import annotations
 from mjlab.rl import RslRlModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 
 
+def _logger_name(default: str = "wandb") -> str:
+    """挑一个真能用的 logger。
+
+    ⚠️ 2026-10-29 实跑报错：rsl_rl 的 `WandbLogWriter` 里写死了
+    `wandb.Settings(start_method="thread")`，而服务器装的 wandb 已经把
+    `start_method` 移除（Settings 变成 pydantic 模型、extra=forbid），于是
+    `runner.learn()` 一进来就
+        ValidationError: 1 validation error for Settings / start_method
+        Extra inputs are not permitted
+    修法不是改 rsl_rl（在 venv 里，改了会被覆盖），而是**当场探测**：
+    wandb 能接受那次调用就继续用 wandb，否则退回 tensorboard。
+    这样换机器/换版本都不会再卡同一个地方。
+    """
+    if default != "wandb":
+        return default
+    try:
+        import wandb  # noqa: F401
+        wandb.Settings(start_method="thread")   # 兼容性探针
+        return "wandb"
+    except Exception as e:
+        print(f"[rl_cfg][warn] wandb 与本机 rsl_rl 不兼容（{type(e).__name__}: "
+              f"{str(e).splitlines()[0][:80]}），logger 改用 tensorboard。"
+              f" 想强制用 wandb：--agent.logger wandb")
+        return "tensorboard"
+
+
 def elf3_crab_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
-    return RslRlOnPolicyRunnerCfg(
+    cfg = RslRlOnPolicyRunnerCfg(
         actor=RslRlModelCfg(
             hidden_dims=(512, 256, 128),
             activation="elu",
@@ -41,3 +67,10 @@ def elf3_crab_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         num_steps_per_env=24,
         max_iterations=30_000,
     )
+    # 用 setattr 而不是构造参数：服务器这份 mjlab 可能比 main 旧，
+    # 万一没有 `logger` 字段也不会 TypeError。
+    try:
+        cfg.logger = _logger_name(default=getattr(cfg, "logger", "wandb"))
+    except Exception:
+        pass
+    return cfg

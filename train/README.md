@@ -105,6 +105,26 @@ MUJOCO_GL=egl WANDB_MODE=disabled \
 - **课程会重置**：速度课程回到 0.05–0.12、地形等级回到 0。所以尽量一次跑够
   （用 `tmux` / `screen` 挂着），少做多次续训，否则每次都要重新爬课程。
 
+### 4.2 logger：wandb 不可用会自动退回 tensorboard
+
+`rl_cfg.py` 里的 `_logger_name()` 会**先探测**再决定：调一次
+`wandb.Settings(start_method="thread")`（rsl_rl 的 `WandbLogWriter` 就是这么调的），
+抛异常就改用 `tensorboard`，并在启动日志里打一行 `[rl_cfg][warn]`。
+
+服务器上的典型报错（不是项目代码问题，是 wandb 与 rsl_rl 版本不匹配）：
+
+```
+pydantic_core._pydantic_core.ValidationError: 1 validation error for Settings
+start_method  Extra inputs are not permitted
+```
+
+新版 wandb 的 `Settings` 改成 pydantic 模型且 `extra=forbid`，`start_method` 已移除，
+而 rsl_rl 里写死了这个参数。**不要去改 venv 里的 rsl_rl**（升级会被覆盖）。
+
+- 用 tensorboard 时指标写在 `logs/rsl_rl/elf3_crab/<时间戳>/`，
+  看曲线：`tensorboard --logdir logs/rsl_rl/elf3_crab --port 6006`（配 SSH 端口转发）。
+- 想强制用 wandb：`--agent.logger wandb`（必须先把 wandb 降到兼容版本）。
+
 ---
 
 ## 5. 导出可部署文件
