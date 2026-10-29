@@ -337,42 +337,88 @@ python sim/vendor/bxi_controller_ros2/src/bxi_example_py_elf3/launch/crab_replay
 所以 `Elf3-Crab-Residual-Play` 已默认改成 **WORLD 固定机位**（`env_cfg_residual._retune_viewer`），
 台阶在画面里不动，机器人相对它平移才看得出来。
 
-### 10.2 录视频
+### 10.2 看当前权重的动画
 
-**推荐用诊断脚本录**（`--record`）——它会自动把相机对准 env 的真实出生点：
+三种方式，按「想不想拿到数字」和「要不要实时交互」选。
+
+#### 10.2.0 先找 checkpoint，再对齐 α
 
 ```bash
 cd ~/elf3 && git pull --ff-only
 
-MUJOCO_GL=egl .venv/bin/python scripts/diagnose_policy.py \
-  --task Elf3-Crab-Residual-Play \
-  --checkpoint logs/rsl_rl/elf3_crab/<run>/model_XXXX.pt \
-  --num-envs 1 --steps 1000 --terrain-level 5 \
-  --record /tmp/walk.mp4
+RUN=$(ls -td logs/rsl_rl/elf3_crab/*/ | head -1)   # 按 mtime 取正在写的那个
+CKPT=$(ls -t ${RUN}model_*.pt | head -1)           # save_interval=50，取最新的
+echo "$CKPT"
 ```
 
-一次性拿到**视频 + 全部数字**（`v_y` / yaw 速率 / `rise_est` / 基座 z），
-不用再单独跑一遍 play。可调项：`--record-offset "0,0.9,0.35"`（注视点相对出生点）、
-`--record-dist 6`、`--record-elev -15`、`--record-azim 90`。
+⚠️ **最大的坑是 α，不是 checkpoint**。`Elf3-Crab-Residual-Play` 的 `alpha_fixed`
+默认写死 **1.0**（满幅脚本步态），而训练是走 α 课程的 —— 790 轮时
+`Metrics/ref_alpha` 才 **0.527**。直接回放等于「满幅参考 + 为半幅参考训出来的残差」，
+残差补不上那个差额，画面会明显比训练时差很多，很容易被误读成「策略退步」。
 
-用 `play --video` 也可以，但要记住两个默认值坑：
+所以看「这一版 checkpoint 的真实水平」时，一律用 `ELF3_ALPHA` 对齐：
 
 ```bash
-MUJOCO_GL=egl .venv/bin/play Elf3-Crab-Residual-Play \
-  --checkpoint-file logs/rsl_rl/elf3_crab/<run>/model_XXXX.pt \
+ELF3_ALPHA=0.527 ...          # 取日志里同轮次的 Metrics/ref_alpha
+```
+
+不设则按 1.0。**看最终成品时反而应该不设**（那时 α 课程也早满幅了）。
+
+#### 10.2.1 方式 A：诊断脚本录 mp4（推荐）
+
+一条命令同时拿到**视频 + 全部数字**（`v_y` / yaw 速率 / `rise_est` / 基座 z），
+不用另外跑一遍 play。相机会自动对准 env 的真实出生点：
+
+```bash
+MUJOCO_GL=egl ELF3_ALPHA=0.527 .venv/bin/python scripts/diagnose_policy.py \
+  --task Elf3-Crab-Residual-Play \
+  --checkpoint "$CKPT" \
+  --num-envs 4 --steps 1000 \
+  --terrain-level 6 \
+  --record /tmp/crab_walk.mp4
+```
+
+- `--steps 1000` = 20 s。少于 200 看不到一个完整步态周期。
+- `--terrain-level` 要挑**和当前训练水平相当**的：看日志 `Curriculum/terrain_levels/mean`。
+  注意**列（地形类型）是随机的**，env 0 可能落在 flat 列、画面里根本没有台阶 ——
+  那就换 `--record-env 1` / `2` / `3` 再录一条。
+- 可调：`--record-offset "0,0.9,0.35"`（注视点相对出生点）、`--record-dist 6`、
+  `--record-elev -15`、`--record-azim 90`。
+
+下载到本地：`scp ubuntu22:/tmp/crab_walk.mp4 .`（别留在 `/tmp`，重启会清）。
+
+#### 10.2.2 方式 B：viser 实时看
+
+想看某个动作的细节、或者想边看边调相机时用它：
+
+```bash
+MUJOCO_GL=egl ELF3_ALPHA=0.527 .venv/bin/play Elf3-Crab-Residual-Play \
+  --checkpoint-file "$CKPT" --num-envs 1
+```
+
+启动后终端会打印一个 viser 地址，本地做端口转发才能打开（Windows 用 MobaXterm
+的隧道，或 VSCode Remote 的 Ports 面板）。
+
+- `--checkpoint-file` 是**必须**的（不是 `--checkpoint`），启动时必须看到
+  `[INFO]: Loading checkpoint: ...`，没有这行就是没加载上。
+- 训练同时开 play 会多占一份显存；报 OOM 就先 `Ctrl+B D` 挂起训练再录。
+
+#### 10.2.3 方式 C：`play --video`（无窗口，落地在 run 目录）
+
+```bash
+MUJOCO_GL=egl ELF3_ALPHA=0.527 .venv/bin/play Elf3-Crab-Residual-Play \
+  --checkpoint-file "$CKPT" \
   --num-envs 1 \
   --video --video-length 1000 --video-width 1280 --video-height 720
 ```
 
-- `--checkpoint-file` 是**必须**的（不是 `--checkpoint`）；启动时必须看到
-  `[INFO]: Loading checkpoint: ...`，没有这行就是没加载。
 - 默认 `--video-length 200` 只录 **4 秒**，太短，至少给 1000（=20 s）。
 - 默认分辨率只有 320×240，必须显式放大，否则看不清脚。
 - 视频落在 `logs/rsl_rl/elf3_crab/<run>/videos/play/rl-video-step-0.mp4`。
 - ⚠️ `play` 的固定机位只对**单 env、出生点在原点**有效：mjlab 的
   `OffscreenRenderer` 直接用 `camera.lookat = cfg.lookat`，**不加 env_origins**，
   而多 env 场景里 env0 可能在世界 x=27.8 处 —— 那时画面里是一片空地。
-  这种就用上面的 `--record`。
+  这种就用 10.2.1 的 `--record`。
 
 ### 10.3 画面看什么（按顺序）
 
