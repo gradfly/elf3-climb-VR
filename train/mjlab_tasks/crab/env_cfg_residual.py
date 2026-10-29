@@ -87,10 +87,20 @@ def _rebuild_rewards(cfg) -> None:
     r.pop("feet_swing_height", None)          # 旧拼写，留着无害、也防止将来加回来
     r.pop("track_angular_velocity", None)
 
+    # ⚠️ 2026-10-30 晚：target 0.10 -> 0.15，swing_height 权重 -0.25 -> -1.0。
+    # 依据是 FK 实测：参考步态（rise=0.12 / tread=0.30）的脚抬升幅度是 0.174 m，
+    # 而策略的 Metrics/peak_height_mean 只有 0.029 —— 只跟了 17%。视频里能直接
+    # 看到它一直在碗底平台蹭、从不抬腿上台阶。
+    # 原因是抬脚「收益≈0、风险很大」：air_time 够不到门槛（见下），
+    # swing_height 每次落地只罚 0.125，而抬脚失衡一次就是 -5 分。
+    # 加权后：峰值停在 2.9 cm 时每回合约 -13 分（相对回报 ~32 是 41%），
+    # 真抬到 15 cm 则 cost=0、不罚 —— 这才是引导而不是单纯加痛。
     for _name in ("foot_swing_height", "foot_clearance"):
         _term = r.get(_name)
         if _term is not None and isinstance(getattr(_term, "params", None), dict):
-            _term.params["target_height"] = 0.10   # 0.18 -> 0.10（见上面的说明）
+            _term.params["target_height"] = 0.15
+    if "foot_swing_height" in r:
+        r["foot_swing_height"].weight = -1.0
 
     # 2000 轮实测（每步加权值）：upright 0.92 + ref_tracking 0.49 + track_lin 0.86
     # 合计 2.3 分几乎不用动就能拿到，而"走快"只多拿 forward_progress 0.107。
@@ -133,11 +143,14 @@ def _rebuild_rewards(cfg) -> None:
     #    就是因为"抬脚"在奖励函数里没有任何正收益。
     #    threshold_max=1.2：参考步态摆动期 33/90 帧，相位速率 0.6~1.8 时墙钟
     #    摆动时长 0.37~1.1 s，上限必须覆盖慢节奏那一端。
+    # threshold_min 0.12 -> 0.05：实测 air_time_mean 只有 0.0704，原门槛让这条
+    # 奖励恒为 0 —— 连「抬起了一点」都拿不到钱。降到 0.05 后 7 cm 的摆动就有
+    # 正收益；weight 0.6 -> 1.0，让「抬脚」成为明确赚钱的项。
     _air = r.get("air_time")
     if _air is not None and isinstance(getattr(_air, "params", None), dict):
-        _air.weight = 0.6
+        _air.weight = 1.0
         _air.params.update(
-            threshold_min=0.12, threshold_max=1.2, command_threshold=0.05,
+            threshold_min=0.05, threshold_max=1.2, command_threshold=0.05,
         )
 
     # ③ 参考跟踪是唯一逼出「真正侧步」的项，但 0.3 的权重给的分太少：
