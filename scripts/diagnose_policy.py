@@ -75,8 +75,17 @@ def main(argv=None) -> int:
 
   device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
 
-  env_cfg = load_env_cfg(args.task, play=True)
-  agent_cfg = load_rl_cfg(args.task)
+  try:
+    env_cfg = load_env_cfg(args.task, play=True)
+    agent_cfg = load_rl_cfg(args.task)
+  except KeyError:
+    from mjlab.tasks.registry import list_tasks
+    have = sorted(t for t in list_tasks() if "Crab" in t)
+    print(f"[ERR] 任务 {args.task!r} 没注册。当前 Crab 任务：{have or '（一个都没有）'}")
+    print("      原因通常是 venv 里那份任务包是旧的（install_task.sh 以前是 cp 复制）。")
+    print("      先执行：bash train/install_task.sh")
+    return 2
+
   env_cfg.scene.num_envs = args.num_envs
 
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device)

@@ -45,7 +45,10 @@ python -c "import mjlab, mujoco_warp; print('mjlab ok')"
 
 # 2.3 把任务包安装进 mjlab（它只自动导入 mjlab/tasks/ 下的子包）
 bash train/install_task.sh
-#   期望输出：已注册: ['Elf3-Crab-Stairs', 'Elf3-Crab-Stairs-Play']
+#   期望输出：四个任务齐全 ✔
+#   ['Elf3-Crab-Stairs', 'Elf3-Crab-Stairs-Play', 'Elf3-Crab-Residual', 'Elf3-Crab-Residual-Play']
+#   默认用**软链接**（site-packages/mjlab/tasks/crab -> 仓库目录），所以 git pull 后立刻生效；
+#   若文件系统不支持软链接，用 bash train/install_task.sh --copy（那就每次 pull 后都要重跑）。
 ```
 
 若 `install_task.sh` 报找不到 `mjlab`，说明当前 venv 没激活。
