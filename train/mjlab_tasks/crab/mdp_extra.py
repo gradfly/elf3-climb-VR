@@ -122,9 +122,14 @@ def forward_progress_y(env, command_name: str = "twist",
     # （相位速率下限 0.6），净位移应≈0。按 v_cmd 归一化会把 5 cm/s 的任何漂移
     # 都当成满分，所以这类 env 改成"越不动越高分"，与内置 exp 核在 0 指令下的
     # 行为一致。
+    # ⚠️ 2026-10-30：still 必须打折。drive 的上限是 1.0，still 若也是 1.0，
+    # 这批 standing env 站着不动就是 1.0×5.0 = 5.0/步，反而高于跟参考步态的
+    # 0.85×5.0 = 4.25 —— 站着比走还赚。它们由 rel_standing_envs 随机指定、
+    # 策略自己选不了，但满分会把 value baseline 整体抬高、稀释"走"的梯度。
+    # 打五折后站着 0.5 = 2.5/步，明显低于认真走。
     active = v_cmd > float(v_floor)
     drive = torch.clamp(ema / torch.clamp(v_cmd, min=float(v_floor)), 0.0, 1.0)
-    still = torch.clamp(1.0 - ema.abs() / float(v_floor), 0.0, 1.0)
+    still = 0.5 * torch.clamp(1.0 - ema.abs() / float(v_floor), 0.0, 1.0)
     r = torch.where(active, drive, still)
 
     # episode 刚 reset 的那一步 dy 跨了重置（含随机落点），丢弃并重置 EMA，
@@ -134,6 +139,15 @@ def forward_progress_y(env, command_name: str = "twist",
         if bool(reset.any()):
             ema = torch.where(reset, torch.zeros_like(ema), ema)
             r = torch.where(reset, torch.zeros_like(r), r)
+
+    # EMA 冷启动：tau=1.8 s 从 0 收敛到 95% 要 5.4 s，而回合均长 ~12 s ——
+    # 前 1.8 s（90 步）的 drive 系统性偏低（只有稳态的 60~80%），等于每个回合
+    # 白扣一截，而且回合越短扣得越狠（和 ep_len 强耦合）。
+    # 这一段不给分也不罚；EMA 照常累积（所以出这段时已经是热态），只是不进奖励。
+    if hasattr(env, "episode_length_buf"):
+        warm = env.episode_length_buf < int(round(float(tau) / max(dt, 1e-6)))
+        r = torch.where(warm, torch.zeros_like(r), r)
+
     env._crab_vy_ema = ema
     return r
 
