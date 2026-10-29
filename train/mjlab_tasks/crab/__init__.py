@@ -13,6 +13,7 @@ from mjlab.tasks.registry import register_mjlab_task
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
 from .env_cfg import crab_env_cfg
+from .env_cfg_residual import crab_residual_env_cfg
 from .rl_cfg import elf3_crab_ppo_runner_cfg
 
 register_mjlab_task(
@@ -27,6 +28,23 @@ register_mjlab_task(
     task_id="Elf3-Crab-Stairs-Play",
     env_cfg=crab_env_cfg(play=False),
     play_env_cfg=crab_env_cfg(play=True),
+    rl_cfg=elf3_crab_ppo_runner_cfg(),
+    runner_cls=VelocityOnPolicyRunner,
+)
+
+# ---- 残差任务（按 docs/crab_rl_training.md 的思路）----
+register_mjlab_task(
+    task_id="Elf3-Crab-Residual",
+    env_cfg=crab_residual_env_cfg(play=False),
+    play_env_cfg=crab_residual_env_cfg(play=True),
+    rl_cfg=elf3_crab_ppo_runner_cfg(),
+    runner_cls=VelocityOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Elf3-Crab-Residual-Play",
+    env_cfg=crab_residual_env_cfg(play=False),
+    play_env_cfg=crab_residual_env_cfg(play=True),
     rl_cfg=elf3_crab_ppo_runner_cfg(),
     runner_cls=VelocityOnPolicyRunner,
 )

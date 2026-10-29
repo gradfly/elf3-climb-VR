@@ -47,12 +47,13 @@ FOOT_BODIES = (r"^l_ankle_x_link$", r"^r_ankle_x_link$")
 FOOT_GEOMS = tuple(f"{s}_foot{i}_collision" for s in ("l", "r") for i in range(1, 8))
 
 
-def crab_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def crab_env_cfg(play: bool = False,
+                 scan_size: tuple[float, float] = (1.6, 1.0)) -> ManagerBasedRlEnvCfg:
     terrain_scan = RayCastSensorCfg(
         name="terrain_scan",
         frame=ObjRef(type="body", name="torso_link", entity="robot"),
         ray_alignment="yaw",
-        pattern=GridPatternCfg(size=(1.6, 1.0), resolution=0.1),
+        pattern=GridPatternCfg(size=scan_size, resolution=0.1),
         max_distance=5.0,
         exclude_parent_body=True,
         include_geom_groups=(0,),
@@ -78,6 +79,21 @@ def crab_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         reduce="netforce",
         num_slots=1,
         track_air_time=True,
+    )
+
+    # 躯干/腰/头 与地形的接触。只用于残差任务的非法接触终止（crab_env_cfg 不使用），
+    # 放在这里是为了让传感器定义只有一处。
+    torso_ground = ContactSensorCfg(
+        name="torso_ground_contact",
+        primary=ContactMatch(
+            mode="body",
+            pattern=r"^(torso_link|waist_[xyz]_link|head_[yz]_link)$",
+            entity="robot",
+        ),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found", "force"),
+        reduce="netforce",
+        num_slots=1,
     )
 
     actor_terms = {
@@ -351,7 +367,7 @@ def crab_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 terrain_generator=CRAB_STAIRS_CFG,
                 max_init_terrain_level=2,
             ),
-            sensors=(terrain_scan, foot_height_scan, feet_ground),
+            sensors=(terrain_scan, foot_height_scan, feet_ground, torso_ground),
             num_envs=1,
             extent=2.0,
         ),
@@ -375,7 +391,11 @@ def crab_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             njmax=1500,
             mujoco=MujocoCfg(
                 timestep=0.002,
-                iterations=10,
+                iterations=20,          # 10 太紧：脚掌冲击/台阶接触时常撞上限
+                # mujoco-warp 用 float32，tolerance=1e-8 在单精度下**永远达不到**，
+                # 求解器每步都跑满迭代并打印 "solver iterations limit reached"。
+                # 1e-6 在 float32 下可达：一旦收敛就提前退出，既安静又更快。
+                tolerance=1e-6,
                 ls_iterations=20,
                 ccd_iterations=500,
             ),
@@ -391,6 +411,9 @@ def crab_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         cfg.events.pop("push_robot", None)
         cfg.terminations.pop("out_of_terrain_bounds", None)
         cfg.curriculum = {}
+        # viser 的速度滑块写死 min=0.1，lin_vel_x=(0,0) 会让 GUI 初始化直接抛异常。
+        # 只在 play 模式放宽一点点，不影响训练用的配置。
+        cfg.commands["twist"].ranges.lin_vel_x = (0.0, 0.1)
         cfg.events["randomize_terrain"] = EventTermCfg(
             func=envs_mdp.randomize_terrain, mode="reset", params={}
         )
