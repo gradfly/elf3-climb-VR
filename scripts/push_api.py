@@ -31,6 +31,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 OWNER, REPO = "gradfly", "elf3-climb-VR"
 DEFAULT_BRANCH = "main"
@@ -90,6 +91,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--branch", default=DEFAULT_BRANCH)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--files", nargs="*", default=None,
+                    help="只推这些文件（从工作区读取），以远端 tree 为底，忽略本地历史差异")
+    ap.add_argument("--message", default=None, help="提交消息（默认取本地 HEAD 的消息）")
     args = ap.parse_args()
 
     tok = get_token()
@@ -108,63 +112,88 @@ def main() -> int:
     base_info = api("GET", f"/git/commits/{base}", tok=tok)
     base_tree = base_info["tree"]["sha"]
 
-    # 远端 base 可能由 API 创建、本地没有该对象。此时找一个 tree 完全相同的
-    # 本地提交来算差异；新提交的父仍指向远端 base。
-    if has_object(base):
-        diff_base = base
-    else:
-        diff_base = None
-        for line in git("rev-list", "HEAD").decode().split():
-            if git("rev-parse", f"{line}^{{tree}}").decode().strip() == base_tree:
-                diff_base = line
-                break
-        if diff_base is None:
-            sys.exit(
-                "[ERR] 远端 base 在本地不存在，且没有 tree 相同的本地提交可作参照。\n"
-                "      先 git fetch origin 再试"
-            )
-        print(f"[INFO] 远端 base 本地缺失，改用同 tree 的本地提交 {diff_base[:10]} 计算差异")
-
-    # 差异清单
-    out = git("diff", "--name-status", diff_base, head).decode().strip()
-    if not out:
-        print("[!] base..HEAD 无文件差异，但提交不同（可能只差元数据）。仍会推送。")
     entries, deletions = [], 0
-    for line in out.splitlines():
-        parts = line.split("\t")
-        status, path = parts[0], parts[-1]
-        if status.startswith("D"):
-            entries.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
-            deletions += 1
-            print(f"  删除 {path}")
-            continue
-        mode = git("ls-tree", head, path).decode().split()[0]
-        raw = git("show", f"{head}:{path}")
-        blob = api(
-            "POST",
-            "/git/blobs",
-            {"content": base64.b64encode(raw).decode(), "encoding": "base64"},
-            tok=tok,
-        )["sha"]
-        entries.append({"path": path, "mode": mode, "type": "blob", "sha": blob})
-        print(f"  写入 {path} ({mode})")
+    if args.files:
+        # 只推指定文件：从工作区读，base_tree 用远端的，不依赖本地历史
+        local_tree = None
+        for path in args.files:
+            fp = Path(path)
+            if not fp.is_file():
+                sys.exit(f"[ERR] 文件不存在: {path}")
+            ls = git("ls-files", "-s", path).decode().split()
+            mode = ls[0] if ls else "100644"
+            # 让 git 按 .gitattributes 做换行归一化（CRLF -> LF），再取 blob 内容
+            sha_local = git("hash-object", "-w", "--path", path, path).decode().strip()
+            raw = git("cat-file", "blob", sha_local)
+            blob = api(
+                "POST",
+                "/git/blobs",
+                {"content": base64.b64encode(raw).decode(), "encoding": "base64"},
+                tok=tok,
+            )["sha"]
+            entries.append({"path": path.replace("\\", "/"), "mode": mode, "type": "blob", "sha": blob})
+            print(f"  写入 {path} ({mode}, {len(raw)} B)")
+        print(f"[INFO] 按文件推送 {len(entries)} 个；跳过本地 tree 比对（本地缺远端对象）")
+    else:
+        # 远端 base 可能由 API 创建、本地没有该对象。此时找一个 tree 完全相同的
+        # 本地提交来算差异；新提交的父仍指向远端 base。
+        if has_object(base):
+            diff_base = base
+        else:
+            diff_base = None
+            for line in git("rev-list", "HEAD").decode().split():
+                if git("rev-parse", f"{line}^{{tree}}").decode().strip() == base_tree:
+                    diff_base = line
+                    break
+            if diff_base is None:
+                sys.exit(
+                    "[ERR] 远端 base 在本地不存在，且没有 tree 相同的本地提交可作参照。\n"
+                    "      先 git fetch origin，或用 --files 指定要推的文件"
+                )
+            print(f"[INFO] 远端 base 本地缺失，改用同 tree 的本地提交 {diff_base[:10]} 计算差异")
+
+        # 差异清单
+        out = git("diff", "--name-status", diff_base, head).decode().strip()
+        if not out:
+            print("[!] base..HEAD 无文件差异，但提交不同（可能只差元数据）。仍会推送。")
+        for line in out.splitlines():
+            parts = line.split("\t")
+            status, path = parts[0], parts[-1]
+            if status.startswith("D"):
+                entries.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
+                deletions += 1
+                print(f"  删除 {path}")
+                continue
+            mode = git("ls-tree", head, path).decode().split()[0]
+            raw = git("show", f"{head}:{path}")
+            blob = api(
+                "POST",
+                "/git/blobs",
+                {"content": base64.b64encode(raw).decode(), "encoding": "base64"},
+                tok=tok,
+            )["sha"]
+            entries.append({"path": path, "mode": mode, "type": "blob", "sha": blob})
+            print(f"  写入 {path} ({mode})")
 
     if deletions > MAX_DELETIONS:
         sys.exit(f"[ERR] 删除 {deletions} 个文件，超过安全阈值 {MAX_DELETIONS}，已中止")
 
     tree = api("POST", "/git/trees", {"base_tree": base_tree, "tree": entries}, tok=tok)["sha"]
-    if tree != local_tree:
-        sys.exit(
-            f"[ERR] 新 tree 与本地不一致：remote {tree[:10]} vs local {local_tree[:10]}\n"
-            "      可能有重命名/权限位差异，先人工确认，别强推"
-        )
-    print(f"tree 校验通过: {tree[:10]}")
+    if local_tree is not None:
+        if tree != local_tree:
+            sys.exit(
+                f"[ERR] 新 tree 与本地不一致：remote {tree[:10]} vs local {local_tree[:10]}\n"
+                "      可能有重命名/权限位差异，先人工确认，别强推"
+            )
+        print(f"tree 校验通过: {tree[:10]}")
+    else:
+        print(f"新 tree: {tree[:10]}（按文件推送，未与本地 HEAD 比对）")
 
     if args.dry_run:
         print("[dry-run] 不写入")
         return 0
 
-    msg = git("log", "-1", "--format=%B", head).decode()
+    msg = args.message if args.message else git("log", "-1", "--format=%B", head).decode()
     author = {
         "name": git("log", "-1", "--format=%an", head).decode().strip(),
         "email": git("log", "-1", "--format=%ae", head).decode().strip(),
@@ -189,10 +218,12 @@ def main() -> int:
 
     # 校验远端 tree
     remote_tree = api("GET", f"/git/commits/{new['sha']}", tok=tok)["tree"]["sha"]
-    if remote_tree == local_tree:
+    if remote_tree != tree:
+        print("[WARN] 远端 tree 与刚创建的 tree 不一致，请检查")
+    elif local_tree is not None:
         print("远端 tree 与本地一致 ✔")
     else:
-        print("[WARN] 远端 tree 与本地不一致，请检查")
+        print("远端 tree 与本次提交一致 ✔（按文件推送）")
 
     if new["sha"] != head:
         print(
