@@ -135,3 +135,43 @@ def is_terminated(env) -> torch.Tensor:
         if v is not None:
             return v.to(torch.float32)
     return torch.zeros(env.num_envs, device=env.device)
+
+
+def ref_probe(env, action_name: str = "joint_pos") -> torch.Tensor:
+    """把参考步态/地形估计的内部量写进 `Metrics/*`，本身不参与学习。
+
+    为什么需要它
+    ------------
+    `rise_est` 是「height_scan 到底有没有读到台阶」的唯一证据 —— 它恒为 0 时
+    参考步态锁死在平地档，训练再久也是平地策略（2026-10-29 就这么白训了 12000 轮）。
+    没有这一路指标就只能靠猜。
+
+    为什么权重是 1e-9 而不是 0
+    -------------------------
+    mjlab 的 RewardManager 对 `weight == 0.0` 的项是 `continue` —— **连 func 都不调用**，
+    所以写不进任何日志。用 1e-9：函数照跑、对 reward 的污染量级 1e-9 × 0.02，可忽略。
+    """
+    dev = _root_pos(env).device
+    log = getattr(env, "extras", None)
+    log = log.get("log") if isinstance(log, dict) else None
+    try:
+        term = _term(env, action_name)
+    except Exception:
+        return torch.zeros(env.num_envs, device=dev)
+
+    def _put(key, t):
+        if log is not None:
+            log[key] = torch.as_tensor(t, device=dev).float().mean()
+
+    try:
+        _put("Metrics/scan_ok", torch.tensor(1.0 if term.scan_ok else 0.0, device=dev))
+        _put("Metrics/rise_est", term.rise_est)
+        _put("Metrics/tread_est", term.tread_est)
+        if term.rise_valid is not None:
+            _put("Metrics/rise_valid_frac", term.rise_valid.to(torch.float32))
+        if term.raw_rise is not None:
+            _put("Metrics/rise_raw", term.raw_rise)
+        _put("Metrics/ref_alpha", torch.tensor(float(term.ref_alpha), device=dev))
+    except Exception:
+        pass
+    return torch.zeros(env.num_envs, device=dev)

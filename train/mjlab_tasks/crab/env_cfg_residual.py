@@ -97,6 +97,12 @@ def _rebuild_rewards(cfg) -> None:
     # −150 × 0.02 = −3.0/次，约占单回合回报 30%，够痛但不主导。
     r["is_terminated"] = RewardTermCfg(func=X.is_terminated, weight=-150.0, params={})
 
+    # 探针：只把 rise_est / tread_est / scan_ok 写进 Metrics/*，不影响学习。
+    # 权重必须非零（0 会让 mjlab 整项跳过、连 func 都不调用）。
+    r["ref_probe"] = RewardTermCfg(
+        func=X.ref_probe, weight=1e-9, params={"action_name": "joint_pos"},
+    )
+
 
 def _retune_commands(cfg, play: bool) -> None:
     twist = cfg.commands["twist"]
