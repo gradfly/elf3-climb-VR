@@ -175,12 +175,18 @@ def _retune_viewer(cfg) -> None:
     跟拍相机下机器人永远在画面中央，台阶跟着画面一起退，
     **肉眼完全看不出它到底走了没有** —— 一段 16 s 的视频就这么被误读成
     "一次侧步都没有"，而同一份 checkpoint 无界面实测 v_y=0.126 m/s。
-    判断是否螃蟹步必须让「台阶」这个静止参照物在画面里不动，
-    所以这里默认改成 WORLD 固定机位。
 
-    可用环境变量临时覆盖（不用改代码）：
-        ELF3_VIEWER_ORIGIN=world|asset   （asset = 退回跟拍）
-        ELF3_VIEWER_LOOKAT="0,0.8,0.3"   （世界系注视点）
+    ⚠️ 2026-10-29 晚：按使用习惯把默认机位改回 **AUTO（跟拍）**，方便看脚下细节。
+    代价就是上面那个坑回来了 —— 判断「到底有没有侧移」时必须显式切固定机位：
+
+        ELF3_VIEWER_ORIGIN=world   固定机位：台阶在画面里不动，机器人相对它平移
+        ELF3_VIEWER_ORIGIN=asset   跟资产根，比 auto 更近
+
+    或者干脆别靠肉眼，看诊断脚本的 v_y / yaw 速率（README 10.5）。
+
+    可用环境变量（不用改代码）：
+        ELF3_VIEWER_ORIGIN=auto|world|asset   （默认 auto = 跟拍）
+        ELF3_VIEWER_LOOKAT="0,0.8,0.3"        （世界系注视点，仅 world 模式自动设）
         ELF3_VIEWER_DIST=6 / ELEV=-18 / AZIM=90
         ELF3_VIEWER_W=1280 / H=720
     """
@@ -200,7 +206,7 @@ def _retune_viewer(cfg) -> None:
     _set("width", int(os.environ.get("ELF3_VIEWER_W", 1280)))
     _set("height", int(os.environ.get("ELF3_VIEWER_H", 720)))
 
-    origin = os.environ.get("ELF3_VIEWER_ORIGIN", "world").strip().lower()
+    origin = os.environ.get("ELF3_VIEWER_ORIGIN", "auto").strip().lower()
     Ot = getattr(type(v), "OriginType", None)
     if Ot is not None:
         # world -> 固定机位（能看出位移）；asset -> 跟拍（能看清脚下细节）
@@ -230,8 +236,11 @@ def _retune_viewer(cfg) -> None:
             _set("lookat", tuple(float(t) for t in lookat.split(",")))
         except Exception:
             print(f"[viewer][warn] ELF3_VIEWER_LOOKAT={lookat!r} 解析失败，用默认值")
-    else:
-        # 机器人从碗底平地出发沿 +Y 走，注视点放在前方一点，能容纳 ~5 m 位移
+    elif origin in ("world", "w"):
+        # 只有世界系固定机位才需要手给注视点：机器人从碗底平地出发沿 +Y 走，
+        # 放在前方一点，能容纳 ~5 m 位移。
+        # 跟拍（auto/asset）模式下 lookat 是相对资产的偏移，硬塞世界坐标会把
+        # 镜头甩到空地上（画面里看不到机器人） —— 所以这里不再无条件设。
         _set("lookat", (0.0, 0.8, 0.3))
     _set("distance", float(os.environ.get("ELF3_VIEWER_DIST", 6.0)))
     _set("elevation", float(os.environ.get("ELF3_VIEWER_ELEV", -18.0)))
