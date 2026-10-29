@@ -307,7 +307,12 @@ def crab_residual_env_cfg(play: bool = False):
         # 早期训练难度和已验证的基线一致，再随课程渐变为脚本步态。
         ref_stand=tuple(DEFAULT_JOINT_POS),
         ramp_steps=1500 * 24,           # 1500 iter 线性升到满幅
-        alpha_fixed=1.0 if play else -1.0,   # play 直接用满幅步态
+        # play 默认满幅（α=1），但训练是走课程的：790 轮时 ref_alpha 才 0.527。
+        # 直接回放等于「满幅参考 + 为半幅参考训出来的残差」，残差补不上差额，
+        # 画面会明显比训练时差 —— 别据此判断策略退步。
+        # 想复现第 N 轮的真实行为：ELF3_ALPHA=<当时的 Metrics/ref_alpha>，
+        # 例如 ELF3_ALPHA=0.527。
+        alpha_fixed=(float(os.environ.get("ELF3_ALPHA", 1.0)) if play else -1.0),
     )
 
     _rebuild_observations(cfg)
