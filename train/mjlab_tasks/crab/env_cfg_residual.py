@@ -250,12 +250,16 @@ def _retune_curriculum(cfg) -> None:
             params={"promote_frac": 0.25, "demote_frac": 0.10, "min_dist": 0.30},
         )
 
-    # 让一部分 env 开局就落在 easy 档（level 0~4），不用等课程从 0 慢慢爬。
-    # 旧版 mjlab 可能没有这个字段，setattr 失败就跳过。
+    # 初始等级只给 0~1。
+    # ⚠️ 2026-10-29 更正：之前设成 4，理由是「让一部分 env 开局就落在 easy 档」，
+    # 但那是基于「level 0 = flat」这个错误前提（见 terrain_cfg 顶部的说明）。
+    # 实际上 curriculum 只调行、列（类型）是随机且终身的：level 0 就已经覆盖
+    # flat/easy/mid/hard 四种类型，设成 4 等于把 hard 列的 env 直接推到
+    # 8 cm + 4/9×14 cm ≈ 14 cm，而它们连平地都还站不稳。
     terr = getattr(getattr(cfg, "scene", None), "terrain", None)
     if terr is not None and hasattr(terr, "max_init_terrain_level"):
         try:
-            terr.max_init_terrain_level = 4
+            terr.max_init_terrain_level = 1
         except Exception as e:
             print(f"[curriculum][warn] 设置 max_init_terrain_level 失败：{e}")
 
