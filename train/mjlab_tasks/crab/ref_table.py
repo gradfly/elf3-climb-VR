@@ -16,6 +16,31 @@ import numpy as np
 import torch
 
 
+def scan_to_heights(frame_z: torch.Tensor, hit_z: torch.Tensor,
+                    distances: torch.Tensor, max_distance: float) -> torch.Tensor:
+    """把 raycast 输出拼成「躯干高出地形」的高度场，返回 [B, F*N]。
+
+    单独抽成纯函数是为了能被本地自检覆盖 —— 2026-10-29 的教训：
+    原实现用 `frame_pos_w[:, :, 2:3]`（[B,1,1]）直接减 `hit_pos_w[..., 2]`
+    （[B,N]），广播成 [B,B,N]，展平后长度是 B*N，被下游维度守卫静默丢弃，
+    于是 rise_est 全程 0.000、参考步态永远停在平地档，白训 12000 轮。
+    B=1 时广播恰好正确，所以回放看不出来，只有多环境才暴露。
+
+    Args:
+      frame_z: [B, F, 1] 各帧的世界 z。
+      hit_z: [B, F*N] 命中点世界 z（未命中时等于射线原点 z）。
+      distances: [B, F*N] 命中距离，-1 表示未命中。
+      max_distance: 未命中时填入的高度。
+    """
+    B, total = int(distances.shape[0]), int(distances.shape[1])
+    F = int(frame_z.shape[1])
+    N = total // max(F, 1)
+    h = frame_z - hit_z.view(B, F, N)                       # [B,F,N]
+    miss = (distances < 0).view(B, F, N)
+    h = torch.where(miss, torch.full_like(h, float(max_distance)), h)
+    return h.reshape(B, total)
+
+
 class RefTable:
     """按 (rise, tread) 参数化的周期参考表。"""
 
@@ -205,6 +230,23 @@ def _selftest() -> int:
     rise, _, valid = tb.estimate(hs)
     print(f"[selftest] with miss row       rise={float(rise[0]):.3f} valid={bool(valid[0])}")
     ok_all = ok_all and abs(float(rise[0]) - 0.12) < 0.02
+
+    # 5b) 回归：scan_to_heights 在 B>1 时必须给 [B, N]（广播 bug 的守门测试）
+    for Bt in (1, 4, 8):
+        Fq = 1
+        fr = torch.full((Bt, Fq, 3), 1.5)
+        fr[..., 2] = 1.5
+        d = torch.full((Bt, Fq * nx * ny), 1.0)
+        d[:, :nx] = -1.0                                    # 前 nx 条射线 miss
+        hitz = torch.full((Bt, Fq * nx * ny), 1.5)
+        hitz[:, nx:] = 0.0
+        hh = scan_to_heights(fr[:, :, 2:3], hitz, d, 5.0)
+        want = (Bt, Fq * nx * ny)
+        shape_ok = tuple(hh.shape) == want
+        vals_ok = abs(float(hh[0, 0]) - 5.0) < 1e-5 and abs(float(hh[0, nx]) - 1.5) < 1e-5
+        print(f"[selftest] scan_to_heights B={Bt} -> {tuple(hh.shape)} "
+              f"(want {want}) {'OK' if shape_ok and vals_ok else 'FAIL'}")
+        ok_all = ok_all and shape_ok and vals_ok
 
     # 6) select 形状/单调性
     B = 4

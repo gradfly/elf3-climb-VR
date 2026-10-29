@@ -18,7 +18,7 @@ import torch
 
 from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
 
-from .ref_table import RefTable
+from .ref_table import RefTable, scan_to_heights
 
 # 模块级缓存：同一进程内多个 env 复用同一张表
 _TABLE_CACHE: dict[tuple[str, str], RefTable] = {}
@@ -154,6 +154,11 @@ class ResidualGaitAction(JointPositionAction):
         self._ref_v = torch.zeros(self._B, device=dev)
         self._step_i = 0
         self._warned_no_scan = False
+        # 诊断用：地形估计链路是否真的跑通了（见 _read_heights 的 bug 说明）
+        self._scan_ok = False
+        self._scan_shape: tuple[int, ...] = ()
+        self._last_valid: torch.Tensor | None = None
+        self._last_raw_rise: torch.Tensor | None = None
 
         # offset 必须是张量，父类在 use_default_offset=False 时会留成 float
         self._offset = torch.zeros(self._B, self._D, device=dev)
@@ -210,19 +215,36 @@ class ResidualGaitAction(JointPositionAction):
         return self._stand + alpha * (q_gait - self._stand)
 
     def _read_heights(self) -> torch.Tensor | None:
-        """从 terrain_scan 传感器取「躯干高出地形」的高度（米），[B,N]。"""
+        """从 terrain_scan 传感器取「躯干高出地形」的高度（米），[B, F*N]。
+
+        ⚠️ 2026-10-29 致命 bug（rise_est 恒为 0.000 的真正原因）
+        ------------------------------------------------------
+        原来写的是 `z = frame_pos_w[:, :, 2:3]`（形状 [B,1,1]）减
+        `hit_pos_w[..., 2]`（形状 [B,N]）。二者广播成 **[B,B,N]**，
+        `reshape(B, -1)` 于是得到 [B, B*N]（B=4 时 1092 列而不是 273），
+        紧接着被 `_update_terrain` 的维度守卫判为不符 -> **每帧都直接 return，
+        estimate() 一次都没执行过**。于是 `_rise` 永远停在 0、`_tread` 永远
+        停在 mid_tread(0.36)，参考步态锁死在平地档：
+          * `rise_est = 0.000 (min 0.000 / max 0.000)`
+          * `tread_est = 0.360`  <- 恰好等于 RefTable.mid_tread 初值
+        B=1 时 (1,1,1)-(1,N) 广播恰好是 (1,1,N)，reshape 后正确，
+        所以单环境回放看不出来，1024 env 的训练与 4/8 env 的诊断里全程失效。
+        正确写法与 mjlab 自己的 `envs_mdp.height_scan` 保持一致：
+        先把两个操作数都 view 成 [B,F,N] 再相减。
+        """
         try:
             sensor = self._env.scene["terrain_scan"]
             data = sensor.data
-            z = data.frame_pos_w[:, :, 2:3]                  # [B,F,1]
-            hit = data.hit_pos_w[..., 2]                     # [B,F,N]
-            miss = data.distances < 0
-            h = z - hit
-            h = torch.where(miss, torch.full_like(h, float(sensor.cfg.max_distance)), h)
-            return h.reshape(self._B, -1)
+            self._scan_ok = True
+            return scan_to_heights(
+                data.frame_pos_w[:, :, 2:3],      # [B,F,1]
+                data.hit_pos_w[..., 2],           # [B,F*N]
+                data.distances,                   # [B,F*N]，-1 = miss
+                float(sensor.cfg.max_distance),
+            )
         except Exception as e:
             if not self._warned_no_scan:
-                print(f"[residual][warn] 读不到 terrain_scan，rise 恒为 0（{e}）")
+                print(f"[residual][warn] 读不到 terrain_scan，rise 恒为 0（{e!r}）")
                 self._warned_no_scan = True
             return None
 
@@ -232,14 +254,22 @@ class ResidualGaitAction(JointPositionAction):
             return
         nx = int(round(self.cfg.scan_size[0] / self.cfg.scan_resolution)) + 1
         ny = int(round(self.cfg.scan_size[1] / self.cfg.scan_resolution)) + 1
+        self._scan_shape = tuple(h.shape)
         if h.shape[-1] != nx * ny:
+            # 以前这里是静默 return，导致 rise 永远是 0 却没人发现。
             if not self._warned_no_scan:
-                print(f"[residual][warn] height_scan 维度 {h.shape[-1]} != {nx}x{ny}，跳过估计")
+                print(f"[residual][ERR] height_scan 展平长度 {int(h.shape[-1])} != {nx}x{ny}="
+                      f"{nx * ny}（h.shape={tuple(h.shape)}），参考步态将停在平地档。"
+                      f" 这是 shape 广播 bug 的典型症状，别忽略这条。")
                 self._warned_no_scan = True
+            self._scan_ok = False
             return
+        self._scan_ok = True
         rise, tread, valid = self._table.estimate(h, nx=nx, ny=ny,
                                                   size_y=float(self.cfg.scan_size[1]),
                                                   res=float(self.cfg.scan_resolution))
+        self._last_valid = valid
+        self._last_raw_rise = rise
         a = float(self.cfg.rise_ema_alpha)
         new_rise = torch.where(valid, a * rise + (1 - a) * self._rise, self._rise)
         # 长期无效（平地）-> 缓慢回落到 0
@@ -343,6 +373,25 @@ class ResidualGaitAction(JointPositionAction):
     @property
     def rise_est(self) -> torch.Tensor:
         return self._rise
+
+    @property
+    def scan_ok(self) -> bool:
+        """地形估计链路是否跑通（False = height_scan 取数/维度有问题）。"""
+        return self._scan_ok
+
+    @property
+    def scan_shape(self) -> tuple[int, ...]:
+        return self._scan_shape
+
+    @property
+    def raw_rise(self) -> torch.Tensor | None:
+        """未过 EMA 的原始 rise 估计（最近一次刷新）。"""
+        return self._last_raw_rise
+
+    @property
+    def rise_valid(self) -> torch.Tensor | None:
+        """最近一次刷新时是否在扫描带内找到上升边缘。"""
+        return self._last_valid
 
     @property
     def tread_est(self) -> torch.Tensor:

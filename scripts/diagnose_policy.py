@@ -91,6 +91,69 @@ def _force_terrain_level(base, level: int) -> bool:
   return False
 
 
+def _dump_scan(base, term, env_i: int = 0) -> None:
+  """把 height_scan 原样打印出来，用来判断地形估计链路到底断在哪一环。
+
+  只有三种可能，看这张表就能分开：
+    1) 绝大多数格子是 5.0 -> 射线全 miss（geom group 被排除 / 传感器没接上）
+    2) 剖面是一串台阶 -> 数据没问题，是估计器（检测带/阈值/广播）的问题
+    3) 剖面完全平 -> 这个 env 真的站在平地上（地形等级 0 或平台太宽）
+  """
+  print("-" * 62)
+  print(f"[scan] 取数：shape={tuple(term.scan_shape) or '—'} scan_ok={term.scan_ok}")
+  if not term.scan_ok:
+    print("[scan] ❌ 地形估计链路没跑通 —— 这就是 rise 恒为 0 的原因，"
+          "不是地形问题。看上面有没有 [residual][ERR]/[warn] 那行。")
+
+  h = term._read_heights()
+  if h is None:
+    print("[scan] _read_heights() 返回 None（传感器读不到，见上方 warning）")
+    return
+  nx = int(round(term.cfg.scan_size[0] / term.cfg.scan_resolution)) + 1
+  ny = int(round(term.cfg.scan_size[1] / term.cfg.scan_resolution)) + 1
+  if h.shape[-1] != nx * ny:
+    print(f"[scan] ❌ 展平长度 {h.shape[-1]} != {nx}x{ny}={nx * ny}；h.shape={tuple(h.shape)}"
+          " -> 典型 shape 广播 bug")
+    return
+
+  H = h[env_i].view(ny, nx)
+  print(f"[scan] env{env_i} 高度场（单位 cm，行=y 从 -1.0 到 +1.0，列=x 从 -0.6 到 +0.6）")
+  ys = [-1.0 + i * 0.1 for i in range(ny)]
+  print("        x:" + "".join(f"{-0.6 + j * 0.1:+5.1f}" for j in range(nx)))
+  for i in range(ny):
+    row = "".join(f"{float(v) * 100:5.1f}" for v in H[i])
+    print(f"  y={ys[i]:+.1f} {row}")
+
+  miss = (H > 4.9).to(torch.float32).mean()
+  print(f"[scan] 未命中比例 {float(miss) * 100:.0f}%（≈100% 说明射线没打到地形）")
+
+  # 估计器内部量（与 ref_table.estimate 同一套算法，逐步打印便于定位）
+  mid = nx // 2
+  prof = H[:, max(0, mid - 1):mid + 2].median(dim=-1).values
+  print("[scan] 中央 x 剖面的 y 方向高度（cm）与相邻差 dh（正=沿 +y 抬升）：")
+  dh = prof[:-1] - prof[1:]
+  for i in range(ny - 1):
+    flag = "  <-- 上升边" if float(dh[i]) > 0.03 else ""
+    print(f"   y={ys[i]:+.1f}->{ys[i + 1]:+.1f}  h={float(prof[i]) * 100:7.2f}"
+          f"  dh={float(dh[i]) * 100:+6.2f}{flag}")
+
+  raw = term.raw_rise
+  val = term.rise_valid
+  if raw is not None and val is not None:
+    print(f"[scan] estimate -> raw_rise={float(raw[env_i]):.3f} m "
+          f"valid={bool(val[env_i])}  (在检测带内找到上升边={bool(val[env_i])})")
+  print(f"[scan] 机器人 root=({float(_root_pos(base)[env_i, 0]):+.2f}, "
+        f"{float(_root_pos(base)[env_i, 1]):+.2f}, "
+        f"{float(_root_pos(base)[env_i, 2]):+.2f})")
+  terr = getattr(getattr(base, "scene", None), "terrain", None)
+  for attr in ("terrain_levels", "levels"):
+    v = getattr(terr, attr, None)
+    if v is not None and torch.is_tensor(v):
+      print(f"[scan] 地形等级 env{env_i} = {int(v[env_i])}")
+      break
+  print("-" * 62)
+
+
 def main(argv=None) -> int:
   ap = argparse.ArgumentParser()
   ap.add_argument("--task", default="Elf3-Crab-Residual-Play")
@@ -101,6 +164,9 @@ def main(argv=None) -> int:
   ap.add_argument("--terrain-level", type=int, default=None,
                   help="钉住地形等级（0=平甲板；越大台阶越高）")
   ap.add_argument("--device", default=None)
+  ap.add_argument("--dump-scan", action="store_true",
+                  help="打印 height_scan 原始高度场 + 估计器内部量，用于定位 rise 恒为 0")
+  ap.add_argument("--dump-env", type=int, default=0, help="--dump-scan 打印哪个 env")
   args = ap.parse_args(argv)
 
   import mjlab.tasks  # noqa: F401  触发任务注册
@@ -182,6 +248,15 @@ def main(argv=None) -> int:
   except Exception:
     term = None
 
+  if args.dump_scan:
+    with torch.no_grad():
+      obs = env.step(policy(obs))[0]      # 先走一步，让传感器的 hit_pos_w 是新的
+    if term is None:
+      print("[scan] 拿不到 joint_pos 动作项，--dump-scan 需要 ResidualGaitAction")
+    else:
+      term._update_terrain()              # 不等 terrain_refresh_steps，强制刷新
+      _dump_scan(base, term, args.dump_env)
+
   for _ in range(args.steps):
     with torch.no_grad():
       actions = policy(obs)
@@ -247,6 +322,9 @@ def main(argv=None) -> int:
 
   if term is not None:
     try:
+      ok = getattr(term, "scan_ok", None)
+      if ok is not None:
+        print(f"地形估计链路   : {'OK' if ok else '❌ 断了 -> rise 永远 0，参考步态锁在平地档'}")
       print(f"ref_alpha      : {term.ref_alpha:.3f}")
       print(f"rise_est       : {float(term.rise_est.mean()):.3f} m "
             f"(min {float(term.rise_est.min()):.3f} / max {float(term.rise_est.max()):.3f})")
