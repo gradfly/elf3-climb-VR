@@ -140,12 +140,17 @@ def forward_progress_y(env, command_name: str = "twist",
             ema = torch.where(reset, torch.zeros_like(ema), ema)
             r = torch.where(reset, torch.zeros_like(r), r)
 
-    # EMA 冷启动：tau=1.8 s 从 0 收敛到 95% 要 5.4 s，而回合均长 ~12 s ——
-    # 前 1.8 s（90 步）的 drive 系统性偏低（只有稳态的 60~80%），等于每个回合
-    # 白扣一截，而且回合越短扣得越狠（和 ep_len 强耦合）。
-    # 这一段不给分也不罚；EMA 照常累积（所以出这段时已经是热态），只是不进奖励。
+    # EMA 冷启动屏蔽段。
+    # ⚠️ 第一版按「一个完整 tau」（1.8 s = 90 步）屏蔽，实测在 ep_len 只有
+    # 2.23 s 的早期，80% 的回合都被屏蔽掉：给分段几乎满分（0.95），整回合
+    # 均值却只有 0.185。更糟的是它和 ep_len 形成负反馈 —— 回合越短 -> 前进
+    # 奖励越少 -> 越学不会走 -> 回合继续短。
+    # 改成 tau/3（0.6 s = 30 步）：短回合占 27%、长回合占 5%。冷启动残差只到
+    # 1-exp(-1/3)≈28%，这部分靠「这段时间既不罚也不给分」兜住；EMA 本身照常
+    # 累积，出屏蔽段时已有 30 个样本。
     if hasattr(env, "episode_length_buf"):
-        warm = env.episode_length_buf < int(round(float(tau) / max(dt, 1e-6)))
+        warm_steps = max(1, int(round(float(tau) / 3.0 / max(dt, 1e-6))))
+        warm = env.episode_length_buf < warm_steps
         r = torch.where(warm, torch.zeros_like(r), r)
 
     env._crab_vy_ema = ema
