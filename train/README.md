@@ -479,6 +479,41 @@ ELF3_VIEWER_LOOKAT="0,0.8,0.3"  ELF3_VIEWER_DIST=6  ELF3_VIEWER_AZIM=90 \
 | `地形估计链路`   | `OK`                                                                                                      | 断了 ⇒ `rise` 恒 0，参考步态锁平地档                            |
 | `rise_est` | **只当「估计器有没有坏」的守门指标**：既不恒 0、也不顶 0.220。它会被「跨过脚下那级」影响而变小，**不能当难度指标** —— 难度看 `Curriculum/terrain_levels/mean` | **顶在 0.220** = 被假边骗了（自身遮挡 / 摔倒姿态）；**恒 0** = 取数或地形问题 |
 
+### 10.6 诊断「原地踩」：脚在滑，还是身体没走
+
+`ref_tracking` 很高（关节几乎贴着参考轨迹）但 `forward_progress` 很低时，只剩两种可能：
+关节没跟上参考，或者关节跟上了、但落地那一下脚抓不住地。后者在数据上的指纹是
+`slip_velocity_mean` 明显大于实际前进速度。
+
+```bash
+CKPT=$(ls -t logs/rsl_rl/elf3_crab/*/model_*.pt | head -1)
+MUJOCO_GL=egl ELF3_ALPHA=1.0 .venv/bin/python scripts/diagnose_policy.py \
+  --task Elf3-Crab-Residual-Play --checkpoint "$CKPT" \
+  --num-envs 4 --steps 500 --terrain-level 6 \
+  --record /tmp/slip_check.mp4
+```
+
+`ELF3_ALPHA` 填训练当时的 `Metrics/ref_alpha`（α 课程满幅后就是 1.0）。`--steps 500`
+只有 10 秒，够看 5~6 个步态周期；要看爬升过程再给 1000。
+
+画面看两点：
+
+1. **脚落地后有没有相对地面滑动** —— 抬起、放下、再在地上蹭一下才受力，说明蹬地时机或落脚点有问题
+2. **落脚点在踏面上的位置** —— 踩在台沿外会滑，太靠里会撞下一级
+
+数字判据：
+
+| `slip_velocity_mean` | 给分段 drive | 结论 |
+|---|---|---|
+| < 0.05 | 低 | 不是打滑，回去查参考步态或奖励 |
+| ≈ 0.15 | ≈ 0.38 | **确认原地踩**：脚滑速度是前进速度的 2.5 倍 |
+| > 0.2 | 很低 | 严重打滑，先收窄 `foot_friction` |
+
+`给分段 drive` 的算法见 12.1。
+
+确认是打滑之后，最直接的一招是把 `events.foot_friction` 的 `ranges` 从 `(0.4, 1.2)`
+收窄到 `(0.7, 1.2)` —— 早期别让它在冰面上学步态，等走顺了再放开域随机化。
+
 ---
 
 ## 11. height_scan 为什么不能打到机器人自己
