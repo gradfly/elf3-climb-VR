@@ -28,6 +28,20 @@
 （|y| ∈ 0.15~1.00 m）里，否则又会出现「测不到台阶」。下面四档实测半宽：
 
     flat 0.60 m / easy 0.80 m / mid 0.52 m（两级可见）/ hard 0.62 m（两级可见）
+
+level 与台阶高度的对应（**别看错**）
+----------------------------------
+`step_height = h_min + difficulty*(h_max-h_min)`，difficulty 是**该行在地形块内的
+插值**，不是全局 row/9。10 行按 proportion 分给 4 个 sub_terrain：
+
+    level 0–1  -> flat   (0.00–0.02 m)
+    level 2–5  -> easy   (0.02–0.10 m)
+    level 6–8  -> mid    (0.10–0.16 m)
+    level 9    -> hard   (0.16–0.22 m)
+
+所以 `--terrain-level 5` 测出「台阶只有 4.9 cm」是**正常的**（easy 档），
+不是 bug；要看真台阶得钉 7–9。同理，训练早期 `Metrics/rise_est` 在
+0.02–0.10 之间也正常，别急着以为估计器坏了。
 """
 from __future__ import annotations
 

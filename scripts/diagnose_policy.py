@@ -98,6 +98,7 @@ def _disable_curriculum(base) -> None:
   """
   cm = getattr(base, "curriculum_manager", None)
   if cm is None:
+    print("[warn] 找不到 curriculum_manager，无法禁用课程；地形等级可能被重置")
     return
   if getattr(cm, "_diag_disabled", False):
     return
@@ -333,6 +334,10 @@ def main(argv=None) -> int:
     if _force_terrain_level(base, args.terrain_level):
       out = env.reset()          # 让新等级在出生点上生效
       obs = out[0] if isinstance(out, tuple) else out
+      # reset 内部按当前等级算好了 env_origins，但随后可能又把 terrain_levels
+      # 改写回去（即使 curriculum 已哑掉）。再钉一次，让打印和实际地形块一致，
+      # 否则会看到「钉 5 显示 min 1 / max 9」这种自相矛盾的读数。
+      _force_terrain_level(base, args.terrain_level)
       print(f"[info] 地形等级钉在 {args.terrain_level}（已重新 reset）")
       try:
         tl = base.scene.terrain.terrain_levels
