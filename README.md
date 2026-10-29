@@ -38,6 +38,7 @@ elf3-climb-VR/
 │   ├── tools/  (verify.mjs 自检 / bake_*.py 烘焙 / 证书生成)
 │   └── start.bat / start_vr_motion.bat
 └── docs/                         # 设计说明与云端部署手册
+    ├── crab_gait_pipeline.md     # 螃蟹步动画生成链（地形 → 规划 → 烘焙 → 回放）
     ├── crab_rl_training.md       # RL 任务设计（奖励/课程/验收）
     └── gpu_server_deploy.md      # GPU 云主机部署与换机清单
 ```
@@ -132,6 +133,8 @@ python web/tools/bake_crab.py --seed 7         # 换一套台阶重录
 
 ## 备注
 
+- 螃蟹步网页动画的完整生成链（随机台阶 → 四相位 IK 轨迹 → 烘焙 → 浏览器回放）：
+  见 `docs/crab_gait_pipeline.md`。
 - 训练环境（GPU 云主机）的选型、依赖版本与换机验收：见 `docs/gpu_server_deploy.md`。
 - 全部大文件（`.mp4` / `.onnx` / `.npz` / `.wasm` / `.STL`）均 < 100MB，未使用 Git LFS。
 - 已排除：`.workbuddy/`、`.ros/` 日志、`__pycache__`、`*.log`、`*.rknn`。
