@@ -89,33 +89,37 @@ MUJOCO_GL=egl uv run train Elf3-Crab-Stairs \
 - 课程：地形已带 `curriculum=True`，从近平地逐级升到 rise 0.22。
 - 日志：`logs/rsl_rl/elf3_crab/<时间戳>/`，每 50 iter 存 checkpoint。
 
-### 4.1 挂着跑（tmux）与日志
+### 4.1 挂着跑与日志
 
-训练动辄 1–2 小时，SSH 一断（合盖 / 网络抖动）前台进程就吃 SIGHUP 被杀。  
-所以放进 tmux，并把文本输出 `tee` 一份：
+> **本项目用 VNC 连服务器，不需要 tmux。** VNC 会话本身是持久的，断开重连后
+> 里面的进程继续跑，直接前台跑 + 存日志即可。
 
 ```bash
-tmux new -s crab                       # 已存在会报 duplicate session，改用 tmux a -t crab
-# ---- 进入 tmux 之后 ----
 cd ~/elf3
 MUJOCO_GL=egl PYTHONUNBUFFERED=1 .venv/bin/train Elf3-Crab-Residual \
   --env.scene.num-envs 1024 \
   --agent.max-iterations 8000 \
   2>&1 | tee ~/train_v2.log
-# ---- Ctrl+B 松手再按 D 退出（训练继续）；tmux a -t crab 回去 ----
 ```
 
 要点：
 
-- `> file 2>&1`（不是 `2>&1 > file`，顺序反了 stderr 还会打在屏幕上）会把 stdout  
-  |  |  |  
-  | --- | --- |  
-  全导走，**屏幕一片空白，容易误以为卡死**。用 `| tee` 才能同时看和存。
-- `PYTHONUNBUFFERED=1`：否则 `tee` 要等缓冲区满才输出，看着像卡住。
+- 用 `tee` 同时看和存。**不要**写成 `> file 2>&1`：那是重定向到文件而不是管道，
+  屏幕一片空白容易误以为卡死，`[warn]` 和 traceback 也看不到。
+- `PYTHONUNBUFFERED=1`：否则 Python 对管道用块缓冲（攒 4~8 KB 才刷一次），
+  日志会滞后几分钟，`grep` / `tail -f` 拿到的全是陈旧内容。
 - 日志别放 `/tmp`（重启会清空），放家目录。
-- **tensorboard 曲线和 checkpoint 本来就会落盘**（`logs/rsl_rl/elf3_crab/<时间戳>/`），  
-  与重定向无关。`tee` 只是额外把**文本**（`[warn]` 行、traceback）留下来。
-- tmux 不能扛服务器重启。要扛重启得用 `systemd-run --user` 或 `nohup` + `disown`。
+- **tensorboard 曲线和 checkpoint 本来就会落盘**（`logs/rsl_rl/elf3_crab/<时间戳>/`），
+  与重定向无关。`tee` 只是额外把文本留下来。
+
+> **只有改用 SSH（没有 VNC）时**才需要包一层 tmux，防止 SSH 断开会话吃 SIGHUP：
+>
+> ```bash
+> tmux new -s crab        # 已存在会报 duplicate session，改用 tmux a -t crab
+> # 里面跑同一条命令；Ctrl+B 松手再按 D 退出（训练继续）；tmux a -t crab 回去
+> ```
+>
+> 两者都**不扛服务器重启**——要扛重启得用 `systemd-run --user`。
 
 ### 4.2 续训（可选）
 
@@ -131,7 +135,8 @@ MUJOCO_GL=egl WANDB_MODE=disabled \
   会再跑 2500 轮，**不是**跑到 2500 总共。
 - checkpoint 命名是 `model_<本次轮数>.pt`（如 `model_2500.pt`），不是全局累计编号。
 - **课程会重置**：速度课程回到 0.05–0.12、地形等级回到 0。所以尽量一次跑够  
-  （用 `tmux` / `screen` 挂着），少做多次续训，否则每次都要重新爬课程。
+  （本项目用 VNC，直接前台跑即可，断开重连进程还在），少做多次续训，
+  否则每次都要重新爬课程。
 
 ### 4.3 logger：wandb 不可用会自动退回 tensorboard
 
