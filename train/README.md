@@ -393,3 +393,34 @@ ELF3_VIEWER_LOOKAT="0,0.8,0.3"  ELF3_VIEWER_DIST=6  ELF3_VIEWER_AZIM=90 \
 |---|---|---|
 | `地形估计链路` | `OK` | 断了 ⇒ `rise` 恒 0，参考步态锁平地档 |
 | `rise_est` | 与实际台阶一致（等级 5–6 约 0.15） | **顶在 0.220** = 被机器人自身遮挡骗了；**恒 0** = 取数/地形问题 |
+
+---
+
+## 11. height_scan 为什么不能打到机器人自己
+
+`terrain_scan` 用 `include_geom_groups=(0,)`，**只对 geom group 0 打射线**，地形在 group 0。
+但机器人 XML 的 `<default class="elf3">` 里视觉 mesh 也是 `group="0"`
+（碰撞胶囊是 `group="3"`），于是从躯干往下打的射线会打到自己身上：
+
+| 射线偏移 | 命中 body | 距离 |
+|---|---|---|
+| `dy=+0.1` | `l_hip_y_link` | **0.330 m** ← 与实测 `h=33.2 cm` 完全对上 |
+| `dy=+0.2` | `l_shoulder_z_link` | 0.026 m |
+
+`exclude_parent_body=True` 只能排掉 `torso_link`（根 body）自己的网格，
+**排不掉子 body（腰、腿、手臂）**。后果就是 `rise_est` 被顶到 clamp 上限 0.22 m，
+而实地台阶只有 0.15 m，参考步态选成最难档 → 步幅过大 → 走得动才怪。
+
+**修法**：`make_robot_xml.py` 把视觉 mesh 挪到 **group 2**
+（viewer 默认显示 group 0/1/2，外观不变；group 3 是碰撞体不动）。
+`install_task.sh` 会自检 group 0 为空。
+
+```bash
+python train/assets/make_robot_xml.py     # 重新生成 elf3_robot_only.xml
+bash train/install_task.sh                # 期望：geom group 分布 {2: 32, 3: 37}，group 0 为空 ✔
+```
+
+> ⚠️ 改 group 后 `height_scan` 的数值会变（不再含自身遮挡），观测分布随之改变，
+> **必须重新训练**，旧 checkpoint 不要再用。
+
+

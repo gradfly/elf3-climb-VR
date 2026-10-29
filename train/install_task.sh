@@ -99,6 +99,40 @@ if missing:
 print("四个任务齐全 ✔")
 PY
 
+echo "==> 自检机器人资产（height_scan 会不会打到机器人自己）"
+"$PY" - "$HERE" <<'PY'
+import sys
+from collections import Counter
+from pathlib import Path
+
+root = Path(sys.argv[1]).parent          # 仓库根
+xml = (root / "sim/vendor/bxi_controller_ros2/src/bxi_example_py_elf3"
+       / "data/mujoco_simulation/elf3_robot_only.xml")
+if not xml.exists():
+    print(f"[ERR] 缺 {xml}")
+    print("      先跑：python train/assets/make_robot_xml.py")
+    sys.exit(1)
+
+try:
+    import mujoco
+except Exception as e:                    # pragma: no cover
+    print(f"[warn] 没有 mujoco，跳过资产检查（{e}）")
+    sys.exit(0)
+
+m = mujoco.MjModel.from_xml_path(str(xml))
+g = Counter(int(m.geom_group[i]) for i in range(m.ngeom))
+n0 = g.get(0, 0)
+if n0:
+    print(f"[ERR] elf3_robot_only.xml 里还有 {n0} 个 geom 在 group 0")
+    print("      terrain_scan 用 include_geom_groups=(0,) 只打 group 0 ——")
+    print("      机器人视觉 mesh 也在 group 0，height_scan 会打到自己的腰/腿")
+    print("      （实测 y=±0.1 处 h 从 104.9 cm 掉到 62.8 cm，是 l_hip 网格），")
+    print("      参考步态的 rise 被顶到上限 0.22 m，与实地 0.15 m 不符。")
+    print("      修法：python train/assets/make_robot_xml.py  （视觉 mesh 挪到 group 2）")
+    sys.exit(1)
+print(f"geom group 分布 {dict(sorted(g.items()))}，group 0 为空 ✔")
+PY
+
 echo "==> 完成。示例："
 echo "    MUJOCO_GL=egl .venv/bin/play Elf3-Crab-Residual-Play \\"
 echo "        --checkpoint-file logs/rsl_rl/elf3_crab/<run>/model_XXXX.pt"
