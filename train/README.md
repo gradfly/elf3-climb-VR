@@ -89,7 +89,33 @@ MUJOCO_GL=egl uv run train Elf3-Crab-Stairs \
 - 课程：地形已带 `curriculum=True`，从近平地逐级升到 rise 0.22。
 - 日志：`logs/rsl_rl/elf3_crab/<时间戳>/`，每 50 iter 存 checkpoint。
 
-### 4.1 续训（可选）
+### 4.1 挂着跑（tmux）与日志
+
+训练动辄 1–2 小时，SSH 一断（合盖 / 网络抖动）前台进程就吃 SIGHUP 被杀。
+所以放进 tmux，并把文本输出 `tee` 一份：
+
+```bash
+tmux new -s crab                       # 已存在会报 duplicate session，改用 tmux a -t crab
+# ---- 进入 tmux 之后 ----
+cd ~/elf3
+MUJOCO_GL=egl PYTHONUNBUFFERED=1 .venv/bin/train Elf3-Crab-Residual \
+  --env.scene.num-envs 1024 \
+  --agent.max-iterations 8000 \
+  2>&1 | tee ~/train_v2.log
+# ---- Ctrl+B 松手再按 D 退出（训练继续）；tmux a -t crab 回去 ----
+```
+
+要点：
+
+- `> file 2>&1`（不是 `2>&1 > file`，顺序反了 stderr 还会打在屏幕上）会把 stdout
+  全导走，**屏幕一片空白，容易误以为卡死**。用 `| tee` 才能同时看和存。
+- `PYTHONUNBUFFERED=1`：否则 `tee` 要等缓冲区满才输出，看着像卡住。
+- 日志别放 `/tmp`（重启会清空），放家目录。
+- **tensorboard 曲线和 checkpoint 本来就会落盘**（`logs/rsl_rl/elf3_crab/<时间戳>/`），
+  与重定向无关。`tee` 只是额外把**文本**（`[warn]` 行、traceback）留下来。
+- tmux 不能扛服务器重启。要扛重启得用 `systemd-run --user` 或 `nohup` + `disown`。
+
+### 4.2 续训（可选）
 
 ```bash
 MUJOCO_GL=egl WANDB_MODE=disabled \
@@ -105,7 +131,7 @@ MUJOCO_GL=egl WANDB_MODE=disabled \
 - **课程会重置**：速度课程回到 0.05–0.12、地形等级回到 0。所以尽量一次跑够
   （用 `tmux` / `screen` 挂着），少做多次续训，否则每次都要重新爬课程。
 
-### 4.2 logger：wandb 不可用会自动退回 tensorboard
+### 4.3 logger：wandb 不可用会自动退回 tensorboard
 
 `rl_cfg.py` 里的 `_logger_name()` 会**先探测**再决定：调一次
 `wandb.Settings(start_method="thread")`（rsl_rl 的 `WandbLogWriter` 就是这么调的），
