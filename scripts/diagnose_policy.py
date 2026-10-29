@@ -3,29 +3,35 @@
 
 为什么需要它
 ------------
-viser 里靠肉眼只能看到「站一会儿就倒」，无法区分下面三种情况：
-  1) 加载的根本不是训练好的策略（没给 checkpoint / 给了很早的一轮）；
-  2) 策略被加载了但参考步态与训练不一致（α、rise 估计、指令分布变了）；
+viser 里靠肉眼只能看到「站一会儿就倒」，无法区分：
+  1) 加载的根本不是训练好的策略（没给 checkpoint-file / 给了很早的一轮）；
+  2) 策略能活但走不快（残差被限幅卡死、参考步态与地形不符）；
   3) 策略确实没学会。
-本脚本把 episode 长度、侧向位移、摔倒次数、rise/tread 估计、α、动作幅度
+本脚本把 episode 长度、净位移、侧向速度、动作饱和比例、rise/tread 估计、α
 一次性打出来，三者立刻可分。
+
+⚠️ 一个坑：mjlab 的 env.step() 内部会先 auto-reset 再返回，所以 `dones=True`
+那一步读到的 `root_pos` 已经是**新地形块**的出生点（pyramid 地形每块原点相隔
+好几米）。因此位移必须**逐步累加并排除重置那一步**，不能拿"末位置-初位置"。
 
 用法（服务器上，仓库根目录）
 ---------------------------
     .venv/bin/python scripts/diagnose_policy.py \
         --task Elf3-Crab-Residual-Play \
-        --checkpoint logs/rsl_rl/elf3_crab_residual/<run>/model_6000.pt \
-        --num-envs 8 --steps 1200
+        --checkpoint logs/rsl_rl/elf3_crab/<run>/model_XXXX.pt \
+        --num-envs 8 --steps 1000
 
-    # 什么都不加载，纯零动作（对照：这就是 viser 里 --agent zero 看到的）
-    .venv/bin/python scripts/diagnose_policy.py --task Elf3-Crab-Residual-Play --zero
+    # 对照 1：什么都不加载（等价 viser 里的 --agent zero）
+    .venv/bin/python scripts/diagnose_policy.py --zero
+
+    # 对照 2：强制站在第 6 级地形（有真台阶），看会不会爬
+    .venv/bin/python scripts/diagnose_policy.py --terrain-level 6 ...
 
 判读
 ----
-* `obs_dim` 必须等于 actor 观测维度（残差任务 393），`action_dim` 29；
-* `ep_len` 中位数 ~20 s、`falls` 少 -> 策略是好的，viser 里那次是加载错了；
-* `ep_len` ~2 s、`v_y` ~0 -> 和 --zero 一样 -> 参考步态在开环播放，策略没生效；
-* `ep_len` ~2 s 但 `v_y` 明显 >0 -> 策略真没学会平衡。
+* `净 Δy / 时长` 与 `v_y` 接近指令 0.15~0.24 -> 真在横着走；
+* `v_y` 只有指令一半、`饱和比例` 接近 1 -> 残差被限幅顶死，控制退化成 bang-bang；
+* `ep_len` ~2 s 且 `v_y` ~0 -> 和 --zero 一样 -> 参考步态在开环播放。
 """
 from __future__ import annotations
 
@@ -57,15 +63,44 @@ def _root_pos(env):
   raise AttributeError("找不到 root pos")
 
 
+def _describe_obs(obs) -> str:
+  """obs 可能是 TensorDict / Dict[str, Tensor] / 单个张量，按类型分别描述。"""
+  if hasattr(obs, "keys"):
+    try:
+      parts = []
+      for k in obs.keys():
+        v = obs[k]
+        parts.append(f"{k}{tuple(v.shape)}")
+      return "dict{" + ", ".join(parts) + "}"
+    except Exception:
+      pass
+  shape = getattr(obs, "shape", None)
+  return str(tuple(shape)) if shape is not None else type(obs).__name__
+
+
+def _force_terrain_level(base, level: int) -> bool:
+  """把每个 env 的地形等级钉住（best-effort，字段名随版本变）。"""
+  terr = getattr(getattr(base, "scene", None), "terrain", None)
+  if terr is None:
+    return False
+  for attr in ("terrain_levels", "levels", "difficulty"):
+    v = getattr(terr, attr, None)
+    if v is not None and torch.is_tensor(v):
+      v[:] = level
+      return True
+  return False
+
+
 def main(argv=None) -> int:
   ap = argparse.ArgumentParser()
   ap.add_argument("--task", default="Elf3-Crab-Residual-Play")
   ap.add_argument("--checkpoint", default=None)
   ap.add_argument("--zero", action="store_true", help="零动作（对照 viser --agent zero）")
   ap.add_argument("--num-envs", type=int, default=8)
-  ap.add_argument("--steps", type=int, default=1200)
+  ap.add_argument("--steps", type=int, default=1000)
+  ap.add_argument("--terrain-level", type=int, default=None,
+                  help="钉住地形等级（0=平甲板；越大台阶越高）")
   ap.add_argument("--device", default=None)
-  ap.add_argument("--log-root", default="logs/rsl_rl")
   args = ap.parse_args(argv)
 
   import mjlab.tasks  # noqa: F401  触发任务注册
@@ -87,7 +122,6 @@ def main(argv=None) -> int:
     return 2
 
   env_cfg.scene.num_envs = args.num_envs
-
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
   env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
   base = _unwrap(env)
@@ -115,60 +149,83 @@ def main(argv=None) -> int:
   out = env.reset()
   obs = out[0] if isinstance(out, tuple) else out
 
-  # ---- 指标累计 ----
+  if args.terrain_level is not None:
+    if _force_terrain_level(base, args.terrain_level):
+      out = env.reset()          # 让新等级在出生点上生效
+      obs = out[0] if isinstance(out, tuple) else out
+      print(f"[info] 地形等级钉在 {args.terrain_level}（已重新 reset）")
+    else:
+      print("[warn] 这个版本拿不到 terrain_levels，按默认等级 0 跑")
+
+  # ---- 指标累计（位移必须逐步累加，reset 那一步跳过）----
   ep_len: list[int] = []
-  ep_dy: list[float] = []
-  ep_dx: list[float] = []
-  vy_alive: list[float] = []
   step_in_ep = torch.zeros(B, dtype=torch.long, device=device)
-  y0 = _root_pos(base)[:, 1].clone()
-  x0 = _root_pos(base)[:, 0].clone()
-  prev_y = y0.clone()
+  net_dy = torch.zeros(B, device=device)
+  net_dx = torch.zeros(B, device=device)
+  vy_alive: list[float] = []
+  vx_alive: list[float] = []
+  prev = _root_pos(base)[:, :2].clone()
   act_abs, act_cnt = 0.0, 0
+  sat_sum, sat_cnt = 0.0, 0
+  alive_steps = 0
 
   try:
     term = base.action_manager.get_term("joint_pos")
   except Exception:
     term = None
 
-  for i in range(args.steps):
+  for _ in range(args.steps):
     with torch.no_grad():
       actions = policy(obs)
-    out = env.step(actions)
-    if len(out) == 4:
-      obs, _rew, dones, _info = out
-    else:  # 老版本 rsl-rl
-      obs, _rew, dones = out
 
+    # 动作饱和比例：|a| 超过残差限幅折算到动作空间的比例
+    if term is not None:
+      try:
+        clip_a = term._clip_action
+        sat_sum += float((actions.abs() > clip_a).to(torch.float32).mean())
+        sat_cnt += 1
+      except Exception:
+        pass
     act_abs += float(actions.abs().mean())
     act_cnt += 1
 
-    y = _root_pos(base)[:, 1]
-    dy = (y - prev_y) / dt
-    prev_y = y.clone()
-    alive = ~dones.bool()
+    out = env.step(actions)
+    if len(out) == 4:
+      obs, _rew, dones, _info = out
+    else:
+      obs, _rew, dones = out
+
+    dones_b = dones.bool()
+    alive = ~dones_b
+
+    p = _root_pos(base)[:, :2]
+    d = (p - prev) / dt
+    prev = p.clone()          # dones 那一步 prev 已是新出生点，下一步差分仍正确
     if bool(alive.any()):
-      vy_alive.extend(dy[alive].tolist())
+      vy_alive.extend(d[alive, 1].tolist())
+      vx_alive.extend(d[alive, 0].tolist())
+      alive_steps += int(alive.sum())
+
+    # 位移累加用 d*dt（d 已排除重置那一步的跳变）
+    net_dy += torch.where(alive, d[:, 1] * dt, torch.zeros_like(net_dy))
+    net_dx += torch.where(alive, d[:, 0] * dt, torch.zeros_like(net_dx))
 
     step_in_ep += 1
-    if bool(dones.any()):
-      d = dones.bool()
-      for k in torch.nonzero(d, as_tuple=False).flatten().tolist():
+    if bool(dones_b.any()):
+      for k in torch.nonzero(dones_b, as_tuple=False).flatten().tolist():
         ep_len.append(int(step_in_ep[k].item()))
-        ep_dy.append(float(y[k] - y0[k]))
-        ep_dx.append(float(_root_pos(base)[k, 0] - x0[k]))
-      step_in_ep[d] = 0
-      y0 = torch.where(d, y, y0)
-      x0 = torch.where(d, _root_pos(base)[:, 0], x0)
+      step_in_ep[dones_b] = 0
 
   # ---- 打印 ----
   steps_full = int(round(20.0 / dt))
   print("=" * 62)
   print(f"task           : {args.task}")
   print(f"num_envs/steps : {B} / {args.steps}  (dt={dt:.4f}s)")
-  print(f"obs_dim        : {env.observation_space.shape}")
-  print(f"action_dim     : {env.action_space.shape}")
+  print(f"obs            : {_describe_obs(obs)}")
+  print(f"action_space   : {tuple(env.action_space.shape)}")
   print(f"mean |action|  : {act_abs / max(act_cnt, 1):.3f}")
+  if sat_cnt:
+    print(f"残差饱和比例   : {sat_sum / sat_cnt * 100:.0f}%  (|a| 超过限幅的维度占比)")
 
   if term is not None:
     try:
@@ -181,21 +238,26 @@ def main(argv=None) -> int:
     except Exception as e:
       print(f"[warn] 读不到动作项内部量：{e}")
 
+  print("-" * 62)
   if ep_len:
     med = statistics.median(ep_len)
-    print("-" * 62)
-    print(f"episodes       : {len(ep_len)}  (摔倒/超时合计)")
+    print(f"episodes       : {len(ep_len)} / {B}  (摔倒/超时合计)")
     print(f"ep_len  median : {med:.0f} steps = {med * dt:.2f} s")
-    print(f"ep_len  mean   : {statistics.mean(ep_len):.0f} steps = "
-          f"{statistics.mean(ep_len) * dt:.2f} s")
     print(f"ep_len  max    : {max(ep_len)} steps = {max(ep_len) * dt:.2f} s")
-    full = sum(1 for n in ep_len if n >= steps_full - 10) / len(ep_len)
-    print(f"活满 20s 比例  : {full * 100:.0f}%")
-    print(f"每回合 Δy      : mean {statistics.mean(ep_dy):+.3f} m "
-          f"(期望 = v_cmd × ep_len ≈ +{0.195 * med * dt:.2f})")
-    print(f"每回合 Δx      : mean {statistics.mean(ep_dx):+.3f} m (应接近 0)")
+  else:
+    print(f"episodes       : 0 / {B}  (全部活到脚本结束 = 没摔)")
+  print(f"存活步数合计   : {alive_steps}  (= {alive_steps} x {dt}s)")
+
   if vy_alive:
-    print(f"存活期 v_y     : mean {statistics.mean(vy_alive):+.3f} m/s")
+    print(f"v_y (存活期)   : mean {statistics.mean(vy_alive):+.3f} m/s "
+          f"(中位 {statistics.median(vy_alive):+.3f})")
+    print(f"v_x (存活期)   : mean {statistics.mean(vx_alive):+.3f} m/s (应接近 0)")
+  t_run = args.steps * dt
+  print(f"净 Δy 均值     : {float(net_dy.mean()):+.3f} m / {t_run:.1f}s "
+        f"=> {float(net_dy.mean()) / t_run:+.3f} m/s")
+  print(f"净 Δx 均值     : {float(net_dx.mean()):+.3f} m / {t_run:.1f}s "
+        f"=> {float(net_dx.mean()) / t_run:+.3f} m/s")
+  print(f"净 Δy 最差/最好: {float(net_dy.min()):+.2f} / {float(net_dy.max()):+.2f} m")
   print("=" * 62)
   env.close()
   return 0
