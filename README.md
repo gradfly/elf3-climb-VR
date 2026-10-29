@@ -30,13 +30,16 @@ elf3-climb-VR/
 │       # 仿真入口脚本实际位于
 │       #   vendor/bxi_controller_ros2/src/bxi_example_py_elf3/launch/
 │       #   （elf3_play.py / view_mujoco.py / climb_stairs.py / e2e_depth_policy.py）
-└── web/                          # WebXR 网页端（VR 沉浸式体验）
-    ├── index.html
-    ├── js/  (main.js / mjscene.js / vrnav.js / xr.js / motion.js)
-    ├── vendor/  (mujoco.wasm / three.module.js)
-    ├── assets/  (elf3.xml / 地形 scene_bx.xml + scene_crab.xml / 回放 motion_*.bin|json)
-    ├── tools/  (verify.mjs 自检 / bake_*.py 烘焙 / 证书生成)
-    └── start.bat / start_vr_motion.bat
+├── web/                          # WebXR 网页端（VR 沉浸式体验）
+│   ├── index.html
+│   ├── js/  (main.js / mjscene.js / vrnav.js / xr.js / motion.js)
+│   ├── vendor/  (mujoco.wasm / three.module.js)
+│   ├── assets/  (elf3.xml / 地形 scene_bx.xml + scene_crab.xml / 回放 motion_*.bin|json)
+│   ├── tools/  (verify.mjs 自检 / bake_*.py 烘焙 / 证书生成)
+│   └── start.bat / start_vr_motion.bat
+└── docs/                         # 设计说明与云端部署手册
+    ├── crab_rl_training.md       # RL 任务设计（奖励/课程/验收）
+    └── gpu_server_deploy.md      # GPU 云主机部署与换机清单
 ```
 
 > 注：`sim/vendor/bxi_controller_ros2` 是从 `bxirobotics/bxi_controller_ros2` 下载的第三方框架包；
@@ -129,5 +132,6 @@ python web/tools/bake_crab.py --seed 7         # 换一套台阶重录
 
 ## 备注
 
+- 训练环境（GPU 云主机）的选型、依赖版本与换机验收：见 `docs/gpu_server_deploy.md`。
 - 全部大文件（`.mp4` / `.onnx` / `.npz` / `.wasm` / `.STL`）均 < 100MB，未使用 Git LFS。
 - 已排除：`.workbuddy/`、`.ros/` 日志、`__pycache__`、`*.log`、`*.rknn`。
