@@ -86,8 +86,18 @@ class RefTable:
     @torch.no_grad()
     def estimate(self, heights: torch.Tensor, *, nx: int = 13, ny: int = 21,
                  size_y: float = 2.0, res: float = 0.1, edge_thr: float = 0.03,
-                 y_min: float = 0.30, y_max: float = 0.90, sigma: float = 0.35):
-        """从 height_scan（米，[B, nx*ny]）估计 (rise[B], tread[B], valid[B])。"""
+                 y_min: float = 0.15, y_max: float = 1.00, sigma: float = 0.50):
+        """从 height_scan（米，[B, nx*ny]）估计 (rise[B], tread[B], valid[B])。
+
+        两处关键修正（2026-10-29，实跑数据反推）
+        ---------------------------------------
+        1) 检测带原来写死 |y| ∈ (0.30, 0.90)，但地形中心平台半宽 0.9~1.25 m
+           -> 台阶边缘永远在带外 -> rise 全程 0，参考步态永远是平地那一档。
+           现在放宽到 (0.15, 1.00)，并把平台宽度改小（见 terrain_cfg）。
+        2) tread 原来算的是「最远两条边的跨度 / (边数-1)」。金字塔四周都有台阶，
+           ±y 两侧各有一条边，于是 span = 平台宽 + 两级，算出 1.8~2.0 m 这种
+           荒谬值。现在只看前进方向 +Y 半侧，取**相邻边的间距均值**。
+        """
         heights = heights.to(self.device, torch.float32)
         B = heights.shape[0]
         h = heights.view(B, ny, nx)
@@ -103,20 +113,34 @@ class RefTable:
 
         y_mid = (-size_y / 2.0
                  + (torch.arange(ny - 1, device=self.device, dtype=torch.float32) + 0.5) * res)
-        mask = ok & (dh > edge_thr) & (y_mid.abs() > y_min) & (y_mid.abs() < y_max)
+        band = (y_mid.abs() > y_min) & (y_mid.abs() < y_max)
+        # rise 两侧都认（机器人可能倒着接近台阶），tread 只看 +Y 半侧
+        mask = ok & (dh > edge_thr) & band
+        mask_fwd = mask & (y_mid > 0)
 
         w = torch.exp(-(y_mid ** 2) / (2.0 * sigma ** 2))    # [ny-1]
         den = (w.unsqueeze(0) * mask).sum(-1)
         rise = (w.unsqueeze(0) * dh.clamp(min=0) * mask).sum(-1) / den.clamp_min(1e-6)
-        valid = den > 0.5
+        # ⚠️ valid 原来判的是「加权权重和 den > 0.5」。远处的边权重小（|y|=0.85 时
+        # e^{-0.85²/2σ²}≈0.24），于是被判无效 -> rise 永远不更新，实测全程 0.000。
+        # valid 的语义应该是「有没有找到边」，噪声由 dh > edge_thr 挡。
+        valid = mask.any(-1)
 
-        m = mask.to(torch.float32)
-        cnt = m.sum(-1)
-        first = m.argmax(-1)
-        last = (ny - 2) - m.flip(-1).argmax(-1)
-        span = (last - first).to(torch.float32) * res
-        tread = span / (cnt - 1).clamp(min=1)
-        tread = torch.where(cnt >= 2, tread, torch.full_like(tread, self.mid_tread))
+        # ---- tread：+Y 半侧相邻边的间距均值 ----
+        gap_sum = torch.zeros(B, device=self.device)
+        gap_cnt = torch.zeros(B, device=self.device)
+        prev_idx = torch.full((B,), -1.0, device=self.device)
+        for i in range(ny - 1):
+            is_edge = mask_fwd[:, i]
+            has_prev = prev_idx >= 0
+            gap_sum = torch.where(is_edge & has_prev,
+                                  gap_sum + (i - prev_idx) * res, gap_sum)
+            gap_cnt = torch.where(is_edge & has_prev, gap_cnt + 1.0, gap_cnt)
+            prev_idx = torch.where(is_edge, torch.full_like(prev_idx, float(i)), prev_idx)
+
+        tread = gap_sum / gap_cnt.clamp_min(1.0)
+        tread = torch.where(gap_cnt >= 1, tread, torch.full_like(tread, self.mid_tread))
+        tread = tread.clamp(float(self.tread[0]), float(self.tread[-1]))
         return rise, tread, valid
 
 
@@ -151,6 +175,14 @@ def _selftest() -> int:
     # 4) 两级 0.12 / 0.30，边缘在 0.4、0.7
     p = np.full(ny, 1.0); p[ys >= 0.4] -= 0.12; p[ys >= 0.7] -= 0.12
     cases.append(("two 0.12 tread 0.30", p, 0.12, 0.30))
+    # 4b) 连续两级、踏面 0.3（0.1 m 网格下 0.32 会被量化成 0.3/0.4，故取整值）
+    p = np.full(ny, 1.0)
+    for t in (0.6, 0.9):
+        p[ys >= t] -= 0.12
+    cases.append(("stairs tread 0.30", p, 0.12, 0.30))
+    # 4c) 远边缘 0.9（旧参数 y_max=0.90 会因严格小于而漏掉，现在应能测到）
+    p = np.full(ny, 1.0); p[ys >= 0.9] -= 0.12
+    cases.append(("edge at 0.9", p, 0.12, None))
 
     ok_all = True
     for name, prof, want_rise, want_tread in cases:

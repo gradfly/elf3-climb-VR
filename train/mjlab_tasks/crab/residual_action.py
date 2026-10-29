@@ -24,10 +24,12 @@ from .ref_table import RefTable
 _TABLE_CACHE: dict[tuple[str, str], RefTable] = {}
 
 # 默认残差限幅（弧度）
+# 2026-10-29：实测 |action| 均值 3.33，而旧限幅 0.30 rad / scale 0.2 ≈ 1.5 动作单位，
+# 76% 的输出顶死在限幅上 -> 梯度在 clamp 外恒为 0，学不到细调。放宽到 0.40。
 _DEFAULT_CLIP = {
-    "legs": 0.30,
-    "waist": 0.15,
-    "arms": 0.15,
+    "legs": 0.40,
+    "waist": 0.20,
+    "arms": 0.20,
 }
 
 LEG_JOINTS = (
@@ -54,9 +56,9 @@ class ResidualGaitActionCfg(JointPositionActionCfg):
     table_path: str = ""
     period_frames: int = 90
     hold_steps: int = 25                    # 0.5 s，对应脚本 HOLD
-    leg_clip_rad: float = 0.30
-    waist_clip_rad: float = 0.15
-    arm_clip_rad: float = 0.15
+    leg_clip_rad: float = 0.40
+    waist_clip_rad: float = 0.20
+    arm_clip_rad: float = 0.20
     scan_size: tuple[float, float] = (1.2, 2.0)
     scan_resolution: float = 0.1
     terrain_refresh_steps: int = 5

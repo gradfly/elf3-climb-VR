@@ -154,6 +154,12 @@ def main(argv=None) -> int:
       out = env.reset()          # 让新等级在出生点上生效
       obs = out[0] if isinstance(out, tuple) else out
       print(f"[info] 地形等级钉在 {args.terrain_level}（已重新 reset）")
+      try:
+        tl = base.scene.terrain.terrain_levels
+        print(f"[info] terrain_levels = min {int(tl.min())} / max {int(tl.max())}"
+              f"  （若仍是 0，说明强制没生效）")
+      except Exception:
+        pass
     else:
       print("[warn] 这个版本拿不到 terrain_levels，按默认等级 0 跑")
 
@@ -164,6 +170,8 @@ def main(argv=None) -> int:
   net_dx = torch.zeros(B, device=device)
   vy_alive: list[float] = []
   vx_alive: list[float] = []
+  cmd_list: list[float] = []
+  z_list: list[float] = []
   prev = _root_pos(base)[:, :2].clone()
   act_abs, act_cnt = 0.0, 0
   sat_sum, sat_cnt = 0.0, 0
@@ -201,6 +209,16 @@ def main(argv=None) -> int:
     p = _root_pos(base)[:, :2]
     d = (p - prev) / dt
     prev = p.clone()          # dones 那一步 prev 已是新出生点，下一步差分仍正确
+
+    # 指令速度（每回合采样一次，8 个 env 抽样不同 -> 必须一起看，否则速度差会被误读）
+    try:
+      cmd_list.append(float(base.command_manager.get_command("twist")[:, 1].abs().mean()))
+    except Exception:
+      pass
+    try:
+      z_list.append(float(_root_pos(base)[:, 2].mean()))
+    except Exception:
+      pass
     if bool(alive.any()):
       vy_alive.extend(d[alive, 1].tolist())
       vx_alive.extend(d[alive, 0].tolist())
@@ -252,6 +270,15 @@ def main(argv=None) -> int:
     print(f"v_y (存活期)   : mean {statistics.mean(vy_alive):+.3f} m/s "
           f"(中位 {statistics.median(vy_alive):+.3f})")
     print(f"v_x (存活期)   : mean {statistics.mean(vx_alive):+.3f} m/s (应接近 0)")
+  if cmd_list:
+    print(f"cmd_y (指令)   : mean {statistics.mean(cmd_list):.3f} m/s "
+          f"(min {min(cmd_list):.3f} / max {max(cmd_list):.3f})")
+    if vy_alive:
+      print(f"跟踪比 v_y/cmd : {statistics.mean(vy_alive) / max(statistics.mean(cmd_list), 1e-6):.2f}"
+            f"   <- 这才是真正的「走得动不动」，别只看 v_y 绝对值")
+  if z_list:
+    print(f"基座 z         : {z_list[0]:.3f} -> {z_list[-1]:.3f} m "
+          f"(Δ{z_list[-1] - z_list[0]:+.3f}；爬上台阶会升高)")
   t_run = args.steps * dt
   print(f"净 Δy 均值     : {float(net_dy.mean()):+.3f} m / {t_run:.1f}s "
         f"=> {float(net_dy.mean()) / t_run:+.3f} m/s")
