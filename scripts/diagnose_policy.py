@@ -79,6 +79,93 @@ def _root_yaw(env):
   return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
+def _root_yaw_rate(env):
+  """世界系 yaw 角速度 ω_z（rad/s）—— 判断「螃蟹步 vs 转身走」最直接的量。"""
+  d = env.scene["robot"].data
+  for name in ("root_link_ang_vel_w", "root_ang_vel_w"):
+    v = getattr(d, name, None)
+    if v is not None:
+      return v[:, 2]
+  return None
+
+
+def _disable_curriculum(base) -> None:
+  """把课程计算哑掉。
+
+  否则 `env.reset()` 内部会调 `curriculum_manager.compute()` 按上一回合表现
+  重新分配地形等级，`--terrain-level` 刚设的值立刻被冲掉
+  （实测：钉 6 级，跑完显示 min 4 / max 8）。
+  """
+  cm = getattr(base, "curriculum_manager", None)
+  if cm is None:
+    return
+  if getattr(cm, "_diag_disabled", False):
+    return
+  try:
+    cm.compute = lambda *a, **k: {}      # type: ignore[method-assign]
+    cm._diag_disabled = True
+    print("[info] 已禁用 curriculum（否则 reset 会把地形等级重算回去）")
+  except Exception as e:
+    print(f"[warn] 禁用 curriculum 失败：{e}")
+
+
+def _aim_camera(base, env_i: int = 0, *, offset=(0.0, 0.9, 0.35),
+                dist: float = 6.0, elev: float = -15.0, azim: float = 90.0):
+  """把离屏相机钉在 env_i 出生点前方（世界系固定机位）。
+
+  为什么必须在这里重算：mjlab 的 `OffscreenRenderer._setup_camera` 直接
+  `camera.lookat[:] = cfg.lookat`，**不加 env_origins**。而每个 env 的地形块
+  在世界里是分开排布的（实测 env0 在 x=27.8），所以写在 cfg 里的
+  `(0, 0.8, 0.3)` 对任何多 env 场景都等于对着空气拍 —— 录出来是一片空地。
+
+  固定机位（而非跟拍）是判断"是否真的在横移"的前提：跟拍时机器人永远在
+  画面中央，台阶跟着一起退，肉眼看不出位移。
+  """
+  look = None
+  try:
+    o = base.scene.env_origins[env_i].cpu().tolist()
+    look = (o[0] + offset[0], o[1] + offset[1], o[2] + offset[2])
+  except Exception as e:
+    print(f"[warn] 读不到 env_origins（{e}），相机仍按 cfg.lookat 拍，可能看不到机器人")
+
+  r = getattr(base, "_offline_renderer", None)
+  cam = getattr(r, "_cam", None) if r is not None else None
+  if cam is None:
+    print("[warn] 拿不到离屏渲染器相机（需要 render_mode='rgb_array'），录像不可用")
+    return look
+
+  if look is not None:
+    cam.lookat[:] = look
+  cam.distance = float(dist)
+  cam.elevation = float(elev)
+  cam.azimuth = float(azim)
+  cam.type = 0            # mjCAMERA_FREE
+  cam.trackbodyid = -1    # 双保险：即使 cfg 是 ASSET_ROOT 也强制改回自由相机
+  print(f"[info] 相机 -> lookat={tuple(round(t, 2) for t in cam.lookat)} "
+        f"dist={cam.distance} elev={cam.elevation} azim={cam.azimuth}")
+  return look
+
+
+def _write_video(path: str, frames, fps: float) -> None:
+  if not frames:
+    print("[warn] 没收到任何帧，不写视频（是不是没开 render_mode='rgb_array'？）")
+    return
+  try:
+    import mediapy as media
+    media.write_video(path, frames, fps=int(round(fps)))
+  except Exception:
+    try:
+      import imageio.v2 as iio
+      iio.mimwrite(path, frames, fps=fps, macro_block_size=1)
+    except Exception as e:
+      print(f"[warn] 写 mp4 失败（{e}）；退而存 npz")
+      import numpy as np
+      np.savez_compressed(path + ".npz", frames=np.stack(frames))
+      print(f"[info] 已保存 {path}.npz（{len(frames)} 帧）")
+      return
+  print(f"[info] 视频已保存: {path}  ({len(frames)} 帧 @ {int(round(fps))} fps)")
+
+
 def _describe_obs(obs) -> str:
   """obs 可能是 TensorDict / Dict[str, Tensor] / 单个张量，按类型分别描述。"""
   if hasattr(obs, "keys"):
@@ -183,6 +270,15 @@ def main(argv=None) -> int:
   ap.add_argument("--dump-scan", action="store_true",
                   help="打印 height_scan 原始高度场 + 估计器内部量，用于定位 rise 恒为 0")
   ap.add_argument("--dump-env", type=int, default=0, help="--dump-scan 打印哪个 env")
+  ap.add_argument("--record", default=None, metavar="OUT.mp4",
+                  help="录 mp4（固定机位，自动对准 env0 出生点）；需要 EGL")
+  ap.add_argument("--record-env", type=int, default=0, help="录哪个 env")
+  ap.add_argument("--record-every", type=int, default=1, help="每 N 步取一帧")
+  ap.add_argument("--record-offset", default="0,0.9,0.35",
+                  help="相机注视点相对 env 出生点的偏移 x,y,z")
+  ap.add_argument("--record-dist", type=float, default=6.0)
+  ap.add_argument("--record-elev", type=float, default=-15.0)
+  ap.add_argument("--record-azim", type=float, default=90.0)
   args = ap.parse_args(argv)
 
   import mjlab.tasks  # noqa: F401  触发任务注册
@@ -204,7 +300,8 @@ def main(argv=None) -> int:
     return 2
 
   env_cfg.scene.num_envs = args.num_envs
-  env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
+  env = ManagerBasedRlEnv(cfg=env_cfg, device=device,
+                          render_mode="rgb_array" if args.record else None)
   env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
   base = _unwrap(env)
   B = base.num_envs
@@ -232,6 +329,7 @@ def main(argv=None) -> int:
   obs = out[0] if isinstance(out, tuple) else out
 
   if args.terrain_level is not None:
+    _disable_curriculum(base)
     if _force_terrain_level(base, args.terrain_level):
       out = env.reset()          # 让新等级在出生点上生效
       obs = out[0] if isinstance(out, tuple) else out
@@ -245,8 +343,20 @@ def main(argv=None) -> int:
     else:
       print("[warn] 这个版本拿不到 terrain_levels，按默认等级 0 跑")
 
+  if args.record:
+    try:
+      off = tuple(float(t) for t in args.record_offset.split(","))
+    except Exception:
+      off = (0.0, 0.9, 0.35)
+      print(f"[warn] --record-offset={args.record_offset!r} 解析失败，用默认 {off}")
+    _aim_camera(base, args.record_env, offset=off, dist=args.record_dist,
+                elev=args.record_elev, azim=args.record_azim)
+
   # ---- 指标累计（位移必须逐步累加，reset 那一步跳过）----
   ep_len: list[int] = []
+  frames: list = []
+  step_i = 0
+  warned_render = False
   step_in_ep = torch.zeros(B, dtype=torch.long, device=device)
   net_dy = torch.zeros(B, device=device)
   net_dx = torch.zeros(B, device=device)
@@ -255,9 +365,10 @@ def main(argv=None) -> int:
   cmd_list: list[float] = []
   z_list: list[float] = []
   prev = _root_pos(base)[:, :2].clone()
-  prev_yaw = _root_yaw(base)          # None 表示这个版本读不到朝向
-  yaw_rate: list[float] = []          # 存活期 |dyaw/dt|
-  yaw_travel = torch.zeros(B, device=device)   # 每 env 累计 |dyaw|（rad）
+  prev_yaw = _root_yaw(base)          # None 表示这个版本读不到四元数
+  yaw_ok = _root_yaw_rate(base) is not None
+  yaw_rate: list[float] = []          # 存活期 |ω_z|
+  yaw_travel = torch.zeros(B, device=device)   # 每 env 累计 |Δyaw|（rad）
   act_abs, act_cnt = 0.0, 0
   sat_sum, sat_cnt = 0.0, 0
   alive_steps = 0
@@ -297,6 +408,20 @@ def main(argv=None) -> int:
     else:
       obs, _rew, dones = out
 
+    if args.record and (step_i % max(1, args.record_every) == 0):
+      step_i += 1
+      try:
+        fr = base.render()
+        if fr is not None:
+          frames.append(fr[args.record_env] if getattr(fr, "ndim", 0) == 4 else fr)
+      except Exception as e:
+        if not warned_render:
+          print(f"[warn] 渲染失败，录像会中断：{e!r}")
+          warned_render = True
+        args.record = None
+    else:
+      step_i += 1
+
     dones_b = dones.bool()
     alive = ~dones_b
 
@@ -310,7 +435,7 @@ def main(argv=None) -> int:
     except Exception:
       pass
     try:
-      z_list.append(float(_root_pos(base)[:, 2].mean()))
+      z_list.append(float(_root_pos(base)[0, 2]))    # 只看 env0：多 env 的地形块高度不同，均值无意义
     except Exception:
       pass
     if bool(alive.any()):
@@ -319,9 +444,14 @@ def main(argv=None) -> int:
       alive_steps += int(alive.sum())
 
     # 朝向变化（螃蟹步的定义就是「朝向不变、侧向平移」，所以这个必须单独看）
-    if prev_yaw is not None:
+    if yaw_ok:
+      w = _root_yaw_rate(base)
+      if bool(alive.any()):
+        yaw_rate.extend(w[alive].abs().tolist())
+      yaw_travel += torch.where(alive, w.abs() * dt, torch.zeros_like(w))
+    elif prev_yaw is not None:          # 退路：用四元数差分
       yw = _root_yaw(base)
-      dyaw = torch.atan2(torch.sin(yw - prev_yaw), torch.cos(yw - prev_yaw))  # wrap 到 ±pi
+      dyaw = torch.atan2(torch.sin(yw - prev_yaw), torch.cos(yw - prev_yaw))
       if bool(alive.any()):
         yaw_rate.extend((dyaw[alive] / dt).abs().tolist())
       yaw_travel += torch.where(alive, dyaw.abs(), torch.zeros_like(dyaw))
@@ -338,6 +468,9 @@ def main(argv=None) -> int:
       step_in_ep[dones_b] = 0
 
   # ---- 打印 ----
+  if args.record:
+    _write_video(args.record, frames, 1.0 / dt)
+
   steps_full = int(round(20.0 / dt))
   print("=" * 62)
   print(f"task           : {args.task}")
@@ -386,9 +519,11 @@ def main(argv=None) -> int:
     yr = statistics.mean(yaw_rate)
     print(f"yaw 速率 |ω_z| : {yr:.3f} rad/s   <- 螃蟹步应 < 0.15；"
           f"{'✅ 朝向基本不变' if yr < 0.15 else '❌ 在自转，不是螃蟹步'}")
-  if prev_yaw is not None:
     deg = float(yaw_travel.mean()) * 180.0 / math.pi
     print(f"yaw 累计漂移   : {float(yaw_travel.mean()):.2f} rad ({deg:.0f}°) / {args.steps * dt:.0f}s")
+  else:
+    print("[warn] 读不到 root_link_ang_vel_w / root_link_quat_w，"
+          "无法判断朝向是否变化（螃蟹步判不出来）")
   if z_list:
     print(f"基座 z         : {z_list[0]:.3f} -> {z_list[-1]:.3f} m "
           f"(Δ{z_list[-1] - z_list[0]:+.3f}；爬上台阶会升高)")

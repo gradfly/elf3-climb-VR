@@ -311,11 +311,27 @@ python sim/vendor/bxi_controller_ros2/src/bxi_example_py_elf3/launch/crab_replay
 所以 `Elf3-Crab-Residual-Play` 已默认改成 **WORLD 固定机位**（`env_cfg_residual._retune_viewer`），
 台阶在画面里不动，机器人相对它平移才看得出来。
 
-### 10.2 录视频（服务器端）
+### 10.2 录视频
+
+**推荐用诊断脚本录**（`--record`）——它会自动把相机对准 env 的真实出生点：
 
 ```bash
 cd ~/elf3 && git pull --ff-only
 
+MUJOCO_GL=egl .venv/bin/python scripts/diagnose_policy.py \
+  --task Elf3-Crab-Residual-Play \
+  --checkpoint logs/rsl_rl/elf3_crab/<run>/model_XXXX.pt \
+  --num-envs 1 --steps 1000 --terrain-level 5 \
+  --record /tmp/walk.mp4
+```
+
+一次性拿到**视频 + 全部数字**（`v_y` / yaw 速率 / `rise_est` / 基座 z），
+不用再单独跑一遍 play。可调项：`--record-offset "0,0.9,0.35"`（注视点相对出生点）、
+`--record-dist 6`、`--record-elev -15`、`--record-azim 90`。
+
+用 `play --video` 也可以，但要记住两个默认值坑：
+
+```bash
 MUJOCO_GL=egl .venv/bin/play Elf3-Crab-Residual-Play \
   --checkpoint-file logs/rsl_rl/elf3_crab/<run>/model_XXXX.pt \
   --num-envs 1 \
@@ -327,6 +343,10 @@ MUJOCO_GL=egl .venv/bin/play Elf3-Crab-Residual-Play \
 - 默认 `--video-length 200` 只录 **4 秒**，太短，至少给 1000（=20 s）。
 - 默认分辨率只有 320×240，必须显式放大，否则看不清脚。
 - 视频落在 `logs/rsl_rl/elf3_crab/<run>/videos/play/rl-video-step-0.mp4`。
+- ⚠️ `play` 的固定机位只对**单 env、出生点在原点**有效：mjlab 的
+  `OffscreenRenderer` 直接用 `camera.lookat = cfg.lookat`，**不加 env_origins**，
+  而多 env 场景里 env0 可能在世界 x=27.8 处 —— 那时画面里是一片空地。
+  这种就用上面的 `--record`。
 
 ### 10.3 画面看什么（按顺序）
 
@@ -366,3 +386,10 @@ ELF3_VIEWER_LOOKAT="0,0.8,0.3"  ELF3_VIEWER_DIST=6  ELF3_VIEWER_AZIM=90 \
 | `yaw 速率 \|ω_z\|` | **< 0.15 rad/s** | 大 = 在自转，不是螃蟹步 |
 | `跟踪比 v_y/cmd` | > 0.8 | ~0.5 = 挪得动走不动 |
 | `基座 z` Δ | 随台阶升高 | 持续为负 = 在下楼 |
+
+另外两个「链路有没有坏」的守门指标：
+
+| 指标 | 正常 | 异常含义 |
+|---|---|---|
+| `地形估计链路` | `OK` | 断了 ⇒ `rise` 恒 0，参考步态锁平地档 |
+| `rise_est` | 与实际台阶一致（等级 5–6 约 0.15） | **顶在 0.220** = 被机器人自身遮挡骗了；**恒 0** = 取数/地形问题 |

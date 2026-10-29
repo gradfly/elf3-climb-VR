@@ -63,6 +63,7 @@ class ResidualGaitActionCfg(JointPositionActionCfg):
     scan_resolution: float = 0.1
     terrain_refresh_steps: int = 5
     rise_ema_alpha: float = 0.5
+    tread_ema_alpha: float = 0.3
     v_rate_range: tuple[float, float] = (0.6, 1.6)
     phase_offset_choices: tuple[float, ...] = (0.0, 0.5)
     # 表第 33 帧 / 第 78 帧是双支撑起点；相位平移后 phase=0 落在双支撑上，
@@ -275,7 +276,11 @@ class ResidualGaitAction(JointPositionAction):
         # 长期无效（平地）-> 缓慢回落到 0
         new_rise = torch.where(valid, new_rise, 0.9 * self._rise)
         self._rise.copy_(new_rise.clamp(0.0, float(self._table.rise[-1])))
-        self._tread.copy_(torch.where(valid, tread, self._tread))
+        # tread 原来直接取当帧值，一条假边就能把它顶到 clamp 上限 0.40（实测如此）。
+        # 同样做 EMA（比 rise 快一些，踏面变化更局部）。
+        at = float(self.cfg.tread_ema_alpha)
+        self._tread.copy_(torch.where(valid, at * tread + (1 - at) * self._tread,
+                                      self._tread))
 
     def _v_cmd(self) -> torch.Tensor:
         try:

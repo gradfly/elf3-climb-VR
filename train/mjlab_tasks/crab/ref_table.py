@@ -111,17 +111,25 @@ class RefTable:
     @torch.no_grad()
     def estimate(self, heights: torch.Tensor, *, nx: int = 13, ny: int = 21,
                  size_y: float = 2.0, res: float = 0.1, edge_thr: float = 0.03,
-                 y_min: float = 0.15, y_max: float = 1.00, sigma: float = 0.50):
+                 y_min: float = 0.15, y_max: float = 1.00, sigma: float = 0.50,
+                 dh_max: float = 0.30):
         """从 height_scan（米，[B, nx*ny]）估计 (rise[B], tread[B], valid[B])。
 
-        两处关键修正（2026-10-29，实跑数据反推）
-        ---------------------------------------
+        三处关键修正（2026-10-29，两次实跑数据反推）
+        ------------------------------------------
         1) 检测带原来写死 |y| ∈ (0.30, 0.90)，但地形中心平台半宽 0.9~1.25 m
            -> 台阶边缘永远在带外 -> rise 全程 0，参考步态永远是平地那一档。
            现在放宽到 (0.15, 1.00)，并把平台宽度改小（见 terrain_cfg）。
         2) tread 原来算的是「最远两条边的跨度 / (边数-1)」。金字塔四周都有台阶，
            ±y 两侧各有一条边，于是 span = 平台宽 + 两级，算出 1.8~2.0 m 这种
            荒谬值。现在只看前进方向 +Y 半侧，取**相邻边的间距均值**。
+        3) **机器人自己会挡住射线**。terrain_scan 从躯干往下打，中央 x 那几列
+           正好穿过髋/腿，实测 y=±0.1 处 h 从 104.9 cm 掉到 62.8 cm（差 42 cm），
+           比真台阶（15 cm）大三倍。两个防御：剖面先做 3 点中值滤波去掉单格凹陷；
+           dh 超过 `dh_max`（参考表最大档才 0.22 m）一律当异常丢弃。
+           没有这两道，rise 会被顶到 clamp 上限 0.22、tread 顶到 0.40，
+           参考步态选成最难档（22 cm 台阶 / 40 cm 踏面），而实地下只有 15/30 cm
+           -> 步幅过大、落脚点踩在台沿外 -> 走得动才怪。
         """
         heights = heights.to(self.device, torch.float32)
         B = heights.shape[0]
@@ -132,6 +140,13 @@ class RefTable:
         prof = h[:, :, lo:hi].median(dim=-1).values          # [B,ny]
 
         finite = torch.isfinite(prof) & (prof < 4.5)          # 5.0 是 miss
+
+        # 3 点中值滤波（边界复制）：只看 raw 值，miss 不参与，避免把 5.0 抹平
+        if ny >= 3:
+            prev_p = torch.cat([prof[:, :1], prof[:, :-1]], 1)
+            next_p = torch.cat([prof[:, 1:], prof[:, -1:]], 1)
+            prof = torch.stack([prev_p, prof, next_p], 0).median(dim=0).values
+
         # 上升边缘：地形越高，height 越小 -> dh = h[iy] - h[iy+1] > 0
         dh = prof[:, :-1] - prof[:, 1:]
         ok = finite[:, :-1] & finite[:, 1:]
@@ -140,7 +155,7 @@ class RefTable:
                  + (torch.arange(ny - 1, device=self.device, dtype=torch.float32) + 0.5) * res)
         band = (y_mid.abs() > y_min) & (y_mid.abs() < y_max)
         # rise 两侧都认（机器人可能倒着接近台阶），tread 只看 +Y 半侧
-        mask = ok & (dh > edge_thr) & band
+        mask = ok & (dh > edge_thr) & (dh < dh_max) & band
         mask_fwd = mask & (y_mid > 0)
 
         w = torch.exp(-(y_mid ** 2) / (2.0 * sigma ** 2))    # [ny-1]
@@ -247,6 +262,27 @@ def _selftest() -> int:
         print(f"[selftest] scan_to_heights B={Bt} -> {tuple(hh.shape)} "
               f"(want {want}) {'OK' if shape_ok and vals_ok else 'FAIL'}")
         ok_all = ok_all and shape_ok and vals_ok
+
+    # 5b) 回归：机器人自身遮挡。terrain_scan 从躯干往下打，中央 x 那列会穿过
+    #     髋/腿，实测 y=±0.1 处 h 从 104.9 cm 掉到 62.8 cm（差 42 cm，比真台阶
+    #     15 cm 大三倍）。旧实现把它当上升边 -> rise 顶到 clamp 上限 0.22。
+    #     这里故意放在 y=+0.3（检测带内，|y_mid|=0.25），旧代码必失败。
+    p = np.full(ny, 1.0); p[ys >= 0.4] -= 0.12
+    hs = profile_to_heights(p).view(1, ny, nx)
+    midc = nx // 2
+    i_row = int(np.argmin(np.abs(ys - 0.3)))
+    hs[0, i_row, midc] -= 0.42                            # 中央列被腿挡住
+    rise, _, valid = tb.estimate(hs.reshape(1, -1))
+    print(f"[selftest] self-occlusion       rise={float(rise[0]):.3f} "
+          f"(want 0.12) valid={bool(valid[0])}")
+    ok_all = ok_all and abs(float(rise[0]) - 0.12) < 0.02
+
+    # 5c) dh_max：0.42 m 的"台阶"不可能存在（参考表最大档才 0.22），必须丢弃
+    p = np.full(ny, 1.0); p[ys >= 0.3] -= 0.42
+    rise, _, valid = tb.estimate(profile_to_heights(p))
+    print(f"[selftest] dh_max reject        rise={float(rise[0]):.3f} "
+          f"valid={bool(valid[0])} (want valid=False)")
+    ok_all = ok_all and not bool(valid[0])
 
     # 6) select 形状/单调性
     B = 4
