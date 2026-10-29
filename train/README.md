@@ -297,3 +297,72 @@ python sim/vendor/bxi_controller_ros2/src/bxi_example_py_elf3/launch/crab_replay
 
 > 找不到参考表时会提示设 `ELF3_REPO=<仓库根>`；表本身在
 > `train/assets/ref_tables/crab_ref_v1.npz`。
+
+---
+
+## 10. 怎么确认「是不是螃蟹步」
+
+### 10.1 先说一个坑：跟拍相机会骗人
+
+`ViewerConfig.origin_type` 默认 `AUTO`（跟随机器人）。跟拍时机器人永远在画面中央、
+台阶跟着画面一起退，**肉眼完全看不出它到底走了没有**。2026-10-29 一段 16 s 视频
+就是这么被误读成「一次侧步都没有」，而同一份 checkpoint 无界面实测 `v_y=0.126 m/s`。
+
+所以 `Elf3-Crab-Residual-Play` 已默认改成 **WORLD 固定机位**（`env_cfg_residual._retune_viewer`），
+台阶在画面里不动，机器人相对它平移才看得出来。
+
+### 10.2 录视频（服务器端）
+
+```bash
+cd ~/elf3 && git pull --ff-only
+
+MUJOCO_GL=egl .venv/bin/play Elf3-Crab-Residual-Play \
+  --checkpoint-file logs/rsl_rl/elf3_crab/<run>/model_XXXX.pt \
+  --num-envs 1 \
+  --video --video-length 1000 --video-width 1280 --video-height 720
+```
+
+- `--checkpoint-file` 是**必须**的（不是 `--checkpoint`）；启动时必须看到
+  `[INFO]: Loading checkpoint: ...`，没有这行就是没加载。
+- 默认 `--video-length 200` 只录 **4 秒**，太短，至少给 1000（=20 s）。
+- 默认分辨率只有 320×240，必须显式放大，否则看不清脚。
+- 视频落在 `logs/rsl_rl/elf3_crab/<run>/videos/play/rl-video-step-0.mp4`。
+
+### 10.3 画面看什么（按顺序）
+
+| # | 看什么 | 是螃蟹步 | 不是 |
+|---|---|---|---|
+| 1 | 机器人相对**台阶**的位置 | 持续往侧向挪 | 站在原地晃 |
+| 2 | 身体朝向（躯干正面/肩线） | 始终朝同一侧，不转身 | 转过身去正面朝前走 |
+| 3 | 落脚 | 两脚交替抬起、踩上高一级踏面 | 双脚不离地蹭、或一直劈叉 |
+| 4 | 基座高度 | 随台阶一级级升高 | 一直往下掉（在下楼） |
+
+第 2 条是定义性的：**螃蟹步 = 朝向不变 + 侧向平移**。转身走 = 普通行走，不算。
+
+### 10.4 固定机位不对时这样调（不用改代码）
+
+```bash
+ELF3_VIEWER_ORIGIN=world  .venv/bin/play ...   # 固定（默认，看位移）
+ELF3_VIEWER_ORIGIN=asset  .venv/bin/play ...   # 跟拍（看脚下细节）
+ELF3_VIEWER_LOOKAT="0,0.8,0.3"  ELF3_VIEWER_DIST=6  ELF3_VIEWER_AZIM=90 \
+  ELF3_VIEWER_ELEV=-18  .venv/bin/play ...
+```
+
+画面里看不到机器人 ⇒ 出生点不在原点，先用诊断脚本打印 `root=(x, y, z)`，
+再把它填进 `ELF3_VIEWER_LOOKAT`。
+
+### 10.5 别只看视频，用数字定案
+
+```bash
+.venv/bin/python scripts/diagnose_policy.py --task Elf3-Crab-Residual-Play \
+  --checkpoint logs/rsl_rl/elf3_crab/<run>/model_XXXX.pt \
+  --num-envs 8 --steps 1000 --terrain-level 5
+```
+
+判据（三条同时满足才算螃蟹步）：
+
+| 指标 | 螃蟹步 | 反例 |
+|---|---|---|
+| `yaw 速率 \|ω_z\|` | **< 0.15 rad/s** | 大 = 在自转，不是螃蟹步 |
+| `跟踪比 v_y/cmd` | > 0.8 | ~0.5 = 挪得动走不动 |
+| `基座 z` Δ | 随台阶升高 | 持续为负 = 在下楼 |

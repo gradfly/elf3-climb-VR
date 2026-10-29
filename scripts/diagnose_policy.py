@@ -36,6 +36,7 @@ viser 里靠肉眼只能看到「站一会儿就倒」，无法区分：
 from __future__ import annotations
 
 import argparse
+import math
 import statistics
 import sys
 from dataclasses import asdict
@@ -61,6 +62,21 @@ def _root_pos(env):
     if v is not None:
       return v
   raise AttributeError("找不到 root pos")
+
+
+def _root_yaw(env):
+  """基座朝向 yaw（rad）。取不到四元数就返回 None。"""
+  d = env.scene["robot"].data
+  q = None
+  for name in ("root_link_quat_w", "root_quat_w", "root_link_quat"):
+    v = getattr(d, name, None)
+    if v is not None:
+      q = v
+      break
+  if q is None:
+    return None
+  w, x, y, z = q.unbind(-1)
+  return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
 def _describe_obs(obs) -> str:
@@ -239,6 +255,9 @@ def main(argv=None) -> int:
   cmd_list: list[float] = []
   z_list: list[float] = []
   prev = _root_pos(base)[:, :2].clone()
+  prev_yaw = _root_yaw(base)          # None 表示这个版本读不到朝向
+  yaw_rate: list[float] = []          # 存活期 |dyaw/dt|
+  yaw_travel = torch.zeros(B, device=device)   # 每 env 累计 |dyaw|（rad）
   act_abs, act_cnt = 0.0, 0
   sat_sum, sat_cnt = 0.0, 0
   alive_steps = 0
@@ -299,6 +318,15 @@ def main(argv=None) -> int:
       vx_alive.extend(d[alive, 0].tolist())
       alive_steps += int(alive.sum())
 
+    # 朝向变化（螃蟹步的定义就是「朝向不变、侧向平移」，所以这个必须单独看）
+    if prev_yaw is not None:
+      yw = _root_yaw(base)
+      dyaw = torch.atan2(torch.sin(yw - prev_yaw), torch.cos(yw - prev_yaw))  # wrap 到 ±pi
+      if bool(alive.any()):
+        yaw_rate.extend((dyaw[alive] / dt).abs().tolist())
+      yaw_travel += torch.where(alive, dyaw.abs(), torch.zeros_like(dyaw))
+      prev_yaw = yw
+
     # 位移累加用 d*dt（d 已排除重置那一步的跳变）
     net_dy += torch.where(alive, d[:, 1] * dt, torch.zeros_like(net_dy))
     net_dx += torch.where(alive, d[:, 0] * dt, torch.zeros_like(net_dx))
@@ -354,6 +382,13 @@ def main(argv=None) -> int:
     if vy_alive:
       print(f"跟踪比 v_y/cmd : {statistics.mean(vy_alive) / max(statistics.mean(cmd_list), 1e-6):.2f}"
             f"   <- 这才是真正的「走得动不动」，别只看 v_y 绝对值")
+  if yaw_rate:
+    yr = statistics.mean(yaw_rate)
+    print(f"yaw 速率 |ω_z| : {yr:.3f} rad/s   <- 螃蟹步应 < 0.15；"
+          f"{'✅ 朝向基本不变' if yr < 0.15 else '❌ 在自转，不是螃蟹步'}")
+  if prev_yaw is not None:
+    deg = float(yaw_travel.mean()) * 180.0 / math.pi
+    print(f"yaw 累计漂移   : {float(yaw_travel.mean()):.2f} rad ({deg:.0f}°) / {args.steps * dt:.0f}s")
   if z_list:
     print(f"基座 z         : {z_list[0]:.3f} -> {z_list[-1]:.3f} m "
           f"(Δ{z_list[-1] - z_list[0]:+.3f}；爬上台阶会升高)")

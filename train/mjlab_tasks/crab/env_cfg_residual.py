@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
@@ -138,6 +139,76 @@ def _params_for(func, params: dict) -> dict:
     return kept
 
 
+def _retune_viewer(cfg) -> None:
+    """回放/录像的相机设置：默认**钉在世界系**，不要用跟拍。
+
+    ⚠️ 2026-10-29 教训：ViewerConfig.origin_type 默认 AUTO（跟随机器人）。
+    跟拍相机下机器人永远在画面中央，台阶跟着画面一起退，
+    **肉眼完全看不出它到底走了没有** —— 一段 16 s 的视频就这么被误读成
+    "一次侧步都没有"，而同一份 checkpoint 无界面实测 v_y=0.126 m/s。
+    判断是否螃蟹步必须让「台阶」这个静止参照物在画面里不动，
+    所以这里默认改成 WORLD 固定机位。
+
+    可用环境变量临时覆盖（不用改代码）：
+        ELF3_VIEWER_ORIGIN=world|asset   （asset = 退回跟拍）
+        ELF3_VIEWER_LOOKAT="0,0.8,0.3"   （世界系注视点）
+        ELF3_VIEWER_DIST=6 / ELEV=-18 / AZIM=90
+        ELF3_VIEWER_W=1280 / H=720
+    """
+    v = getattr(cfg, "viewer", None)
+    if v is None:
+        return
+
+    def _set(name, value):
+        if not hasattr(v, name):
+            print(f"[viewer][warn] 这个 mjlab 的 ViewerConfig 没有 {name}，已跳过")
+            return
+        try:
+            setattr(v, name, value)
+        except Exception as e:
+            print(f"[viewer][warn] 设置 {name} 失败：{e}")
+
+    _set("width", int(os.environ.get("ELF3_VIEWER_W", 1280)))
+    _set("height", int(os.environ.get("ELF3_VIEWER_H", 720)))
+
+    origin = os.environ.get("ELF3_VIEWER_ORIGIN", "world").strip().lower()
+    Ot = getattr(type(v), "OriginType", None)
+    if Ot is not None:
+        # world -> 固定机位（能看出位移）；asset -> 跟拍（能看清脚下细节）
+        want = ("WORLD" if origin in ("world", "w")
+                else "AUTO" if origin == "auto" else "ASSET_ROOT")
+        target = None
+        for n in dir(Ot):
+            if n.upper() == want:
+                target = getattr(Ot, n)
+                break
+        if target is None:        # 找不到就退回 AUTO
+            for n in dir(Ot):
+                if n.upper() == "AUTO":
+                    target = getattr(Ot, n)
+                    break
+        if origin in ("world", "w") and target is not getattr(Ot, "WORLD", None):
+            print("[viewer][warn] 这个 mjlab 的 OriginType 没有 WORLD，相机仍是跟拍；"
+                  "看位移请改用诊断脚本（scripts/diagnose_policy.py）")
+        _set("origin_type", target)
+    elif origin in ("world", "w"):
+        print("[viewer][warn] 这个 mjlab 的 ViewerConfig 没有 OriginType，相机无法固定，"
+              "录出来的视频是跟拍的（看不出位移）。用诊断脚本的 v_y / yaw 速率判断。")
+
+    lookat = os.environ.get("ELF3_VIEWER_LOOKAT")
+    if lookat:
+        try:
+            _set("lookat", tuple(float(t) for t in lookat.split(",")))
+        except Exception:
+            print(f"[viewer][warn] ELF3_VIEWER_LOOKAT={lookat!r} 解析失败，用默认值")
+    else:
+        # 机器人从碗底平地出发沿 +Y 走，注视点放在前方一点，能容纳 ~5 m 位移
+        _set("lookat", (0.0, 0.8, 0.3))
+    _set("distance", float(os.environ.get("ELF3_VIEWER_DIST", 6.0)))
+    _set("elevation", float(os.environ.get("ELF3_VIEWER_ELEV", -18.0)))
+    _set("azimuth", float(os.environ.get("ELF3_VIEWER_AZIM", 90.0)))
+
+
 def _retune_curriculum(cfg) -> None:
     # 地形升级默认要求 distance > 0.8 × commanded_distance，而 commanded_distance
     # 含"早摔剩余时间应走的距离"。2000 轮时 81% 的回合在 9.3 s 摔掉，几乎必然降级，
@@ -198,4 +269,6 @@ def crab_residual_env_cfg(play: bool = False):
     _rebuild_rewards(cfg)
     _retune_commands(cfg, play)
     _retune_curriculum(cfg)
+    if play:
+        _retune_viewer(cfg)
     return cfg
