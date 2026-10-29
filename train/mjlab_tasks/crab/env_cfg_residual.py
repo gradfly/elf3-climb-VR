@@ -16,6 +16,8 @@
 """
 from __future__ import annotations
 
+import inspect
+
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
@@ -104,26 +106,53 @@ def _retune_commands(cfg, play: bool) -> None:
     # play 模式下 viser 滑块要求每个轴 max>=0.1；训练模式保持 0（不指令转向）
 
 
+def _params_for(func, params: dict) -> dict:
+    """按函数的真实签名裁剪 params，丢掉它不认的参数。
+
+    ⚠️ 2026-10-29：直接照 GitHub main 的签名硬塞 `promotion_fraction=0.6` 会在
+    服务器上抛 `TypeError: terrain_levels_vel() got an unexpected keyword argument`。
+    原因是**服务器装的 mjlab 比 main 旧**，那个参数还没有。以后凡是给 mjlab 内置
+    函数传 params，一律先过这里，别再信 main 的签名。
+    """
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return dict(params)
+    ps = list(sig.parameters.values())
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in ps):
+        return dict(params)
+    allowed = {p.name for p in ps
+               if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                             inspect.Parameter.KEYWORD_ONLY)}
+    kept = {k: v for k, v in params.items() if k in allowed}
+    dropped = sorted(set(params) - set(kept))
+    if dropped:
+        print(f"[curriculum][warn] mjlab 版本的 {getattr(func, '__name__', func)} "
+              f"不接受 {dropped}，已忽略（不影响训练，只是这档调节不生效）")
+    return kept
+
+
 def _retune_curriculum(cfg) -> None:
     # 地形升级默认要求 distance > 0.8 × commanded_distance，而 commanded_distance
     # 含"早摔剩余时间应走的距离"。2000 轮时 81% 的回合在 9.3 s 摔掉，几乎必然降级，
     # terrain 卡在 0.08、看不到台阶。放宽到 0.6，让"能走一段"的 env 先升上去。
     tl = cfg.curriculum.get("terrain_levels") if cfg.curriculum else None
     if tl is not None:
-        tl.params = {**(tl.params or {}), "promotion_fraction": 0.6}
+        want = {**(tl.params or {}), "promotion_fraction": 0.6}
+        tl.params = _params_for(tl.func, want)
 
     if "command_vel" not in cfg.curriculum:
         return
     cfg.curriculum["command_vel"] = CurriculumTermCfg(
         func=mdp.commands_vel,
-        params={
+        params=_params_for(mdp.commands_vel, {
             "command_name": "twist",
             "velocity_stages": [
                 {"step": 0, "lin_vel_y": (0.10, 0.16)},
                 {"step": 400 * 24, "lin_vel_y": (0.14, 0.20)},
                 {"step": 1200 * 24, "lin_vel_y": (0.15, 0.24)},
             ],
-        },
+        }),
     )
 
 
