@@ -114,7 +114,10 @@ def _rebuild_rewards(cfg) -> None:
         # 平滑惩罚是前进奖励的 2.2 倍，等于在奖励它"别动"。
         # α 到 1 之后参考步态满幅，残差需要更大幅度的调整，这个惩罚会更伤人。
         # 再往下降没必要：0.01 时约 -0.96/回合，仍是前进奖励的 73%，够抑制抖动。
-        r["action_rate_l2"].weight = -0.01
+        # 2026-10-30 晚：leg_clip_rad 0.40 -> 0.55 之后，同样的策略输出会变成更大的
+        # 实际动作，这条惩罚跟着水涨船高（等于变相加强了「别动」）。压到 -0.006
+        # 抵消量纲变化。
+        r["action_rate_l2"].weight = -0.006
 
     # ① 速度奖励：丢掉内置 track_linear_velocity，换成 EMA 平均推进 + 按指令归一化。
     #    内置那条有两个结构性问题：
@@ -465,7 +468,11 @@ def crab_residual_env_cfg(play: bool = False):
         table_path=TABLE_PATH,
         period_frames=90,
         hold_steps=25,
-        leg_clip_rad=0.40,
+        # 0.40 -> 0.55（2026-10-30 晚）：实测残差饱和比例 62%、mean|action| 1.953，
+        # 而腿残差限幅换算下来约 2.0 action 单位 —— 策略想动但被 clamp 卡死，
+        # 限幅外梯度恒为 0，再想加力也没用。放宽到 0.55（≈2.75 单位）解除天花板。
+        # 代价：实际动作幅度上限 +37%，单腿支撑时更容易失衡，ep_len 短期会掉。
+        leg_clip_rad=0.55,
         waist_clip_rad=0.20,
         arm_clip_rad=0.20,
         scan_size=SCAN_SIZE,
