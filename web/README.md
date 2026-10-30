@@ -106,6 +106,7 @@ node server.mjs --no-https                          # 只开 HTTP
 | 现象 | 原因 / 处理 |
 | --- | --- |
 | 提示 `[ERROR] 未找到 Node.js` | 装 Node.js 18+ 后重试；或手动指定内置 Node：<br>`"%USERPROFILE%\.workbuddy\binaries\node\versions\22.22.2-6\node.exe" server.mjs --open` |
+| 启动报 `SyntaxError: Unexpected reserved word`（指向 `server.mjs` 的 `await listen(...)`） | Node < 14.8 不支持**顶层 await**。两种解法：<br>① 装 Node 18+；<br>② 用零依赖的 Python 后备服务：`python web/tools/serve.py --port 8080`（MIME / 禁缓存与 `server.mjs` 一致，只少了 HTTPS） |
 | 端口被占用 | 会自动 +1 顺延，也可用 `--http-port` / `--https-port` 指定其它端口 |
 | 页面一直转圈或报错 | 必须通过 `server.mjs` 访问（`http://…`）；**别直接双击 `index.html`**，`file://` 会被 CORS / WASM 限制拦住 |
 | 打开是空白页 | 按 `F12` 看 Console 报错，多半是没在 `web/` 目录下启动导致资源 404 |
