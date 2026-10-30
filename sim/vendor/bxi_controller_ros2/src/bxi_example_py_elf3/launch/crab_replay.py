@@ -488,7 +488,13 @@ RES_PHASE_SHIFT = 33.0 / 90.0       # phase=0 落在双支撑起点（表帧 33�
 RES_PERIOD_FRAMES = 90
 RES_HOLD_STEPS = 25                 # 前 0.5 s 冻结相位，与训练一致
 RES_V_RATE = (0.6, 1.6)
-_CLIP_LEGS, _CLIP_WAIST, _CLIP_ARMS = 0.30, 0.15, 0.15
+# ⚠️ 必须与 train/mjlab_tasks/crab/env_cfg_residual.py 里 ResidualGaitActionCfg 的
+# leg_clip_rad / waist_clip_rad / arm_clip_rad 完全一致，否则回放跑的不是训练时的策略。
+# 2026-10-30：这里原本是 0.30/0.15/0.15，而训练早已改成 0.55/0.20/0.20。
+# 训练日志显示约 60% 的动作维度顶在限幅上，回放把腿从 0.55 砍到 0.30 = 把残差
+# 拦腰截断，结果站 1.8 s 就塌，但同一 checkpoint 在 mjlab 里 level 9 是 0/8 摔。
+# 改训练侧限幅时记得同步这里；临时可用 --clip-legs 等覆盖。
+_CLIP_LEGS, _CLIP_WAIST, _CLIP_ARMS = 0.55, 0.20, 0.20
 _WAIST_JOINTS = ("waist_y_joint", "waist_x_joint", "waist_z_joint")
 
 
@@ -498,6 +504,27 @@ def _clip_rad_for(name: str) -> float:
     if name in _WAIST_JOINTS:
         return _CLIP_WAIST
     return _CLIP_ARMS
+
+
+# 393 维观测的分块边界，必须与 env_cfg_residual.ACTOR_ORDER 一致
+_OBS_BLOCKS = (
+    ("lin_vel", 0, 3), ("ang_vel", 3, 6), ("gravity", 6, 9),
+    ("joint_pos", 9, 40), ("ref_err", 40, 52), ("joint_vel", 52, 83),
+    ("actions", 83, 112), ("command", 112, 115), ("phase", 115, 117),
+    ("ref_meta", 117, 120), ("height_scan", 120, 393),
+)
+
+
+def _print_obs_blocks(obs, tag: str = "") -> None:
+    """按训练侧的观测分块打印均值/极值，用来一眼看出哪一块拼错了。"""
+    print(f"  --- 观测分块 {tag} (dim={obs.size}) ---")
+    for name, a, b in _OBS_BLOCKS:
+        if b > obs.size:
+            print(f"    {name:11s} 越界，跳过（obs 只有 {obs.size} 维）")
+            break
+        seg = obs[a:b]
+        print(f"    {name:11s} [{a:3d}:{b:3d}] n={b - a:3d} "
+              f"mean={seg.mean():+7.3f} min={seg.min():+7.3f} max={seg.max():+7.3f}")
 
 
 def _find_repo_file(rel: str):
@@ -532,7 +559,7 @@ def run_policy_residual(m, d, *, onnx_path, cmd=(0.0, 0.20, 0.0), steps=2000,
                         dt=0.02, decimation=10, torso_id=0, dist=2.8, az=160.0,
                         el=-14.0, track=True, record=None, every=4, gui=True,
                         width=640, height=360, spawn_y=0.30, spawn_z=1.0339,
-                        max_dist=5.0, table=None):
+                        max_dist=5.0, table=None, dump_obs=None):
     """残差策略闭环：q_target = q_ref(相位) + 限幅残差。返回躯干 y 位移。"""
     import onnxruntime as ort
     import torch
@@ -636,6 +663,13 @@ def run_policy_residual(m, d, *, onnx_path, cmd=(0.0, 0.20, 0.0), steps=2000,
           f"phase_shift={RES_PHASE_SHIFT:.3f}")
     if inp.shape and len(inp.shape) == 2 and inp.shape[1] not in (-1, obs.size):
         raise SystemExit(f"[错误] ONNX 输入维度 {inp.shape[1]} != 观测 {obs.size}")
+    print(f"  残差限幅 legs={_CLIP_LEGS:.2f} waist={_CLIP_WAIST:.2f} "
+          f"arms={_CLIP_ARMS:.2f} rad"
+          f"   <- 必须与训练 env_cfg_residual 的 *_clip_rad 一致")
+    if dump_obs:
+        np.save(dump_obs, obs)
+        print(f"  首帧观测已存 {dump_obs}")
+        _print_obs_blocks(obs, tag="k=0 复位")
 
     renderer = cam = None
     v = None
@@ -669,7 +703,16 @@ def run_policy_residual(m, d, *, onnx_path, cmd=(0.0, 0.20, 0.0), steps=2000,
         raw = np.asarray(out[0]).reshape(-1)[:29].astype(float)
         # 与训练一致：先限幅到 action 空间，再乘 scale（等效残差 <= clip_rad）
         action = np.clip(raw, -clip29 / scale29, clip29 / scale29)
-        last_action = action.copy()
+        # 训练侧 mdp.last_action 取的是 env.action_manager.action，即**策略原始输出**
+        # （截幅之前）。实测约 60% 的维度顶在限幅上，回填截幅后的值会让观测分布
+        # 系统性偏低，归一化之后是明显的偏移 —— 所以这里回填 raw。
+        last_action = raw.copy()
+
+        if k in (25, 100) or (dump_obs and k in (0, 50, 200)):
+            sat = float((np.abs(raw) > (clip29 / scale29)).mean()) * 100.0
+            print(f"\n  t={k * 0.02:5.2f}s  mean|a|={np.abs(raw).mean():.3f}  "
+                  f"max|a|={np.abs(raw).max():.3f}  饱和={sat:.0f}%")
+            _print_obs_blocks(obs, tag=f"k={k}")
 
         delta = np.clip(scale29 * action, -clip29, clip29)
         target = q_ref + delta
@@ -751,6 +794,10 @@ def load_traj(path: Path):
 
 
 def main() -> None:
+    # --clip-* 会覆盖下面这几个模块级常量（argparse 的 default 也要读它们，
+    # 所以 global 必须声明在函数最前面，不能挪到 args 解析之后）
+    global _CLIP_LEGS, _CLIP_WAIST, _CLIP_ARMS
+
     ap = argparse.ArgumentParser(
         description="螃蟹步爬楼梯轨迹回放器",
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -784,7 +831,17 @@ def main() -> None:
     ap.add_argument("--spawn-z", type=float, default=1.0339,
                     help="policy: 初始基座高度 m（残差任务训练也是 1.0339）")
     ap.add_argument("--steps", type=int, default=2000, help="policy: 控制步数（50Hz，2000=40s）")
+    ap.add_argument("--clip-legs", type=float, default=_CLIP_LEGS,
+                    help="policy: 腿残差限幅 rad，必须与训练 leg_clip_rad 一致")
+    ap.add_argument("--clip-waist", type=float, default=_CLIP_WAIST,
+                    help="policy: 腰残差限幅 rad，必须与训练 waist_clip_rad 一致")
+    ap.add_argument("--clip-arms", type=float, default=_CLIP_ARMS,
+                    help="policy: 臂残差限幅 rad，必须与训练 arm_clip_rad 一致")
+    ap.add_argument("--dump-obs", default=None,
+                    help="policy: 打印观测分块统计并存首帧 npy（排障用）")
     args = ap.parse_args()
+
+    _CLIP_LEGS, _CLIP_WAIST, _CLIP_ARMS = args.clip_legs, args.clip_waist, args.clip_arms
 
     if args.policy in ("onnx", "onnx-residual"):
         if not args.onnx:
@@ -808,6 +865,7 @@ def main() -> None:
                   width=args.width, height=args.height, spawn_y=args.spawn_y)
         if args.policy == "onnx-residual":
             kw["spawn_z"] = args.spawn_z
+            kw["dump_obs"] = args.dump_obs
         runner(m, d, **kw)
         return
 
