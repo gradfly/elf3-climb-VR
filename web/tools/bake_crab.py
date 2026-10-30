@@ -154,6 +154,10 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="crab", help="输出名前缀（默认 crab）")
     ap.add_argument("--traj", default=str(TRAJ_NPZ), help="轨迹 npz 路径")
+    ap.add_argument("--policy-name", default=None,
+                    help="策略名（如 elf3_crab_residual.onnx）；非空时网页按「策略仿真」介绍")
+    ap.add_argument("--label", default="螃蟹步横移上楼",
+                    help="网页里显示的名称（策略回放可填「策略仿真 · 螃蟹步横移上楼」）")
     ap.add_argument("--skip-gen", action="store_true", help="不重生成地形")
     ap.add_argument("--skip-plan", action="store_true", help="不重跑轨迹规划")
     # 地形参数（透传给 gen_crab_stairs.py）
@@ -237,13 +241,13 @@ def main() -> int:
         "dt": dt,
         "model": "elf3.xml",
         "scene": f"crab_stairs（seed={args.seed}，楼梯沿 +Y 上升）",
-        "policy": None,
+        "policy": args.policy_name,
         "camera": None,
         "jointNames": [mujoco.mj_id2name(web_model, mujoco.mjtObj.mjOBJ_JOINT, j)
                        for j in range(web_model.njnt)][1:],
         "name": args.out,
         "kind": "crab",
-        "label": "螃蟹步横移上楼",
+        "label": args.label,
         "source": "crab_climb.py 四相位准静态脚本控制器（闭式 IK + DLS 精修，"
                   "无策略网络）+ gen_crab_stairs.py 随机台阶",
         "terrain": {"entry": SCENE_XML.name, "seed": int(args.seed)},

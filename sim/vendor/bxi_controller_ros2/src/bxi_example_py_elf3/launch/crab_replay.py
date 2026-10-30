@@ -559,7 +559,8 @@ def run_policy_residual(m, d, *, onnx_path, cmd=(0.0, 0.20, 0.0), steps=2000,
                         dt=0.02, decimation=10, torso_id=0, dist=2.8, az=160.0,
                         el=-14.0, track=True, record=None, every=4, gui=True,
                         width=640, height=360, spawn_y=0.30, spawn_z=1.0339,
-                        max_dist=5.0, table=None, dump_obs=None):
+                        max_dist=5.0, table=None, dump_obs=None,
+                        save_traj=None, stop_on_fall=False):
     """残差策略闭环：q_target = q_ref(相位) + 限幅残差。返回躯干 y 位移。"""
     import onnxruntime as ort
     import torch
@@ -698,7 +699,9 @@ def run_policy_residual(m, d, *, onnx_path, cmd=(0.0, 0.20, 0.0), steps=2000,
     t_wall = time.perf_counter()
     fell_at = None
 
+    traj_qpos = []                  # 每控制步一份 qpos，供 --save-traj 烘焙到网页
     for k in range(steps):
+        traj_qpos.append(d.qpos.copy())
         out = sess.run(None, {inp.name: obs[None].astype(np.float32)})
         raw = np.asarray(out[0]).reshape(-1)[:29].astype(float)
         # 与训练一致：先限幅到 action 空间，再乘 scale（等效残差 <= clip_rad）
@@ -768,6 +771,9 @@ def run_policy_residual(m, d, *, onnx_path, cmd=(0.0, 0.20, 0.0), steps=2000,
         z = float(d.xpos[torso_id][2])
         if fell_at is None and (z < 0.55 or float(d.xpos[torso_id][1]) < spawn_y - 0.5):
             fell_at = k * dt_sim
+            if stop_on_fall:
+                print(f"\n  [停止] 第 {fell_at:.2f} s 判定摔倒，按 --stop-on-fall 截断")
+                break
         if k % 100 == 0:
             print(f"  t={k * dt_sim:5.1f}s  y={d.xpos[torso_id][1]:.2f}  "
                   f"z={z:.2f}  rise={rise:.2f}  tread={tread:.2f}  "
@@ -779,6 +785,15 @@ def run_policy_residual(m, d, *, onnx_path, cmd=(0.0, 0.20, 0.0), steps=2000,
     dz = float(d.xpos[torso_id][2]) - z0
     print(f"\n[OK] 残差回放 {steps} 控制步（{steps * dt_sim:.1f}s）  "
           f"Δy={dy:+.2f} m  Δz={dz:+.2f} m  末帧 z={d.xpos[torso_id][2]:.2f}")
+    if save_traj:
+        q = np.asarray(traj_qpos, dtype=np.float64)
+        out_p = Path(save_traj)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(str(out_p), qpos=q, dt=float(dt_sim))
+        print(f"[输出] 轨迹 {out_p}: {q.shape[0]} 帧 x nq={q.shape[1]}，"
+              f"dt={dt_sim:.4f}s（{q.shape[0] * dt_sim:.1f}s）")
+        print(f"       烘焙到网页：python web/tools/bake_crab.py --skip-gen --skip-plan "
+              f"--traj {out_p} --out policy_crab")
     if fell_at is not None:
         print(f"[!] 第 {fell_at:.2f} s 判定为摔倒（z<0.55 或偏离 >0.5 m）")
     if renderer is not None:
@@ -839,6 +854,10 @@ def main() -> None:
                     help="policy: 臂残差限幅 rad，必须与训练 arm_clip_rad 一致")
     ap.add_argument("--dump-obs", default=None,
                     help="policy: 打印观测分块统计并存首帧 npy（排障用）")
+    ap.add_argument("--save-traj", default=None,
+                    help="policy: 把每控制步的 qpos 存成 npz（给 web/tools/bake_crab.py 烘焙网页）")
+    ap.add_argument("--stop-on-fall", action="store_true",
+                    help="policy: 判定摔倒就停止仿真（录网页用，避免末尾躺地上的画面）")
     args = ap.parse_args()
 
     _CLIP_LEGS, _CLIP_WAIST, _CLIP_ARMS = args.clip_legs, args.clip_waist, args.clip_arms
@@ -871,6 +890,8 @@ def main() -> None:
         if args.policy == "onnx-residual":
             kw["spawn_z"] = args.spawn_z
             kw["dump_obs"] = args.dump_obs
+            kw["save_traj"] = args.save_traj
+            kw["stop_on_fall"] = args.stop_on_fall
         runner(m, d, **kw)
         return
 

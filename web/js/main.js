@@ -450,11 +450,17 @@ async function setMotion(name, { hideStairs = true } = {}) {
   $('hud-motion').textContent = motion.describe();
 
   const s = motion.meta.stats;
+  // 同为 kind='crab' 的两段数据来源不同：脚本步态 vs 策略闭环。
+  // 靠 json 里的 policy 字段区分（bake_crab.py --policy-name 写入）。
+  const crabHead = motion.meta.policy
+    ? '策略仿真：本机跑 MuJoCo + <code>' + motion.meta.policy + '</code> 闭环录制'
+      + '（残差步态 + 地形高度扫描，<b>没有脚本轨迹</b>）。机器人朝 +X，沿 +Y 侧向横移上楼。'
+    : '脚本步态：<code>crab_climb.py</code> 的四相位准静态控制器解出的关节轨迹'
+      + '（闭式 IK + DLS 精修，<b>没有策略网络</b>）。机器人朝 +X，沿 +Y 侧向横移上楼。';
   const note = motion.kind === 'ref'
     ? '参考动作：<code>fight.npz</code> 里重定向后的运动，纯运动学装配（无物理）。'
     : motion.kind === 'crab'
-      ? '脚本步态：<code>crab_climb.py</code> 的四相位准静态控制器解出的关节轨迹'
-        + '（闭式 IK + DLS 精修，<b>没有策略网络</b>）。机器人朝 +X，沿 +Y 侧向横移上楼。'
+      ? crabHead
         + (s ? `<br>台阶 ${s.steps} 级 · 级高 ${s.riseMin}~${s.riseMax} m · 进深 `
           + `${s.treadMin}~${s.treadMax} m · 最高 ${s.maxTop} m · 横移 ${s.travelY} m。` : '')
       : motion.kind === 'climb'
