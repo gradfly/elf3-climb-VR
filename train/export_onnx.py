@@ -30,18 +30,28 @@ def main() -> int:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    from dataclasses import asdict
+
     import mjlab.tasks.crab  # noqa: F401  触发任务注册
     from mjlab.envs import ManagerBasedRlEnv
-    from mjlab.rl import MjlabOnPolicyRunner
+    from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
     from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 
     env = ManagerBasedRlEnv(load_env_cfg(args.task, play=True), device=args.device)
     rl_cfg = load_rl_cfg(args.task)
     runner_cls = load_runner_cls(args.task) or MjlabOnPolicyRunner
 
-    # 构造 runner（与 mjlab 训练脚本一致）
-    cfg_dict = rl_cfg.to_dict() if hasattr(rl_cfg, "to_dict") else rl_cfg
-    runner = runner_cls(env, cfg_dict, str(out.parent), args.device)
+    # 构造 runner 必须照抄 mjlab/scripts/train.py 的两步，少一步都会炸：
+    #
+    #   1) cfg 要经 dataclasses.asdict 转成 **dict**
+    #      —— runner.__init__ 里有 `if key in train_cfg`，dataclass 不支持 `in`，
+    #         会报 `TypeError: argument of type 'RslRlOnPolicyRunnerCfg' is not iterable`。
+    #         注意 `.to_dict()` 这个方法是**不存在**的（旧版代码假设有，实际走的是 else 分支）。
+    #   2) env 要包一层 RslRlVecEnvWrapper
+    #      —— runner 期望的是 vecenv 接口（num_envs / step / reset 的返回约定）。
+    agent_cfg = asdict(rl_cfg)
+    env = RslRlVecEnvWrapper(env, clip_actions=getattr(rl_cfg, "clip_actions", None))
+    runner = runner_cls(env, agent_cfg, str(out.parent), args.device)
     runner.load(args.checkpoint)
     print(f"[OK] 载入 checkpoint: {args.checkpoint}")
 
