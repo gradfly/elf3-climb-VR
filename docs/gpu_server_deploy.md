@@ -104,6 +104,41 @@ torch.version.cuda  ≤  驱动支持的 CUDA 版本
 
 ## 4. 部署步骤
 
+### 4.0 一键（推荐）
+
+新机器上只有两条命令：
+
+```bash
+git clone https://github.com/gradfly/elf3-climb-VR.git ~/elf3
+cd ~/elf3 && bash scripts/deploy_gpu.sh
+```
+
+`deploy_gpu.sh` 把下面的 §4.1–§4.5 和 §5 三层冒烟串成一串，并且**每一步都带断言**
+（不合规就停在那一步，不会带着半坏的环境往下跑）：
+
+| 步骤 | 做的事 | 不过就停的判据 |
+|---|---|---|
+| [0/6] 体检 | GPU / 驱动 CUDA / 显存 / 磁盘 / CPU | 无 `nvidia-smi`、驱动 CUDA < 12.4 |
+| [1/6] 环境 | `bootstrap_gpu.sh`：系统库 → uv → py3.11 → mujoco 生态 → torch 最后装 | 没生成 `.venv/bin/python` |
+| [2/6] 校验 | `mjlab.tasks.registry` 可导入、`torch.cuda.is_available()` | 装成 PyPI 版 mjlab / torch 的 cuXXX 高于驱动 |
+| [3/6] 资产 | `make_robot_xml.py` + 复核 nq/nv/nu 与 geom group | `nq≠38`、group 0 非空（height_scan 会打到自己） |
+| [4/6] 注册 | `install_task.sh` | 4 个 `Elf3-Crab-*` 任务没齐 |
+| [5/6] 冒烟 | `play --agent zero/random` + 256 env × 5 iter | 小规模训练非 0 退出 |
+
+常用开关：
+
+```bash
+bash scripts/deploy_gpu.sh --no-smoke        # 跳过冒烟，先要环境
+bash scripts/deploy_gpu.sh --force           # 删掉 .venv 重装（换过 GPU / torch 装错时）
+bash scripts/deploy_gpu.sh --num-envs 2048   # 只改末尾建议的训练命令（默认按显存推）
+```
+
+跑完会直接打印正式训练 / 续训 / 导出 ONNX 的三条命令。
+重复执行是幂等的：`.venv` 已就绪就跳过 bootstrap，`logs/` 里的历史 run 不动。
+
+> 没 GPU 的机器（只想跑脚本步态回放）不要用这个脚本，那是 `run_crab.sh` 的活。
+> 下面 §4.1–§4.5 是手动版，脚本卡住时按这些步骤逐条排查。
+
 ### 4.1 验驱动
 
 ```bash
@@ -152,13 +187,18 @@ source .venv/bin/activate
 → torch（按驱动选 cuXXX，`--force-reinstall`）→ 校验 EGL 离屏渲染与 `torch.cuda`。
 末尾会把 `MUJOCO_GL=egl` 写进 `.venv/bin/activate.d/`，之后激活即生效。
 
-**期望输出**（最后两行，缺一不可）：
+**期望输出**（这三行，缺一不可）：
 
 ```
+    mjlab.tasks.registry OK
 EGL 离屏渲染 OK，帧尺寸 (64, 64, 3)
 torch 2.x.x+cuXXX | torch.version.cuda 12.x
 GPU: NVIDIA GeForce RTX 4090
 ```
+
+`mjlab.tasks.registry OK` 是新加的一道闸：bootstrap 现在从 GitHub main 装 mjlab，
+装完立刻验证这个模块在。缺了就说明装成了 PyPI 旧版，直接停在这里，
+而不是等到 `install_task.sh` 才炸。
 
 ### 4.5 生成资产 + 注册任务
 
@@ -167,8 +207,9 @@ python train/assets/make_robot_xml.py   # 期望：nq=38 nv=37 nu=0，plane geom
 bash train/install_task.sh              # 期望：已注册 4 个 Elf3-Crab-* 任务
 ```
 
-`install_task.sh` 会把 `train/mjlab_tasks/crab/*.py` 拷进 mjlab 的 `tasks/crab/`
-（mjlab 只自动导入自己 `tasks/` 下的子包）。**每次改完任务代码都要重跑一次。**
+`install_task.sh` 会把仓库的 `train/mjlab_tasks/crab/` **软链接**到 mjlab 的 `tasks/crab/`
+（mjlab 只自动导入自己 `tasks/` 下的子包），所以 `git pull` 后立刻生效，不必重跑；
+文件系统不支持软链接时用 `--copy`，那就每次 pull 后都要重跑。
 
 ### 4.6 确认残差参考表
 
@@ -257,7 +298,7 @@ WANDB_MODE=disabled PYTHONUNBUFFERED=1 train Elf3-Crab-Residual \
 | 报错 | 原因 | 处理 |
 |---|---|---|
 | `torch.cuda.is_available() == False` | torch 的 CUDA 版本高于驱动 | 按 §2.2 重装匹配的 cuXXX，`--force-reinstall` |
-| `ModuleNotFoundError: mjlab.tasks.registry` | 装的是 PyPI 版 mjlab | `uv pip install --force-reinstall "mjlab @ git+https://github.com/..."` 装 main |
+| `ModuleNotFoundError: mjlab.tasks.registry` | 装的是 PyPI 版 mjlab | `git clone https://ghproxy.net/https://github.com/mujocolab/mjlab.git /tmp/mjlab && uv pip install /tmp/mjlab`（`bootstrap_gpu.sh` 已自动按 main 装并校验） |
 | `ImportError: libEGL.so.1` | 缺系统库 | `apt install libegl1 libgl1` |
 | `注册失败：没有找到 Crab 任务` | 没跑 `install_task.sh`，或改完代码没重跑 | `bash train/install_task.sh` |
 | 找不到 `crab_ref_v1.npz` | 参考表没生成 | `python train/assets/build_ref_tables.py` |

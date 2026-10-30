@@ -136,5 +136,6 @@ python web/tools/bake_crab.py --seed 7         # 换一套台阶重录
 - 螃蟹步网页动画的完整生成链（随机台阶 → 四相位 IK 轨迹 → 烘焙 → 浏览器回放）：
   见 `docs/crab_gait_pipeline.md`。
 - 训练环境（GPU 云主机）的选型、依赖版本与换机验收：见 `docs/gpu_server_deploy.md`。
+  新服务器一条命令：`bash scripts/deploy_gpu.sh`（体检 → 装环境 → 生成资产 → 注册任务 → 冒烟）。
 - 全部大文件（`.mp4` / `.onnx` / `.npz` / `.wasm` / `.STL`）均 < 100MB，未使用 Git LFS。
 - 已排除：`.workbuddy/`、`.ros/` 日志、`__pycache__`、`*.log`、`*.rknn`。

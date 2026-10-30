@@ -6,6 +6,9 @@
 # 自动装好：uv -> Python 3.11 虚拟环境 -> PyTorch(CUDA) -> MuJoCo 生态(mjlab /
 # mujoco-warp) -> 校验 GPU 与无头 EGL 离屏渲染。
 #
+# 只是「装 Python 环境」。要连资产生成 / 任务注册 / 冒烟一起做，用：
+#   bash scripts/deploy_gpu.sh
+#
 # 用法：
 #   bash scripts/bootstrap_gpu.sh
 #
@@ -71,11 +74,29 @@ else
   echo "    使用指定的 TORCH_CU=$TORCH_CU"
 fi
 
-echo "==> [5/6] 先装 MuJoCo 生态（mujoco / mujoco-warp / mjlab）"
+echo "==> [5/6] 先装 MuJoCo 生态（mujoco / mujoco-warp）"
 uv pip install --index-url "$PIP_INDEX" \
-  mujoco mujoco-warp mjlab numpy pyyaml
-# 若 mjlab 在镜像缺失，回退官方 PyPI
-python -c "import mjlab" 2>/dev/null || uv pip install mjlab
+  mujoco mujoco-warp numpy pyyaml
+
+# mjlab 必须装 GitHub main，不能用 PyPI 发行版：
+# PyPI 版的 mjlab 没有 mjlab.tasks.registry，train/install_task.sh 会直接
+# ModuleNotFoundError，且任务注册表 list_tasks() 也不存在。
+MJLAB_REPO="${MJLAB_REPO:-https://github.com/mujocolab/mjlab.git}"
+echo "    装 mjlab（main 分支）: $MJLAB_REPO"
+if ! uv pip install "mjlab @ git+$MJLAB_REPO"; then
+  echo "    [!] 直连 GitHub 失败（国内机房常见），改走 ghproxy 镜像重试"
+  if ! uv pip install "mjlab @ git+https://ghproxy.net/$MJLAB_REPO"; then
+    echo "[ERR] mjlab main 装不上。手动兜底："
+    echo "      git clone https://ghproxy.net/$MJLAB_REPO /tmp/mjlab"
+    echo "      uv pip install /tmp/mjlab"
+    exit 1
+  fi
+fi
+"$VENV/bin/python" - <<'PY' || { echo "[ERR] mjlab 缺少 tasks.registry —— 多半装成了 PyPI 旧版，请按上面兜底流程重装"; exit 1; }
+import mjlab.tasks.registry  # noqa: F401
+print("    mjlab.tasks.registry OK")
+PY
+
 echo "    再装 torch（$TORCH_CU）—— 必须放最后并强制重装，"
 echo "    否则 mjlab/mujoco-warp 的依赖会把 torch 升级成与驱动不匹配的 CUDA 版本"
 uv pip install --index-url "https://download.pytorch.org/whl/$TORCH_CU" --force-reinstall torch
