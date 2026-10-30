@@ -55,16 +55,40 @@ def main() -> int:
     runner.load(args.checkpoint)
     print(f"[OK] 载入 checkpoint: {args.checkpoint}")
 
-    if hasattr(runner, "export_policy_as_onnx"):
-        runner.export_policy_as_onnx(str(out.parent), filename=out.name)
-    else:
-        # 回退到 rsl_rl 的工具函数
-        from rsl_rl.utils import export_policy_as_onnx
+    # ⚠️ 方法名是 export_policy_to_onnx，不是 export_policy_as_onnx（差两个词）。
+    # 而 rsl_rl 这个版本里**没有**任何 ONNX 导出函数 —— utils 下只有 LogWriter /
+    # check_nan / resolve_* 这些，`from rsl_rl.utils import export_policy_as_onnx`
+    # 必然 ImportError。导出能力只在 mjlab 的 runner 上。
+    fn = None
+    for name in ("export_policy_to_onnx", "export_policy_as_onnx"):
+        cand = getattr(runner, name, None)
+        if callable(cand):
+            fn = cand
+            print(f"[info] 使用 runner.{name}()")
+            break
+    if fn is None:
+        have = [n for n in dir(runner) if "export" in n.lower() or "onnx" in n.lower()]
+        print(f"[ERR] runner 上没有导出方法；它有的是 {have}", file=sys.stderr)
+        return 3
 
-        policy = getattr(runner, "alg", None)
-        policy = getattr(policy, "policy", policy)
-        normalizer = getattr(policy, "obs_normalizer", None)
-        export_policy_as_onnx(policy, str(out.parent), filename=out.name, normalizer=normalizer)
+    # 签名在不同版本间变过：有的 (path, filename=...)，有的只要 (dir,)。
+    # 逐个试，第一个不抛 TypeError 的算成功。
+    last_err = None
+    for call in (
+        lambda: fn(str(out.parent), filename=out.name),
+        lambda: fn(str(out.parent), out.name),
+        lambda: fn(str(out.parent)),
+        lambda: fn(),
+    ):
+        try:
+            call()
+            last_err = None
+            break
+        except TypeError as e:
+            last_err = e
+    if last_err is not None:
+        print(f"[ERR] 调用导出方法失败：{last_err}", file=sys.stderr)
+        return 4
 
     if not out.exists():
         # 某些版本把文件写到 out.parent/policy.onnx
