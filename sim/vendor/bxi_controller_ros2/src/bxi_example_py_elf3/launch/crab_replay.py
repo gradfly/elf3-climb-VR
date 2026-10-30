@@ -853,6 +853,11 @@ def main() -> None:
         # build_model 会把 <motor> 换成 mjlab 训练用的 <position> 执行器，并保留地形
         m = build_model(params, scene="stairs", xml_path=Path(args.scene).resolve())
         m.opt.timestep = 0.002          # 与训练一致：500 Hz 物理 x 10 步 -> 50 Hz 控制
+        # MuJoCo 的离屏帧缓冲默认只有 640x480，mujoco.Renderer 一旦超过就抛
+        # ValueError；而 run_policy* 里又是 `min(width, offwidth)`，于是
+        # --width 1280 会被**静默**夹成 640。这里先把上限抬到请求值。
+        m.vis.global_.offwidth = max(int(m.vis.global_.offwidth), int(args.width))
+        m.vis.global_.offheight = max(int(m.vis.global_.offheight), int(args.height))
         d = mujoco.MjData(m)
         torso = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "torso_link")
         print(f"场景 {Path(args.scene).name}   策略 {onnx_path.name}")
