@@ -89,33 +89,37 @@ MUJOCO_GL=egl uv run train Elf3-Crab-Stairs \
 - 课程：地形已带 `curriculum=True`，从近平地逐级升到 rise 0.22。
 - 日志：`logs/rsl_rl/elf3_crab/<时间戳>/`，每 50 iter 存 checkpoint。
 
-### 4.1 挂着跑（tmux）与日志
+### 4.1 挂着跑与日志
 
-训练动辄 1–2 小时，SSH 一断（合盖 / 网络抖动）前台进程就吃 SIGHUP 被杀。  
-所以放进 tmux，并把文本输出 `tee` 一份：
+> **本项目用 VNC 连服务器，不需要 tmux。** VNC 会话本身是持久的，断开重连后
+> 里面的进程继续跑，直接前台跑 + 存日志即可。
 
 ```bash
-tmux new -s crab                       # 已存在会报 duplicate session，改用 tmux a -t crab
-# ---- 进入 tmux 之后 ----
 cd ~/elf3
 MUJOCO_GL=egl PYTHONUNBUFFERED=1 .venv/bin/train Elf3-Crab-Residual \
   --env.scene.num-envs 1024 \
   --agent.max-iterations 8000 \
   2>&1 | tee ~/train_v2.log
-# ---- Ctrl+B 松手再按 D 退出（训练继续）；tmux a -t crab 回去 ----
 ```
 
 要点：
 
-- `> file 2>&1`（不是 `2>&1 > file`，顺序反了 stderr 还会打在屏幕上）会把 stdout  
-  |  |  |  
-  | --- | --- |  
-  全导走，**屏幕一片空白，容易误以为卡死**。用 `| tee` 才能同时看和存。
-- `PYTHONUNBUFFERED=1`：否则 `tee` 要等缓冲区满才输出，看着像卡住。
+- 用 `tee` 同时看和存。**不要**写成 `> file 2>&1`：那是重定向到文件而不是管道，
+  屏幕一片空白容易误以为卡死，`[warn]` 和 traceback 也看不到。
+- `PYTHONUNBUFFERED=1`：否则 Python 对管道用块缓冲（攒 4~8 KB 才刷一次），
+  日志会滞后几分钟，`grep` / `tail -f` 拿到的全是陈旧内容。
 - 日志别放 `/tmp`（重启会清空），放家目录。
-- **tensorboard 曲线和 checkpoint 本来就会落盘**（`logs/rsl_rl/elf3_crab/<时间戳>/`），  
-  与重定向无关。`tee` 只是额外把**文本**（`[warn]` 行、traceback）留下来。
-- tmux 不能扛服务器重启。要扛重启得用 `systemd-run --user` 或 `nohup` + `disown`。
+- **tensorboard 曲线和 checkpoint 本来就会落盘**（`logs/rsl_rl/elf3_crab/<时间戳>/`），
+  与重定向无关。`tee` 只是额外把文本留下来。
+
+> **只有改用 SSH（没有 VNC）时**才需要包一层 tmux，防止 SSH 断开会话吃 SIGHUP：
+>
+> ```bash
+> tmux new -s crab        # 已存在会报 duplicate session，改用 tmux a -t crab
+> # 里面跑同一条命令；Ctrl+B 松手再按 D 退出（训练继续）；tmux a -t crab 回去
+> ```
+>
+> 两者都**不扛服务器重启**——要扛重启得用 `systemd-run --user`。
 
 ### 4.2 续训（可选）
 
@@ -131,7 +135,8 @@ MUJOCO_GL=egl WANDB_MODE=disabled \
   会再跑 2500 轮，**不是**跑到 2500 总共。
 - checkpoint 命名是 `model_<本次轮数>.pt`（如 `model_2500.pt`），不是全局累计编号。
 - **课程会重置**：速度课程回到 0.05–0.12、地形等级回到 0。所以尽量一次跑够  
-  （用 `tmux` / `screen` 挂着），少做多次续训，否则每次都要重新爬课程。
+  （本项目用 VNC，直接前台跑即可，断开重连进程还在），少做多次续训，
+  否则每次都要重新爬课程。
 
 ### 4.3 logger：wandb 不可用会自动退回 tensorboard
 
@@ -371,10 +376,29 @@ ELF3_ALPHA=0.527 ...          # 取日志里同轮次的 Metrics/ref_alpha
 
 不设则按 1.0。**看最终成品时反而应该不设**（那时 α 课程也早满幅了）。
 
+#### 10.2.0.1 续训时：`ELF3_ALPHA` 是「固定」，不是「接上」
+
+三个变量容易混：
+
+| 变量 | 语义 | 用在哪 |
+|---|---|---|
+| `ELF3_ALPHA` | **固定** α，训练和 play 都吃 | 回放某一版 checkpoint |
+| `ELF3_ALPHA_START` | 课程的**起点**，从它线性升到 1.0 | 续训一个 α 已涨到一半的 checkpoint |
+| `ELF3_RAMP_ITERS` | 课程总长（iteration，默认 1500） | 想快/慢点走完课程 |
+
+⚠️ 2026-10-30 踩过：resume 时写 `ELF3_ALPHA=0.70` 想「接上进度」，而它的语义是
+**固定** —— 结果整个 4049 轮的 α 都锁在 0.70，步幅只有脚本步态的七成，
+爬 22 cm 台阶不够用。正确写法是让课程从 0.70 接着走：
+
+```bash
+ELF3_ALPHA_START=0.70 ELF3_RAMP_ITERS=600 \
+  .venv/bin/train Elf3-Crab-Residual --agent.resume True ...
+```
+
 #### 10.2.1 方式 A：诊断脚本录 mp4（推荐）
 
 一条命令同时拿到**视频 + 全部数字**（`v_y` / yaw 速率 / `rise_est` / 基座 z），  
-不用另外跑一遍 play。相机会自动对准 env 的真实出生点：
+不用另外跑一遍 play。相机**绑在被录的机器人身上**（跟拍，俯视 45°）：
 
 ```bash
 MUJOCO_GL=egl ELF3_ALPHA=0.527 .venv/bin/python scripts/diagnose_policy.py \
@@ -388,9 +412,11 @@ MUJOCO_GL=egl ELF3_ALPHA=0.527 .venv/bin/python scripts/diagnose_policy.py \
 - `--steps 1000` = 20 s。少于 200 看不到一个完整步态周期。
 - `--terrain-level` 要挑**和当前训练水平相当**的：看日志 `Curriculum/terrain_levels/mean`。  
   注意**列（地形类型）是随机的**，env 0 可能落在 flat 列、画面里根本没有台阶 ——  
-  那就换 `--record-env 1` / `2` / `3` 再录一条。
-- 可调：`--record-offset "0,0.9,0.35"`（注视点相对出生点）、`--record-dist 6`、  
-  `--record-elev -15`、`--record-azim 90`。
+  那就换 `--record-env 1` / `2` / `3` 再录一条（相机和画面都是这个 env 的）。
+- 可调：`--record-dist 3`（跟拍距离，越大机器人越小）、`--record-elev -45`（俯仰角，
+  负值=从上往下看）、`--record-azim 90`（绕机器人的方位角）。
+- ⚠️ 跟拍机位下机器人永远在画面中央，**判断有没有侧移要看打印的 `v_y` / `Δy`**，
+  别靠画面里「机器人相对台阶挪了没有」。
 
 下载到本地：`scp ubuntu22:/tmp/crab_walk.mp4 .`（别留在 `/tmp`，重启会清）。
 
@@ -473,6 +499,41 @@ ELF3_VIEWER_LOOKAT="0,0.8,0.3"  ELF3_VIEWER_DIST=6  ELF3_VIEWER_AZIM=90 \
 | ---------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
 | `地形估计链路`   | `OK`                                                                                                      | 断了 ⇒ `rise` 恒 0，参考步态锁平地档                            |
 | `rise_est` | **只当「估计器有没有坏」的守门指标**：既不恒 0、也不顶 0.220。它会被「跨过脚下那级」影响而变小，**不能当难度指标** —— 难度看 `Curriculum/terrain_levels/mean` | **顶在 0.220** = 被假边骗了（自身遮挡 / 摔倒姿态）；**恒 0** = 取数或地形问题 |
+
+### 10.6 诊断「原地踩」：脚在滑，还是身体没走
+
+`ref_tracking` 很高（关节几乎贴着参考轨迹）但 `forward_progress` 很低时，只剩两种可能：
+关节没跟上参考，或者关节跟上了、但落地那一下脚抓不住地。后者在数据上的指纹是
+`slip_velocity_mean` 明显大于实际前进速度。
+
+```bash
+CKPT=$(ls -t logs/rsl_rl/elf3_crab/*/model_*.pt | head -1)
+MUJOCO_GL=egl ELF3_ALPHA=1.0 .venv/bin/python scripts/diagnose_policy.py \
+  --task Elf3-Crab-Residual-Play --checkpoint "$CKPT" \
+  --num-envs 4 --steps 500 --terrain-level 6 \
+  --record /tmp/slip_check.mp4
+```
+
+`ELF3_ALPHA` 填训练当时的 `Metrics/ref_alpha`（α 课程满幅后就是 1.0）。`--steps 500`
+只有 10 秒，够看 5~6 个步态周期；要看爬升过程再给 1000。
+
+画面看两点：
+
+1. **脚落地后有没有相对地面滑动** —— 抬起、放下、再在地上蹭一下才受力，说明蹬地时机或落脚点有问题
+2. **落脚点在踏面上的位置** —— 踩在台沿外会滑，太靠里会撞下一级
+
+数字判据：
+
+| `slip_velocity_mean` | 给分段 drive | 结论 |
+|---|---|---|
+| < 0.05 | 低 | 不是打滑，回去查参考步态或奖励 |
+| ≈ 0.15 | ≈ 0.38 | **确认原地踩**：脚滑速度是前进速度的 2.5 倍 |
+| > 0.2 | 很低 | 严重打滑，先收窄 `foot_friction` |
+
+`给分段 drive` 的算法见 12.1。
+
+确认是打滑之后，最直接的一招是把 `events.foot_friction` 的 `ranges` 从 `(0.4, 1.2)`
+收窄到 `(0.7, 1.2)` —— 早期别让它在冰面上学步态，等走顺了再放开域随机化。
 
 ---
 

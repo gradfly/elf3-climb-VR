@@ -218,15 +218,18 @@ train Elf3-Crab-Residual --env.scene.num-envs 256 --agent.max-iterations 5
 ### 6.1 正式训练
 
 ```bash
-tmux new -s crab
 source .venv/bin/activate
-WANDB_MODE=disabled train Elf3-Crab-Residual \
+WANDB_MODE=disabled PYTHONUNBUFFERED=1 train Elf3-Crab-Residual \
   --env.scene.num-envs 4096 --agent.max-iterations 3000 \
-  --log-root logs/rsl_rl
+  --log-root logs/rsl_rl \
+  2>&1 | tee ~/train.log
 ```
 
+- **用 VNC 连服务器，不需要 `tmux new -s crab`**。VNC 会话本身持久，断开重连
+  后进程还在；只有改用 SSH 才需要 tmux 兜底（防 SIGHUP）。
 - 先用 2048 跑 50 轮确认显存余量，再上 4096。
 - `WANDB_MODE=disabled` 在没有 wandb 账号时必加，否则启动即卡在登录。
+- `PYTHONUNBUFFERED=1`：否则管道模式下 Python 会块缓冲，日志滞后好几分钟。
 
 ### 6.2 轮数的真实语义（最容易误判的一条）
 
@@ -239,8 +242,8 @@ WANDB_MODE=disabled train Elf3-Crab-Residual \
 ### 6.3 续训会重置课程
 
 速度课程和地形等级在 resume 时回到起点（速度 0.05–0.12、地形等级 0）。
-所以**尽量一次跑够**，用 tmux 挂着，不要切成多次续训——每次都要重新爬课程，
-等于白跑几百轮。
+所以**尽量一次跑够**（VNC 会话跨断线保留，直接前台跑就行），不要切成多次续训
+——每次都要重新爬课程，等于白跑几百轮。
 
 ### 6.4 checkpoint 与产物
 

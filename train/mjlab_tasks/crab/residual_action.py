@@ -74,6 +74,11 @@ class ResidualGaitActionCfg(JointPositionActionCfg):
     # 参考幅度课程：α 从 0 线性升到 1 所需的 env step 数；0 表示不做课程。
     ramp_steps: int = 36000
     alpha_fixed: float = -1.0               # >=0 则固定 α（play 用 1.0）
+    # 课程**起点**：alpha_fixed<0 时 α 从该值线性升到 1.0。
+    # 续训一个 α 已涨到 0.7 的 checkpoint 时必须用它接上 —— 否则 ramp 从 0 重来，
+    # 参考步态被打回站姿，而策略是按 70% 幅度长出来的，两者错位当场崩。
+    # alpha_fixed>=0 时本字段被忽略。
+    alpha_start: float = 0.0
     debug: bool = False
 
     def build(self, env) -> "ResidualGaitAction":
@@ -123,7 +128,11 @@ class ResidualGaitAction(JointPositionAction):
             self._stand = stand[self._perm].unsqueeze(0)
         else:
             self._stand = None
-        self._alpha = max(0.0, float(cfg.alpha_fixed)) if cfg.alpha_fixed >= 0.0 else 0.0
+        if cfg.alpha_fixed >= 0.0:
+            self._alpha = max(0.0, float(cfg.alpha_fixed))
+        else:
+            # 课程模式：初值取 alpha_start（续训时不为 0），避免第一帧参考跳变
+            self._alpha = min(1.0, max(0.0, float(getattr(cfg, "alpha_start", 0.0))))
 
         # 12 条腿在 target 顺序里的位置
         self._leg_pos = torch.tensor(
@@ -203,9 +212,11 @@ class ResidualGaitAction(JointPositionAction):
         if self.cfg.alpha_fixed >= 0.0:
             return float(self.cfg.alpha_fixed)
         n = int(self.cfg.ramp_steps)
+        start = min(1.0, max(0.0, float(getattr(self.cfg, "alpha_start", 0.0))))
         if n <= 0:
             return 1.0
-        return min(1.0, self._step_i / float(n))
+        frac = min(1.0, max(0.0, self._step_i / float(n)))
+        return start + (1.0 - start) * frac
 
     def _compose_ref(self, alpha: float) -> torch.Tensor:
         """q_ref = q_stand + α · (q_gait(phase) − q_stand)，返回 target 顺序 [B,J]。"""

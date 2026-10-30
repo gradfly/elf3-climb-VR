@@ -122,9 +122,14 @@ def forward_progress_y(env, command_name: str = "twist",
     # （相位速率下限 0.6），净位移应≈0。按 v_cmd 归一化会把 5 cm/s 的任何漂移
     # 都当成满分，所以这类 env 改成"越不动越高分"，与内置 exp 核在 0 指令下的
     # 行为一致。
+    # ⚠️ 2026-10-30：still 必须打折。drive 的上限是 1.0，still 若也是 1.0，
+    # 这批 standing env 站着不动就是 1.0×5.0 = 5.0/步，反而高于跟参考步态的
+    # 0.85×5.0 = 4.25 —— 站着比走还赚。它们由 rel_standing_envs 随机指定、
+    # 策略自己选不了，但满分会把 value baseline 整体抬高、稀释"走"的梯度。
+    # 打五折后站着 0.5 = 2.5/步，明显低于认真走。
     active = v_cmd > float(v_floor)
     drive = torch.clamp(ema / torch.clamp(v_cmd, min=float(v_floor)), 0.0, 1.0)
-    still = torch.clamp(1.0 - ema.abs() / float(v_floor), 0.0, 1.0)
+    still = 0.5 * torch.clamp(1.0 - ema.abs() / float(v_floor), 0.0, 1.0)
     r = torch.where(active, drive, still)
 
     # episode 刚 reset 的那一步 dy 跨了重置（含随机落点），丢弃并重置 EMA，
@@ -134,6 +139,20 @@ def forward_progress_y(env, command_name: str = "twist",
         if bool(reset.any()):
             ema = torch.where(reset, torch.zeros_like(ema), ema)
             r = torch.where(reset, torch.zeros_like(r), r)
+
+    # EMA 冷启动屏蔽段。
+    # ⚠️ 第一版按「一个完整 tau」（1.8 s = 90 步）屏蔽，实测在 ep_len 只有
+    # 2.23 s 的早期，80% 的回合都被屏蔽掉：给分段几乎满分（0.95），整回合
+    # 均值却只有 0.185。更糟的是它和 ep_len 形成负反馈 —— 回合越短 -> 前进
+    # 奖励越少 -> 越学不会走 -> 回合继续短。
+    # 改成 tau/3（0.6 s = 30 步）：短回合占 27%、长回合占 5%。冷启动残差只到
+    # 1-exp(-1/3)≈28%，这部分靠「这段时间既不罚也不给分」兜住；EMA 本身照常
+    # 累积，出屏蔽段时已有 30 个样本。
+    if hasattr(env, "episode_length_buf"):
+        warm_steps = max(1, int(round(float(tau) / 3.0 / max(dt, 1e-6))))
+        warm = env.episode_length_buf < warm_steps
+        r = torch.where(warm, torch.zeros_like(r), r)
+
     env._crab_vy_ema = ema
     return r
 

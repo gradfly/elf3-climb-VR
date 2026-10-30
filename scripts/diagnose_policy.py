@@ -41,6 +41,7 @@ import statistics
 import sys
 from dataclasses import asdict
 
+import mujoco
 import torch
 
 
@@ -110,41 +111,47 @@ def _disable_curriculum(base) -> None:
     print(f"[warn] 禁用 curriculum 失败：{e}")
 
 
-def _aim_camera(base, env_i: int = 0, *, offset=(0.0, 0.9, 0.35),
-                dist: float = 6.0, elev: float = -15.0, azim: float = 90.0):
-  """把离屏相机钉在 env_i 出生点前方（世界系固定机位）。
+def _bind_camera_to_robot(base, env_i: int = 0, *, dist: float = 3.0,
+                          elev: float = -45.0, azim: float = 90.0):
+  """把离屏相机绑到机器人身上（跟拍，俯视 45°）。
 
-  为什么必须在这里重算：mjlab 的 `OffscreenRenderer._setup_camera` 直接
-  `camera.lookat[:] = cfg.lookat`，**不加 env_origins**。而每个 env 的地形块
-  在世界里是分开排布的（实测 env0 在 x=27.8），所以写在 cfg 里的
-  `(0, 0.8, 0.3)` 对任何多 env 场景都等于对着空气拍 —— 录出来是一片空地。
+  旧实现是「钉在世界系出生点」的固定机位，两个问题让录出来的画面里没有机器人：
+    1) mjlab 的 OffscreenRenderer 只渲染主 env（`cfg.viewer.env_idx`，默认 0），
+       旧代码却把 lookat 对准 `env_origins[env_i]` —— 用 `--record-env 1/2/3`
+       时镜头对着 env2 的地形块，画面上却是 env0 的空地；
+    2) 就算 env 对上了，机位也只设一次，机器人沿 +Y 爬 20 s 早就走出画面。
+  这里改用 MuJoCo 的跟踪相机（mjCAMERA_TRACKING）：每帧 update_scene 时
+  lookat 自动取 root body 的世界位置，机器人始终在画面中心。
 
-  固定机位（而非跟拍）是判断"是否真的在横移"的前提：跟拍时机器人永远在
-  画面中央，台阶跟着一起退，肉眼看不出位移。
+  elevation 的符号（MuJoCo 约定，已实测）：-45 = 相机在斜上方 45° 俯视；
+  +45 = 相机在下方 45° 仰视。
+
+  返回 (cam, tracking_ok)。tracking_ok=False 时调用方要逐帧把 cam.lookat
+  挪到机器人身上（这个版本的渲染器设不了跟踪相机时的退路）。
   """
-  look = None
-  try:
-    o = base.scene.env_origins[env_i].cpu().tolist()
-    look = (o[0] + offset[0], o[1] + offset[1], o[2] + offset[2])
-  except Exception as e:
-    print(f"[warn] 读不到 env_origins（{e}），相机仍按 cfg.lookat 拍，可能看不到机器人")
-
   r = getattr(base, "_offline_renderer", None)
   cam = getattr(r, "_cam", None) if r is not None else None
   if cam is None:
     print("[warn] 拿不到离屏渲染器相机（需要 render_mode='rgb_array'），录像不可用")
-    return look
+    return None, False
 
-  if look is not None:
-    cam.lookat[:] = look
   cam.distance = float(dist)
   cam.elevation = float(elev)
   cam.azimuth = float(azim)
-  cam.type = 0            # mjCAMERA_FREE
-  cam.trackbodyid = -1    # 双保险：即使 cfg 是 ASSET_ROOT 也强制改回自由相机
-  print(f"[info] 相机 -> lookat={tuple(round(t, 2) for t in cam.lookat)} "
-        f"dist={cam.distance} elev={cam.elevation} azim={cam.azimuth}")
-  return look
+  try:
+    body_id = int(base.scene["robot"].indexing.root_body_id)
+    cam.type = int(mujoco.mjtCamera.mjCAMERA_TRACKING.value)
+    cam.fixedcamid = -1
+    cam.trackbodyid = body_id
+  except Exception as e:
+    print(f"[warn] 设跟踪相机失败（{e}），退化为逐帧 lookat 跟拍")
+    cam.type = int(mujoco.mjtCamera.mjCAMERA_FREE.value)
+    cam.trackbodyid = -1
+    return cam, False
+
+  print(f"[info] 相机 -> 跟拍 env{env_i} root body {body_id}"
+        f"（dist={cam.distance} elev={cam.elevation} azim={cam.azimuth}）")
+  return cam, True
 
 
 def _write_video(path: str, frames, fps: float) -> None:
@@ -272,14 +279,15 @@ def main(argv=None) -> int:
                   help="打印 height_scan 原始高度场 + 估计器内部量，用于定位 rise 恒为 0")
   ap.add_argument("--dump-env", type=int, default=0, help="--dump-scan 打印哪个 env")
   ap.add_argument("--record", default=None, metavar="OUT.mp4",
-                  help="录 mp4（固定机位，自动对准 env0 出生点）；需要 EGL")
+                  help="录 mp4（相机跟拍机器人，俯视 45°）；需要 EGL")
   ap.add_argument("--record-env", type=int, default=0, help="录哪个 env")
   ap.add_argument("--record-every", type=int, default=1, help="每 N 步取一帧")
-  ap.add_argument("--record-offset", default="0,0.9,0.35",
-                  help="相机注视点相对 env 出生点的偏移 x,y,z")
-  ap.add_argument("--record-dist", type=float, default=6.0)
-  ap.add_argument("--record-elev", type=float, default=-15.0)
-  ap.add_argument("--record-azim", type=float, default=90.0)
+  ap.add_argument("--record-dist", type=float, default=3.0,
+                  help="跟拍距离（越大机器人越小）")
+  ap.add_argument("--record-elev", type=float, default=-45.0,
+                  help="俯仰角，负值=从上往下看（-45 即俯视 45°）")
+  ap.add_argument("--record-azim", type=float, default=90.0,
+                  help="绕机器人的方位角")
   args = ap.parse_args(argv)
 
   import mjlab.tasks  # noqa: F401  触发任务注册
@@ -301,6 +309,12 @@ def main(argv=None) -> int:
     return 2
 
   env_cfg.scene.num_envs = args.num_envs
+  if args.record:
+    # 离屏渲染器只画主 env（cfg.viewer.env_idx），跟踪相机跟的也是这一份数据。
+    # 不同步的话 `--record-env 2` 会录成「镜头对着 env2、画面里是 env0 的空地」。
+    viewer = getattr(env_cfg, "viewer", None)
+    if viewer is not None and hasattr(viewer, "env_idx"):
+      viewer.env_idx = int(args.record_env)
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device,
                           render_mode="rgb_array" if args.record else None)
   env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
@@ -348,14 +362,12 @@ def main(argv=None) -> int:
     else:
       print("[warn] 这个版本拿不到 terrain_levels，按默认等级 0 跑")
 
+  cam = None
+  cam_tracks = False
   if args.record:
-    try:
-      off = tuple(float(t) for t in args.record_offset.split(","))
-    except Exception:
-      off = (0.0, 0.9, 0.35)
-      print(f"[warn] --record-offset={args.record_offset!r} 解析失败，用默认 {off}")
-    _aim_camera(base, args.record_env, offset=off, dist=args.record_dist,
-                elev=args.record_elev, azim=args.record_azim)
+    cam, cam_tracks = _bind_camera_to_robot(
+        base, args.record_env, dist=args.record_dist,
+        elev=args.record_elev, azim=args.record_azim)
 
   # ---- 指标累计（位移必须逐步累加，reset 那一步跳过）----
   ep_len: list[int] = []
@@ -415,6 +427,12 @@ def main(argv=None) -> int:
 
     if args.record and (step_i % max(1, args.record_every) == 0):
       step_i += 1
+      if cam is not None and not cam_tracks:
+        # 退路：设不了跟踪相机时，逐帧把注视点挪到机器人身上
+        try:
+          cam.lookat[:] = _root_pos(base)[args.record_env].cpu().tolist()
+        except Exception:
+          pass
       try:
         fr = base.render()
         if fr is not None:

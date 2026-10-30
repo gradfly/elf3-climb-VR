@@ -87,10 +87,20 @@ def _rebuild_rewards(cfg) -> None:
     r.pop("feet_swing_height", None)          # 旧拼写，留着无害、也防止将来加回来
     r.pop("track_angular_velocity", None)
 
+    # ⚠️ 2026-10-30 晚：target 0.10 -> 0.15，swing_height 权重 -0.25 -> -1.0。
+    # 依据是 FK 实测：参考步态（rise=0.12 / tread=0.30）的脚抬升幅度是 0.174 m，
+    # 而策略的 Metrics/peak_height_mean 只有 0.029 —— 只跟了 17%。视频里能直接
+    # 看到它一直在碗底平台蹭、从不抬腿上台阶。
+    # 原因是抬脚「收益≈0、风险很大」：air_time 够不到门槛（见下），
+    # swing_height 每次落地只罚 0.125，而抬脚失衡一次就是 -5 分。
+    # 加权后：峰值停在 2.9 cm 时每回合约 -13 分（相对回报 ~32 是 41%），
+    # 真抬到 15 cm 则 cost=0、不罚 —— 这才是引导而不是单纯加痛。
     for _name in ("foot_swing_height", "foot_clearance"):
         _term = r.get(_name)
         if _term is not None and isinstance(getattr(_term, "params", None), dict):
-            _term.params["target_height"] = 0.10   # 0.18 -> 0.10（见上面的说明）
+            _term.params["target_height"] = 0.15
+    if "foot_swing_height" in r:
+        r["foot_swing_height"].weight = -1.0
 
     # 2000 轮实测（每步加权值）：upright 0.92 + ref_tracking 0.49 + track_lin 0.86
     # 合计 2.3 分几乎不用动就能拿到，而"走快"只多拿 forward_progress 0.107。
@@ -133,11 +143,14 @@ def _rebuild_rewards(cfg) -> None:
     #    就是因为"抬脚"在奖励函数里没有任何正收益。
     #    threshold_max=1.2：参考步态摆动期 33/90 帧，相位速率 0.6~1.8 时墙钟
     #    摆动时长 0.37~1.1 s，上限必须覆盖慢节奏那一端。
+    # threshold_min 0.12 -> 0.05：实测 air_time_mean 只有 0.0704，原门槛让这条
+    # 奖励恒为 0 —— 连「抬起了一点」都拿不到钱。降到 0.05 后 7 cm 的摆动就有
+    # 正收益；weight 0.6 -> 1.0，让「抬脚」成为明确赚钱的项。
     _air = r.get("air_time")
     if _air is not None and isinstance(getattr(_air, "params", None), dict):
-        _air.weight = 0.6
+        _air.weight = 1.0
         _air.params.update(
-            threshold_min=0.12, threshold_max=1.2, command_threshold=0.05,
+            threshold_min=0.05, threshold_max=1.2, command_threshold=0.05,
         )
 
     # ③ 参考跟踪是唯一逼出「真正侧步」的项，但 0.3 的权重给的分太少：
@@ -164,9 +177,13 @@ def _rebuild_rewards(cfg) -> None:
     # ⚠️ 奖励按 dt 缩放：一次性惩罚实际值 = weight × 0.02。
     # 原来 −5 只等于每次摔倒扣 0.1 分，而当时一个 episode 回报 ~10 分 ——
     # 摔倒几乎免费，策略自然选择"用速度换摔"。−150 时小回合 ≈ 30%。
-    # ⚠️ 2026-10-30：推进奖励加权到 5.0 之后，单回合回报涨到 ~75，
-    # −150 又只剩 4% —— 按同样比例抬到 −400（≈ −8/次，11%）。
-    r["is_terminated"] = RewardTermCfg(func=X.is_terminated, weight=-400.0, params={})
+    # ⚠️ 2026-10-30 晚：−400 实测把策略逼成了「站着不动」。
+    # 1065 轮实测：摔率 78%、单回合正奖励只有 ~0.5 分，而摔一次 −8 分 ——
+    # 是整回合收益的 16 倍。只要「走」让摔倒概率上升 5%，期望收益就转负。
+    # 数据上是教科书式的「用停滞换生存」：ep_len 从 5.7 s 涨到 9.4 s 的同时，
+    # 给分段的推进强度从 0.39 一路掉到 0.30（320/750/800/1065 四个点单调下降）。
+    # −250（−5/次）仍然疼（≈6 个回合的正奖励），但不再让「走」变成必输的赌局。
+    r["is_terminated"] = RewardTermCfg(func=X.is_terminated, weight=-250.0, params={})
 
     # 探针：只把 rise_est / tread_est / scan_ok 写进 Metrics/*，不影响学习。
     # 权重必须非零（0 会让 mjlab 整项跳过、连 func 都不调用）。
@@ -273,7 +290,7 @@ def _retune_viewer(cfg) -> None:
                     break
         if origin in ("world", "w") and target is not getattr(Ot, "WORLD", None):
             print("[viewer][warn] 这个 mjlab 的 OriginType 没有 WORLD，相机仍是跟拍；"
-                  "看位移请改用诊断脚本（scripts/diagnose_policy.py）")
+                  "看位移请改用诊断脚本打印的 v_y / Δy（它的录像也是跟拍）")
         _set("origin_type", target)
     elif origin in ("world", "w"):
         print("[viewer][warn] 这个 mjlab 的 ViewerConfig 没有 OriginType，相机无法固定，"
@@ -400,6 +417,40 @@ def _alpha_fixed(play: bool) -> float:
     return 1.0 if play else -1.0
 
 
+def _alpha_start() -> float:
+    """α 课程的起点（只在 alpha_fixed<0 的课程模式下生效）。
+
+    为什么需要它：续训一个 α 已经涨到 0.70 的 checkpoint 时，
+    · 不设任何环境变量 -> ramp 从 0 重来，参考打回站姿，策略当场崩；
+    · 设 `ELF3_ALPHA=0.70` -> 那是「固定」语义，永远到不了 1.0（实测 4049 轮
+      全部锁在 0.70，步幅只有脚本步态的七成，爬 22 cm 台阶不够用）。
+    正确做法是 `ELF3_ALPHA_START=0.70`：从 0.70 继续线性升到 1.0。
+    """
+    raw = os.environ.get("ELF3_ALPHA_START")
+    if raw is None or raw.strip() == "":
+        return 0.0
+    try:
+        return min(1.0, max(0.0, float(raw)))
+    except ValueError:
+        print(f"[cfg][warn] ELF3_ALPHA_START={raw!r} 不是数字，按 0 处理")
+        return 0.0
+
+
+def _ramp_steps(play: bool) -> int:
+    """α 课程总步数。可用 `ELF3_RAMP_ITERS`（单位 iteration，内部 ×24）覆盖。"""
+    default = 1500 * 24
+    if play:
+        return default
+    raw = os.environ.get("ELF3_RAMP_ITERS")
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return max(1, int(float(raw))) * 24
+    except ValueError:
+        print(f"[cfg][warn] ELF3_RAMP_ITERS={raw!r} 不是数字，用默认 1500")
+        return default
+
+
 def crab_residual_env_cfg(play: bool = False):
     cfg = crab_env_cfg(play=play, scan_size=SCAN_SIZE)
 
@@ -430,7 +481,8 @@ def crab_residual_env_cfg(play: bool = False):
         # α=0 时参考退化为默认站姿 —— 与基线任务「动作全零」等价，
         # 早期训练难度和已验证的基线一致，再随课程渐变为脚本步态。
         ref_stand=tuple(DEFAULT_JOINT_POS),
-        ramp_steps=1500 * 24,           # 1500 iter 线性升到满幅
+        ramp_steps=_ramp_steps(play),   # 默认 1500 iter，ELF3_RAMP_ITERS 可覆盖
+        alpha_start=_alpha_start(),      # 课程起点，ELF3_ALPHA_START 可覆盖
         # play 默认满幅（α=1），但训练是走课程的：790 轮时 ref_alpha 才 0.527。
         # 直接回放等于「满幅参考 + 为半幅参考训出来的残差」，残差补不上差额，
         # 画面会明显比训练时差 —— 别据此判断策略退步。

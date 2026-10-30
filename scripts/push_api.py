@@ -105,7 +105,10 @@ def main() -> int:
     print(f"本地 HEAD : {head[:10]}")
     print(f"远端 base : {base[:10]}")
 
-    if base == head:
+    # ⚠️ 只对「整树推送」短路。--files 模式是拿远端 tree 当底、只替换指定文件，
+    # 本地 HEAD 与远端相同不代表工作区没改动 —— 之前在这里直接 return，
+    # 导致改了文件却提示「已一致，无需推送」。
+    if base == head and not args.files:
         print("已一致，无需推送")
         return 0
 
