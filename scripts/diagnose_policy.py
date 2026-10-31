@@ -386,7 +386,11 @@ def _dump_scan(base, term, env_i: int = 0) -> None:
     return
 
   H = h[env_i].view(ny, nx)
-  print(f"[scan] env{env_i} 高度场（单位 cm，行=y 从 -1.0 到 +1.0，列=x 从 -0.6 到 +0.6）")
+  # ⚠️ 这个传感器给的是**射线从传感器打到地面的距离**，不是高度：
+  #    数值越大 = 地面越低。把它当"高度"读会正好读反 —— 2026-10-31 就误判过一次，
+  #    把碗底的 104 cm 当成"最高的平台"，差点去改本来正确的地形方向。
+  print(f"[scan] env{env_i} 射线距离（cm，**数值越大 = 地面越低**）"
+        f"；行=y 从 -1.0 到 +1.0，列=x 从 -0.6 到 +0.6")
   ys = [-1.0 + i * 0.1 for i in range(ny)]
   print("        x:" + "".join(f"{-0.6 + j * 0.1:+5.1f}" for j in range(nx)))
   for i in range(ny):
@@ -395,6 +399,39 @@ def _dump_scan(base, term, env_i: int = 0) -> None:
 
   miss = (H > 4.9).to(torch.float32).mean()
   print(f"[scan] 未命中比例 {float(miss) * 100:.0f}%（≈100% 说明射线没打到地形）")
+
+  # 换算成「相对机器人脚下地面的高度」：正 = 比脚下高（上台阶），负 = 更低（掉下去）。
+  # 这一步是为了免掉上面那个符号陷阱 —— 1 秒就能看出是碗（中心低、四周高）还是金字塔。
+  try:
+    ctr = float(H[ny // 2, nx // 2])
+    rel = (ctr - H) * 100.0                      # cm，正 = 比脚下高
+    rel_np = np.round(rel.detach().cpu().numpy(), 1)
+    uniq = [round(v, 1) for v in sorted(set(rel_np.ravel().tolist()))]
+    print(f"[scan] 相对脚下地面的高度层（cm，正=更高）：{uniq[:10]}"
+          f"{' …' if len(uniq) > 10 else ''}")
+
+    # 形状判读：碗 = 中心低四周高（机器人出生在碗底，往外走是上台阶）。
+    # 若是反的（中心高四周低），就是正金字塔 —— 出生在顶平台，往哪走都是下楼。
+    edge = np.concatenate([rel_np[0], rel_np[-1], rel_np[:, 0], rel_np[:, -1]])
+    edge_med = float(np.median(edge))
+    if edge_med > 3.0:
+      print(f"[scan] 形状判读：中心最低、四周比脚下高 {edge_med:.1f} cm"
+            f" -> **碗（倒置金字塔），方向正确 ✔**")
+    elif edge_med < -3.0:
+      print(f"[scan] 形状判读：中心最高、四周比脚下低 {abs(edge_med):.1f} cm"
+            f" -> **正金字塔 ❌ 出生在顶平台，往外走全是下台阶**")
+    else:
+      print(f"[scan] 形状判读：四周与脚下相差 {edge_med:+.1f} cm，近似平地/台阶不足 3 cm")
+
+    # 沿 +y 的台阶位置（+y 才是机器人被要求走的方向）
+    col = rel_np[:, nx // 2]
+    for i in range(ny - 1):
+      d = float(col[i + 1] - col[i])
+      if abs(d) > 2.0:
+        print(f"[scan]   +y 台阶：y={ys[i]:+.1f} -> {ys[i + 1]:+.1f}  "
+              f"{'上' if d > 0 else '下'} {abs(d):.1f} cm（距机器人 {abs(ys[i]):.2f} m）")
+  except Exception as e:
+    print(f"[scan] 相对高度换算失败：{e!r}")
 
   # 估计器内部量（与 ref_table.estimate 同一套算法，逐步打印便于定位）
   mid = nx // 2
