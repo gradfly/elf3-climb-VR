@@ -350,7 +350,10 @@ def _retune_curriculum(cfg) -> None:
             # 原来"在平台上蹭 0.3 m"就够升级 —— 课程涨到 levels≈5.8 的同时，
             # 一批 env 仍卡在第一级台阶边缘（Δy≈0.83 m）。0.90 在四列上都超出平台边缘，
             # 等于要求"至少踏上第一级台阶"。
-            params={"promote_frac": 0.25, "demote_frac": 0.10, "min_dist": 0.90},
+            # demote_frac 0.10 -> 0.40（8 s）：0.10 的降级线是 2 s，而略差的策略会稳定在
+            # 2~4 s —— 落在 [2 s, 5 s] 的死带里，既不降级也升不了级，课程被冻死。
+            # 实测 1400 轮 ep_len=2.52 s、rise_est=0.15，就是这个死锁。
+            params={"promote_frac": 0.25, "demote_frac": 0.40, "min_dist": 0.90},
         )
 
     # 初始等级只给 0~1。

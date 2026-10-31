@@ -282,7 +282,7 @@ def swing_clearance(env, sensor_name: str = "foot_height_scan",
                     target: float = 0.15, max_height: float = 0.5,
                     command_name: str = "twist",
                     command_threshold: float = 0.05) -> torch.Tensor:
-    """摆动腿离地高度 / target，夹到 [0,1]，按脚平均 —— **正奖励**。
+    """摆动腿离地高度 / target，**平方**后按脚平均 —— 正奖励。
 
     为什么必须给正的
     --------------
@@ -292,7 +292,15 @@ def swing_clearance(env, sensor_name: str = "foot_height_scan",
         foot_clearance  weight -2.0，target 0.15，3 cm 时每步只 -0.03 分。
     也就是说"从不抬脚"这个状态在奖励函数里是**完全中性**的（惩罚项全都不触发），
     而抬脚一旦失衡就是 is_terminated 的 -5 分。实测于是收敛到"贴地蹭/顶在台阶边上"。
-    这个不对称只能用**正的、从 0 开始就有梯度**的项来破：抬 3 cm 拿 0.2，抬 15 cm 拿 1.0。
+    这个不对称只能用**正的、从 0 开始就有梯度**的项来破。
+
+    为什么是平方不是线性（2026-10-31 实测教训）
+    ----------------------------------------
+    第一版是线性的，1400 轮后 `peak_height_mean` 从 0.029 掉到 **0.0096**，而
+    `air_time_mean` 从 0.070 涨到 0.140 —— 脚离地时间翻倍、高度反而更低，正是
+    "贴着地面快速蹭"在刷这条奖励（接触传感器只要没受力就判腾空，1 cm 也算）。
+    平方后：1 cm -> 0.004、5 cm -> 0.11、10 cm -> 0.44、15 cm -> 1.0，
+    低空悬停几乎不给钱，梯度主要落在最后几厘米。
 
     为什么用脚离地高度，而不是关节角
     ------------------------------
@@ -318,7 +326,11 @@ def swing_clearance(env, sensor_name: str = "foot_height_scan",
         swing = (1.0 - c.to(h.dtype)).clamp(0.0, 1.0)
 
     valid = ((h > 0.0) & (h < float(max_height))).to(h.dtype)
-    lift = torch.clamp(h / max(float(target), 1e-6), 0.0, 1.0)
+    # 平方而不是线性：线性时"脚只离地 1 cm"也能拿 0.067，而接触传感器只要没受力就判
+    # 为腾空 —— 于是策略学会了"贴着地面快速蹭"（实测 air_time 从 0.070 涨到 0.140，
+    # 而 peak_height 从 0.029 掉到 0.0096，就是刷这条奖励的指纹）。
+    # 平方后：1 cm -> 0.004、5 cm -> 0.11、10 cm -> 0.44、15 cm -> 1.0。
+    lift = torch.clamp(h / max(float(target), 1e-6), 0.0, 1.0) ** 2
 
     try:
         v_cmd = env.command_manager.get_command(command_name)[:, 1].abs()
@@ -379,7 +391,7 @@ def ref_probe(env, action_name: str = "joint_pos") -> torch.Tensor:
 
 
 def terrain_levels_time(env, env_ids, promote_frac: float = 0.25,
-                        demote_frac: float = 0.10, min_dist: float = 0.90,
+                        demote_frac: float = 0.40, min_dist: float = 0.90,
                         **kwargs) -> dict:
     """按「活够久 + 真的挪了」升降地形，取代内置的「走够远」。
 
@@ -404,8 +416,17 @@ def terrain_levels_time(env, env_ids, promote_frac: float = 0.25,
     现在的判据
     ---------
         升级：活到 max_episode_length 的 25%（5 s）**且**离开出生点 >= 0.90 m
-        降级：活不到 10%（2 s）
+        降级：活不到 max_episode_length 的 40%（8 s）
         其余：保持不变
+
+    ⚠️ demote_frac 为什么从 0.10 提到 0.40（2026-10-31）
+    ------------------------------------------------
+    0.10 对应 2.0 s，而略差的策略很自然会稳定在 2~4 s —— **正好落在
+    [2 s, 5 s] 这条死带里**：活过了降级线所以不降级，又够不到升级线所以不升级。
+    课程于是被冻在"进得去、撑不住"的地形上，没有任何机制把它拉回来。
+    实测 1400 轮后 `Mean episode length = 125.88 步 = 2.52 s`、`rise_est = 0.15`
+    （地形已经在 15 cm 级）—— 就是这个死锁。
+    0.40 对应 8 s：撑不到 8 s 就降一级，让策略自己退回到能站住的地形上重新学。
 
     ⚠️ min_dist 为什么从 0.30 提到 0.90（2026-10-31）
     ------------------------------------------------
