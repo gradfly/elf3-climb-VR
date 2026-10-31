@@ -370,7 +370,11 @@ def _retune_curriculum(cfg) -> None:
     terr = getattr(getattr(cfg, "scene", None), "terrain", None)
     if terr is not None and hasattr(terr, "max_init_terrain_level"):
         try:
-            terr.max_init_terrain_level = 1
+            # 2026-10-31：1 -> 0。实测最底层（level 0）八个 env 里只有 1 个是平地，
+            # 其余 6.1~14.2 cm —— 起点就已经是台阶，策略没有"先学会在平地站稳"的阶段。
+            # 地形低端已全部对齐到 0（见 terrain_cfg），这里再把初始等级钉到 0，
+            # 让所有 env 都从平地开局，等站住了再靠课程往上爬。
+            terr.max_init_terrain_level = 0
         except Exception as e:
             print(f"[curriculum][warn] 设置 max_init_terrain_level 失败：{e}")
 
