@@ -311,6 +311,13 @@ def swing_clearance(env, sensor_name: str = "foot_height_scan",
     ----------------------
     射线没打到地形时传感器会返回 max_distance(1.0) 或 0。不截断的话"没打到"会被当成
     "抬到 1 m 高"，直接把这条奖励刷满 —— 又是一个静默的 reward hacking。
+
+    为什么要竖直姿态门控（2026-10-31 实测）
+    ------------------------------------
+    只门控"不接触 + 有指令"还不够：**摔倒过程中四肢甩在空中也满足这两条**，而且高度能
+    顶到 max_height，lift=1.0 每步白拿全额。实测那次 600 轮续训后 ep_len 掉到 1.54 s、
+    跟踪比 5.63、mean|action| 3.14 且 69% 顶死限幅 —— 策略学会了"扑腾"。
+    现在要求机身 z 轴在世界系的分量 > 0.6（倾斜不超过 53°）才付钱。
     """
     from mjlab.tasks.velocity import mdp as _m
 
@@ -337,6 +344,19 @@ def swing_clearance(env, sensor_name: str = "foot_height_scan",
         gate = (v_cmd > float(command_threshold)).to(h.dtype).unsqueeze(-1)
     except Exception:
         gate = torch.ones_like(h)
+
+    # ⚠️ 竖直姿态门控（2026-10-31，实测踩到）：不加这道，**摔倒比走路更赚钱**。
+    # 机器人翻倒时四肢甩在空中、脚离地高度能顶到 max_height，lift=1.0，每步白拿
+    # weight 全额；而走路时抬 3 cm 只有 0.04。实测后果：ep_len 1.54 s、跟踪比 5.63、
+    # mean|action| 3.14 且 69% 顶死限幅 —— 策略学会了"扑腾"。
+    # 用机身 z 轴在世界系的分量判直立：q=(w,x,y,z) 时 up_z = 1 - 2(x²+y²)，
+    # 直立为 1、侧倒为 0、翻转 -1。阈值 0.6 约等于"倾斜不超过 53°"。
+    try:
+        q = _root_quat(env)
+        up_z = 1.0 - 2.0 * (q[:, 1] ** 2 + q[:, 2] ** 2)
+        gate = gate * (up_z > 0.6).to(h.dtype).unsqueeze(-1)
+    except Exception:
+        pass
 
     return (lift * swing * valid * gate).mean(dim=-1)
 
