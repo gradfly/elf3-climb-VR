@@ -360,7 +360,7 @@ def _dump_foot(base, cfg=None, target: float = 0.15) -> None:
   print("-" * 62)
 
 
-def _dump_scan(base, term, env_i: int = 0) -> None:
+def _dump_scan(base, term, env_i: int = 0, brief: bool = False) -> None:
   """把 height_scan 原样打印出来，用来判断地形估计链路到底断在哪一环。
 
   只有三种可能，看这张表就能分开：
@@ -386,19 +386,21 @@ def _dump_scan(base, term, env_i: int = 0) -> None:
     return
 
   H = h[env_i].view(ny, nx)
-  # ⚠️ 这个传感器给的是**射线从传感器打到地面的距离**，不是高度：
-  #    数值越大 = 地面越低。把它当"高度"读会正好读反 —— 2026-10-31 就误判过一次，
-  #    把碗底的 104 cm 当成"最高的平台"，差点去改本来正确的地形方向。
-  print(f"[scan] env{env_i} 射线距离（cm，**数值越大 = 地面越低**）"
-        f"；行=y 从 -1.0 到 +1.0，列=x 从 -0.6 到 +0.6")
   ys = [-1.0 + i * 0.1 for i in range(ny)]
-  print("        x:" + "".join(f"{-0.6 + j * 0.1:+5.1f}" for j in range(nx)))
-  for i in range(ny):
-    row = "".join(f"{float(v) * 100:5.1f}" for v in H[i])
-    print(f"  y={ys[i]:+.1f} {row}")
+  if not brief:
+    # ⚠️ 这个传感器给的是**射线从传感器打到地面的距离**，不是高度：
+    #    数值越大 = 地面越低。把它当"高度"读会正好读反 —— 2026-10-31 就误判过一次，
+    #    把碗底的 104 cm 当成"最高的平台"，差点去改本来正确的地形方向。
+    print(f"[scan] env{env_i} 射线距离（cm，**数值越大 = 地面越低**）"
+          f"；行=y 从 -1.0 到 +1.0，列=x 从 -0.6 到 +0.6")
+    print("        x:" + "".join(f"{-0.6 + j * 0.1:+5.1f}" for j in range(nx)))
+    for i in range(ny):
+      row = "".join(f"{float(v) * 100:5.1f}" for v in H[i])
+      print(f"  y={ys[i]:+.1f} {row}")
 
   miss = (H > 4.9).to(torch.float32).mean()
-  print(f"[scan] 未命中比例 {float(miss) * 100:.0f}%（≈100% 说明射线没打到地形）")
+  if not brief:
+    print(f"[scan] 未命中比例 {float(miss) * 100:.0f}%（≈100% 说明射线没打到地形）")
 
   # 换算成「相对机器人脚下地面的高度」：正 = 比脚下高（上台阶），负 = 更低（掉下去）。
   # 这一步是为了免掉上面那个符号陷阱 —— 1 秒就能看出是碗（中心低、四周高）还是金字塔。
@@ -434,29 +436,33 @@ def _dump_scan(base, term, env_i: int = 0) -> None:
     print(f"[scan] 相对高度换算失败：{e!r}")
 
   # 估计器内部量（与 ref_table.estimate 同一套算法，逐步打印便于定位）
-  mid = nx // 2
-  prof = H[:, max(0, mid - 1):mid + 2].median(dim=-1).values
-  print("[scan] 中央 x 剖面的 y 方向高度（cm）与相邻差 dh（正=沿 +y 抬升）：")
-  dh = prof[:-1] - prof[1:]
-  for i in range(ny - 1):
-    flag = "  <-- 上升边" if float(dh[i]) > 0.03 else ""
-    print(f"   y={ys[i]:+.1f}->{ys[i + 1]:+.1f}  h={float(prof[i]) * 100:7.2f}"
-          f"  dh={float(dh[i]) * 100:+6.2f}{flag}")
+  if not brief:
+    mid = nx // 2
+    prof = H[:, max(0, mid - 1):mid + 2].median(dim=-1).values
+    print("[scan] 中央 x 剖面的 y 方向高度（cm）与相邻差 dh（正=沿 +y 抬升）：")
+    dh = prof[:-1] - prof[1:]
+    for i in range(ny - 1):
+      flag = "  <-- 上升边" if float(dh[i]) > 0.03 else ""
+      print(f"   y={ys[i]:+.1f}->{ys[i + 1]:+.1f}  h={float(prof[i]) * 100:7.2f}"
+            f"  dh={float(dh[i]) * 100:+6.2f}{flag}")
 
   raw = term.raw_rise
   val = term.rise_valid
   if raw is not None and val is not None:
-    print(f"[scan] estimate -> raw_rise={float(raw[env_i]):.3f} m "
+    tt = _terrain_types(base, base.num_envs)
+    tag = f"（terrain_type={int(tt[env_i])}）" if tt is not None else ""
+    print(f"[scan] env{env_i}{tag} estimate -> raw_rise={float(raw[env_i]):.3f} m "
           f"valid={bool(val[env_i])}  (在检测带内找到上升边={bool(val[env_i])})")
-  print(f"[scan] 机器人 root=({float(_root_pos(base)[env_i, 0]):+.2f}, "
-        f"{float(_root_pos(base)[env_i, 1]):+.2f}, "
-        f"{float(_root_pos(base)[env_i, 2]):+.2f})")
-  terr = getattr(getattr(base, "scene", None), "terrain", None)
-  for attr in ("terrain_levels", "levels"):
-    v = getattr(terr, attr, None)
-    if v is not None and torch.is_tensor(v):
-      print(f"[scan] 地形等级 env{env_i} = {int(v[env_i])}")
-      break
+  if not brief:
+    print(f"[scan] 机器人 root=({float(_root_pos(base)[env_i, 0]):+.2f}, "
+          f"{float(_root_pos(base)[env_i, 1]):+.2f}, "
+          f"{float(_root_pos(base)[env_i, 2]):+.2f})")
+    terr = getattr(getattr(base, "scene", None), "terrain", None)
+    for attr in ("terrain_levels", "levels"):
+      v = getattr(terr, attr, None)
+      if v is not None and torch.is_tensor(v):
+        print(f"[scan] 地形等级 env{env_i} = {int(v[env_i])}")
+        break
   print("-" * 62)
 
 
@@ -475,6 +481,9 @@ def main(argv=None) -> int:
                        "用于定位「五项足底奖励同时恒为 0」")
   ap.add_argument("--dump-scan", action="store_true",
                   help="打印 height_scan 原始高度场 + 估计器内部量，用于定位 rise 恒为 0")
+  ap.add_argument("--dump-scan-all", action="store_true",
+                  help="对**每个 env** 打印紧凑版 scan 摘要（形状判读 + 台阶高度 + rise_est）。"
+                       "用来看「各列地形到底差多少」，判断课程有没有真正的简单档")
   ap.add_argument("--dump-env", type=int, default=0, help="--dump-scan 打印哪个 env")
   ap.add_argument("--record", default=None, metavar="OUT.mp4",
                   help="录 mp4（相机跟拍机器人，俯视 45°）；需要 EGL")
@@ -742,14 +751,18 @@ def main(argv=None) -> int:
     except Exception:
       pass
 
-  if args.dump_scan:
+  if args.dump_scan or args.dump_scan_all:
     with torch.no_grad():
       obs = env.step(policy(obs))[0]      # 先走一步，让传感器的 hit_pos_w 是新的
     if term is None:
       print("[scan] 拿不到 joint_pos 动作项，--dump-scan 需要 ResidualGaitAction")
     else:
       term._update_terrain()              # 不等 terrain_refresh_steps，强制刷新
-      _dump_scan(base, term, args.dump_env)
+      if args.dump_scan_all:
+        for i in range(B):
+          _dump_scan(base, term, i, brief=True)
+      else:
+        _dump_scan(base, term, args.dump_env)
 
   if args.dump_foot:
     with torch.no_grad():
