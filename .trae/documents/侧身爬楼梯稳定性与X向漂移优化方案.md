@@ -165,22 +165,58 @@ v1 拿 `--terrain-level 3/5/7` 当"简单/标准/难"三档。但 play 里
 `terrain_generator.curriculum = False`（`env_cfg.py:421`），**行是否仍是难度梯度取决于 mjlab 版本**。
 先花一分钟验证，否则 B0/B1/B2 可能量的是同一批地形。
 
+**先确认服务器上的代码是新的**——旧版脚本没有 `--freeze-command`，argparse 会直接报错退出：
+
 ```bash
+cd ~/elf3
+git log --oneline -1
+git pull --ff-only                     # 没更新过就拉一次
+.venv/bin/python scripts/diagnose_policy.py --help | grep -q freeze-command \
+  && echo "[OK] 脚本是新的" \
+  || echo "[ERR] 这份脚本没有 --freeze-command：仓库没更新，先 git pull"
+```
+
+> `TASK` / `CKPT` 是**每个 shell 会话独立**的。新开窗口要重跑 §2，或直接用下面的兜底赋值。
+
+```bash
+mkdir -p /tmp/elf3_drift
+[ -n "$TASK" ] || TASK=Elf3-Crab-Residual-Play
+[ -n "$CKPT" ] || CKPT=$(ls -t logs/rsl_rl/elf3_crab/*/model_*.pt | head -1)
+printf 'TASK=%s\nCKPT=%s\n' "$TASK" "$CKPT"
+
 for lvl in 3 5 7; do
   echo "=== terrain-level $lvl ==="
   .venv/bin/python scripts/diagnose_policy.py \
     --task "$TASK" --checkpoint "$CKPT" \
-    --num-envs 8 --steps 250 --terrain-level $lvl --freeze-command 0.17 \
-    2>&1 | grep -E "terrain_levels|rise_est|tread_est|指令 cmd"
+    --num-envs 32 --steps 400 --terrain-level $lvl --freeze-command 0.17 \
+    > /tmp/elf3_drift/pre_p0_$lvl.log 2>&1
+  echo "exit=$?"
+  grep -E "rise 列|terrain_levels|指令 cmd" /tmp/elf3_drift/pre_p0_$lvl.log \
+    || { echo "[没有匹配行，日志尾部如下]"; tail -15 /tmp/elf3_drift/pre_p0_$lvl.log; }
 done
 ```
 
-**判读**：`rise_est` 应随 level **单调上升**（例如 0.03 → 0.12 → 0.20）。
+> **为什么先落盘再 grep**：直接 `2>&1 | grep` 会把 traceback 和 argparse 报错一起吃掉，
+> 表现就是"每档只打印了标题、一行数据都没有"。落盘后失败时会自动把日志尾部打出来。
 
-- 单调上升 → 通过，继续 §4。
-- 三档几乎相同 → `--terrain-level` 在本版本上是空操作，**B0~B2 无意义**。
+**判读**：看**每一列自己**的 `rise 列X` 是否随 level 单调上升。
+
+```
+rise 列0 n=8 : 0.010 m ...      ← flat 列，范围只有 0~2 cm，基本不动是正常的
+rise 列1 n=8 : 0.041 m ...      ← easy 列
+rise 列2 n=8 : 0.087 m ...      ← mid 列
+rise 列3 n=8 : 0.126 m ...      ← hard 列，8~22 cm，梯度最明显
+```
+
+- `rise 列3` 在 level 3/5/7 上单调上升（约 0.12 → 0.16 → 0.19）→ **P0 通过**，继续 §4。
+- 某一列三档几乎相同 → `--terrain-level` 在本版本上是空操作，**B0~B2 无意义**。
   改走训练配置（`terrain_generator.curriculum=True`，行确实是难度梯度）：
   **在 §4/§5 的每条命令后面加 `--train-env`**，其余完全不变。
+
+> **别用全 env 的 `rise_est.mean()` 判断**：`terrain_types` 是创建时随机分配、终身不变的，
+> 而各列的高度范围差一个量级（flat 0~2 cm、hard 8~22 cm）。32 个 env 里多抽到几个 hard，
+> 均值就能差出 ±0.04 —— 比 level 3→7 本该有的梯度还大。8 个 env 时这个噪声直接盖过信号，
+> 会得出"level 无效"的错误结论。**必须按列比。**
 
 ---
 

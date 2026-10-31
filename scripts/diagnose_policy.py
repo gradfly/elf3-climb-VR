@@ -42,6 +42,7 @@ import sys
 from dataclasses import asdict
 
 import mujoco
+import numpy as np
 import torch
 
 
@@ -191,7 +192,6 @@ def _write_video(path: str, frames, fps: float) -> None:
       iio.mimwrite(path, frames, fps=fps, macro_block_size=1)
     except Exception as e:
       print(f"[warn] 写 mp4 失败（{e}）；退而存 npz")
-      import numpy as np
       np.savez_compressed(path + ".npz", frames=np.stack(frames))
       print(f"[info] 已保存 {path}.npz（{len(frames)} 帧）")
       return
@@ -224,6 +224,29 @@ def _force_terrain_level(base, level: int) -> bool:
       v[:] = level
       return True
   return False
+
+
+def _terrain_types(base, n_env: int):
+  """每个 env 站在哪一列地形（0=flat / 1=easy / 2=mid / 3=hard）。取不到返回 None。
+
+  为什么要它：`terrain_types` 是**创建时随机分配、终身不变**的，而每列自己的
+  `step_height_range` 差一个量级（flat 0~2 cm、hard 8~22 cm）。所以
+  `rise_est.mean()` 这种全 env 均值，主要由"这次抽到几个 hard"决定，
+  跟 `--terrain-level` 的关系被噪声盖住了 —— 必须按列拆开看。
+  """
+  terr = getattr(getattr(base, "scene", None), "terrain", None)
+  if terr is None:
+    return None
+  v = getattr(terr, "terrain_types", None)
+  if v is None:
+    return None
+  try:
+    arr = np.asarray(v.detach().cpu() if hasattr(v, "detach") else v).ravel()
+  except Exception:
+    return None
+  if arr.shape[0] != n_env:
+    return None
+  return arr.astype(int)
 
 
 def _dump_scan(base, term, env_i: int = 0) -> None:
@@ -685,6 +708,20 @@ def main(argv=None) -> int:
       print(f"rise_est       : {float(term.rise_est.mean()):.3f} m "
             f"(min {float(term.rise_est.min()):.3f} / max {float(term.rise_est.max()):.3f})")
       print(f"tread_est      : {float(term.tread_est.mean()):.3f} m")
+      # 按列拆开：均值会被"这次抽到几个 hard"带偏，列内比较才有意义
+      tt = _terrain_types(base, B)
+      if tt is not None:
+        try:
+          rise_np = term.rise_est.detach().float().cpu().numpy()
+          tread_np = term.tread_est.detach().float().cpu().numpy()
+          print(f"terrain_types  : {tt.tolist()}")
+          for t in sorted(set(tt.tolist())):
+            sel = tt == t
+            vals = ", ".join(f"{v:.2f}" for v in np.sort(rise_np[sel])[::-1])
+            print(f"  rise 列{t} n={int(sel.sum())} : {rise_np[sel].mean():.3f} m "
+                  f"(tread {tread_np[sel].mean():.3f})  逐env[{vals}]")
+        except Exception as e:
+          print(f"[warn] 按列统计 rise_est 失败：{e}")
       print(f"ref_v          : {float(term.ref_v.mean()):.3f} m/s")
       print(f"phase          : {float(term.effective_phase.mean()):.3f}")
     except Exception as e:
@@ -740,7 +777,6 @@ def main(argv=None) -> int:
   if args.trace and rec:
     import os
 
-    import numpy as np
     os.makedirs(os.path.dirname(os.path.abspath(args.trace)), exist_ok=True)
     arrays = {k: np.stack([t.cpu().numpy() for t in v]) for k, v in rec.items()}
     np.savez_compressed(args.trace, **arrays)
@@ -781,15 +817,8 @@ def main(argv=None) -> int:
 
     # 按地形类型分组：16 env 的列（flat/easy/mid/hard）是终身随机分配的，
     # 不分组的话 4 种台阶混在一个均值里，看起来像"漂移"，其实是"难度不同"。
-    ttypes = None
-    try:
-      ttypes = np.asarray(base.scene.terrain.terrain_types.detach().cpu()).ravel()
-    except Exception:
-      try:
-        ttypes = np.asarray(base.scene.terrain.terrain_types).ravel()
-      except Exception:
-        pass
-    if ttypes is not None and ttypes.shape[0] == n_env:
+    ttypes = _terrain_types(base, n_env)
+    if ttypes is not None:
       print(f"[trace] terrain_types : {ttypes.astype(int).tolist()}")
       for t in sorted(set(ttypes.astype(int).tolist())):
         sel = ttypes.astype(int) == t
