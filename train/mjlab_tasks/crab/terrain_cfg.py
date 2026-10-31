@@ -70,6 +70,8 @@
 """
 from __future__ import annotations
 
+import os
+
 from mjlab.terrains.config import pyramid_stairs_inv
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 
@@ -128,3 +130,46 @@ CRAB_STAIRS_CFG = TerrainGeneratorCfg(
     },
     add_lights=True,
 )
+
+
+def _height_cap() -> float:
+  """`ELF3_TERRAIN_CAP`（米）。0 / 未设 = 不封顶。"""
+  try:
+    return max(0.0, float(os.environ.get("ELF3_TERRAIN_CAP", "0") or 0.0))
+  except Exception:
+    return 0.0
+
+
+def _cap_stairs(cfg: TerrainGeneratorCfg, cap: float) -> None:
+  """把四档台阶的**上限**统一压到 cap，用于「分阶段手动抬难度」。
+
+  为什么要它
+  ----------
+  本版 mjlab 里「行 = 难度」这条链一直不稳：实测 `--terrain-level 0` 下八个 env 的
+  真实台阶是 0 / 6.1 / 7.8 / 7.8 / 8.0 / 12.3 / 12.5 / 14.2 cm，且 `terrain_types`
+  与高度不对应（type=0 有 12.5 和 8.0，type=2 有 0 和 12.3）。也就是说**我们无法可靠地
+  预测下一步地形会变多难** —— 而训练恰恰需要「先彻底学会走路，再逐步加难」。
+
+  所以不再指望引擎的课程调度，改成自己做：一个阶段一个 cap，
+
+      ELF3_TERRAIN_CAP=0.08   # 阶段 1：全部 ≤ 8 cm，先把 ep_len 拉过 10 s
+      ELF3_TERRAIN_CAP=0.16   # 阶段 2
+      ELF3_TERRAIN_CAP=0.25   # 阶段 3（= 目标上限，等于不封顶）
+
+  低端不动（保持 0），所以每个阶段内部仍然有「平地 -> cap」的梯度。
+  """
+  if cap <= 0:
+    return
+  for name, sub in cfg.sub_terrains.items():
+    try:
+      lo, hi = sub.step_height_range
+      sub.step_height_range = (min(float(lo), cap), min(float(hi), cap))
+    except Exception as e:      # noqa: BLE001
+      print(f"[terrain][warn] {name} 压上限失败：{e!r}")
+  ranges = {k: tuple(round(v * 100, 1) for v in s.step_height_range)
+            for k, s in cfg.sub_terrains.items()}
+  print(f"[terrain] 台阶上限已压到 {cap * 100:.0f} cm（ELF3_TERRAIN_CAP={cap}），"
+        f"四档范围(cm)：{ranges}")
+
+
+_cap_stairs(CRAB_STAIRS_CFG, _height_cap())
