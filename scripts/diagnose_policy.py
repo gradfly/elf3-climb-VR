@@ -542,6 +542,13 @@ def main(argv=None) -> int:
   step_i = 0
   warned_render = False
   step_in_ep = torch.zeros(B, dtype=torch.long, device=device)
+  # episode 步数上限（play 里是 1e9 对应的巨大值，那就永远判不出超时 -> 全算摔，正确）
+  max_ep = int(getattr(base, "max_episode_length", 0) or 0)
+  if max_ep <= 0:
+    try:
+      max_ep = int(round(float(getattr(base.cfg, "episode_length_s", 0)) / dt))
+    except Exception:
+      max_ep = 0
   net_dy = torch.zeros(B, device=device)
   net_dx = torch.zeros(B, device=device)
   vy_alive: list[float] = []
@@ -651,13 +658,20 @@ def main(argv=None) -> int:
 
     # 区分「摔倒」和「超时」：训练配置 episode 固定 20 s，超时也会 dones=True，
     # 不分开的话表里的"摔倒数"就是把正常跑完当成摔了。
+    #
+    # ⚠️ 不能用 reset_time_outs 单独判：末步 time_out 与 termination 可能同时成立，
+    # 后者会把它盖掉（实测 16 个 env 里 5 个被误记成"摔"）。改用「本回合步数是否跑满」，
+    # 与版本无关。step_in_ep 在自增前是 0 基，跑满第 max_ep 步时值为 max_ep-1。
     timeout_b = torch.zeros(B, dtype=torch.bool, device=device)
-    _to = getattr(base, "reset_time_outs", None)
-    if torch.is_tensor(_to):
-      try:
-        timeout_b = _to.bool() & dones_b
-      except Exception:
-        pass
+    if max_ep > 0:
+      timeout_b = dones_b & (step_in_ep >= max_ep - 1)
+    else:
+      _to = getattr(base, "reset_time_outs", None)
+      if torch.is_tensor(_to):
+        try:
+          timeout_b = _to.bool() & dones_b
+        except Exception:
+          pass
 
     p = _root_pos(base)[:, :2]
     d = (p - prev) / dt

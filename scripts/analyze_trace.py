@@ -43,7 +43,8 @@ def _corr(a: np.ndarray, b: np.ndarray) -> float:
 def _per_env_table(d, skip: int, yaw_thresh: float) -> dict:
   dx = d["dx"]
   dy = d["dy_ep"] if "dy_ep" in d else d["dy"]
-  yaw = np.degrees(d["yaw_rel"] if "yaw_rel" in d else d["yaw"])
+  yaw_rad = d["yaw_rel"] if "yaw_rel" in d else d["yaw"]
+  yaw = np.degrees(yaw_rad)
   vx, vy = d["vx"], d["vy"]
   alive = d["alive"].astype(bool)
   # 训练配置 episode 固定 20 s，正常跑完也会 dones=True。不把超时剔除，
@@ -105,6 +106,23 @@ def _per_env_table(d, skip: int, yaw_thresh: float) -> dict:
     ang = np.degrees(np.arctan2(vx_e, np.maximum(vy[:, e], 1e-6)))
     c_head = _corr(ang[m], yw_e[m])
 
+    k = np.cos(np.radians(yw_e))
+    s = np.sin(np.radians(yw_e))
+    # 机身系分解：螃蟹步的定义就是「沿机身 +Y 平移、机身 +X 速度为 0」。
+    #   v_lon = 沿机身 X（前后）   —— 理想螃蟹步应为 0，与朝向无关，不受"转圈"污染
+    #   v_lat = 沿机身 Y（侧向）   —— 应≈指令 cmd_y
+    # 这是比"安静段 vx"更硬的 B 类判据：机器人转着走也照样能量出来。
+    v_lon = vx[:, e] * k + vy[:, e] * s
+    v_lat = -vx[:, e] * s + vy[:, e] * k
+    lon_mean = float(v_lon[m].mean()) if m.any() else float("nan")
+    lon_abs = float(np.abs(v_lon[m]).mean()) if m.any() else float("nan")
+    if m.sum() >= 20:
+      p_lon = float((v_lon[m] > 0).mean())
+      lon_cons = max(p_lon, 1.0 - p_lon)
+    else:
+      lon_cons = float("nan")
+    lat_mean = float(v_lat[m].mean()) if m.any() else float("nan")
+
     rows.append(dict(
         env=e, dx=end_dx[e], dy=end_dy[e], ratio=ratio[e],
         yaw_end=yw_e[lc[e]] if ok[e] else np.nan,
@@ -112,6 +130,7 @@ def _per_env_table(d, skip: int, yaw_thresh: float) -> dict:
         vx_q=q_vx, q_n=q_n, cons=consistency,
         corr=c_vx_yaw, corr_delta=c_delta, corr_head=c_head,
         vx_a=float(vx_e[a].mean()) if a.sum() else float("nan"),
+        v_lon=lon_mean, lon_abs=lon_abs, lon_cons=lon_cons, v_lat=lat_mean,
         n_fall=int(((~alive[:, e]) & ~timeout[:, e]).sum()),
         n_to=int(timeout[:, e].sum()),
     ))
@@ -188,11 +207,12 @@ def main(argv=None) -> int:
         f"有效样本 {valid_rate * 100:.0f}%")
   print("-" * 78)
   print(f"{'env':>3} {'末|dx|':>7} {'Δy':>7} {'漂移比':>7} {'yaw末':>7} "
-        f"{'yaw总转':>7} {'安静vx':>8} {'同号':>5} {'c(vx,yaw)':>9} {'摔/超':>6}")
+        f"{'yaw总转':>7} {'安静vx':>8} {'v_lon':>8} {'同号':>5} {'c(vx,yaw)':>9} {'摔/超':>6}")
   for x in rows:
     print(f"{x['env']:>3} {x['dx']:>7.3f} {x['dy']:>7.3f} {x['ratio']:>7.3f} "
           f"{x['yaw_end']:>7.1f} {x['yaw_travel']:>7.1f} {x['vx_q']:>+8.4f} "
-          f"{x['cons']:>5.2f} {x['corr']:>+9.2f} {x['n_fall']:>3}/{x['n_to']:<2}")
+          f"{x['v_lon']:>+8.4f} {x['lon_cons']:>5.2f} {x['corr']:>+9.2f} "
+          f"{x['n_fall']:>3}/{x['n_to']:<2}")
   print("-" * 78)
 
   ratio = np.array([x["ratio"] for x in rows], dtype=float)
@@ -202,6 +222,10 @@ def main(argv=None) -> int:
   cons = np.array([x["cons"] for x in rows], dtype=float)
   qn = np.array([x["q_n"] for x in rows], dtype=float)
   c_head = np.array([x["corr_head"] for x in rows], dtype=float)
+  lon = np.array([x["v_lon"] for x in rows], dtype=float)
+  lon_abs = np.array([x["lon_abs"] for x in rows], dtype=float)
+  lon_cons = np.array([x["lon_cons"] for x in rows], dtype=float)
+  lat = np.array([x["v_lat"] for x in rows], dtype=float)
 
   def _m(a):
     return float(np.nanmean(a)) if np.isfinite(a).any() else float("nan")
@@ -211,10 +235,13 @@ def main(argv=None) -> int:
 
   p90 = np.nanpercentile(ratio, 90) if np.isfinite(ratio).any() else float("nan")
   print(f"漂移比 |dx|/Δy  : mean {_p(_m(ratio), '.3f')}  p90 {_p(p90, '.3f')}  m/m")
+  print(f"机身系 v_lon    : mean {_p(_m(lon), '+.4f')}  |v_lon| {_p(_m(lon_abs), '.4f')}  "
+        f"同号 {_p(_m(lon_cons), '.2f')}   <- 螃蟹步应为 0；B 类硬判据（不受偏航影响）")
+  print(f"机身系 v_lat    : mean {_p(_m(lat), '+.4f')}   <- 应 ≈ 指令 cmd_y")
   print(f"安静段 vx       : mean {_p(_m(vxq), '+.4f')}  |vx| {_p(_m(np.abs(vxq)), '.4f')} m/s "
-        f"(安静样本 {int(np.nansum(qn))})")
+        f"(安静样本 {int(np.nansum(qn))}，只有 {int((qn > 0).sum())}/{n_env} 个 env 有)")
   print(f"c(vx, yaw_rel)  : 每 env 均值 {_p(_m(corr))}  |c|>0.5 的 env "
-        f"{int(np.nansum(np.abs(corr) > 0.5))}/{n_env}   <- 主判别量")
+        f"{int(np.nansum(np.abs(corr) > 0.5))}/{n_env}")
   print(f"c(Δdx, Δyaw)    : 每 env 均值 {_p(_m(c_delta))}  "
         f"(原方案用的这个；差分会消掉慢变共模，即便完美耦合也接近 0，别拿它下结论)")
   print(f"c(速度方向,朝向) : {_p(_m(c_head))}  "
@@ -225,31 +252,39 @@ def main(argv=None) -> int:
         + ("   ← 一次没摔（超时是正常跑完，不是失败）" if n_fall == 0 else ""))
 
   # ---- 判定 ----
+  # 顺序很重要：v_lon 是**直接测量**（机身系分解，转着走也能量），先判它；
+  # corr 只作辅助——策略持续偏航时 corr 会被周期性 yaw 稀释，容易漏判。
   print("-" * 78)
-  abs_vxq = _m(np.abs(vxq))
   c_abs = abs(_m(corr))
-  if not np.isfinite(c_abs):
+  lon_abs_m = _m(lon_abs)
+  lon_cons_m = _m(lon_cons)
+  total_q = int(np.nansum(qn))
+
+  if not np.isfinite(c_abs) and not np.isfinite(lon_abs_m):
     verdict = "无法判定"
-    why = ("朝向或速度读不到（t≈0 且 yaw 恒定 / 全静止），c 全是 nan。"
-           "检查 _root_yaw 是否取到四元数、reset 后 yaw 是否落在 ±0.15 rad 内。")
+    why = ("朝向或速度读不到（t≈0 且 yaw 恒定 / 全静止）。检查 _root_yaw 是否取到四元数、"
+           "reset 后 yaw 是否落在 ±0.15 rad 内。")
   elif np.isfinite(ratio).all() and np.nanmax(ratio) < 0.08:
     verdict = "已达标"
     why = "漂移比 < 0.08，不需要改任何东西；把漂移比加进训练日志防回归即可。"
-  elif _m(qn) < 40:
-    verdict = "A（推定）"
-    why = "几乎没有「安静段」样本（策略一开局就在偏），无法分离步态项 -> 按 A 处理。"
-  elif c_abs > 0.5 and abs_vxq < 0.02:
-    verdict = "A 偏航耦合"
-    why = ("vx 与朝向强相关（|c|>0.5）而朝向没歪时 vx≈0 -> 横向偏移是偏航带出来的。"
-           "观测里没有 heading，改奖励治不好，必须补 heading 观测。")
-  elif c_abs < 0.3 and abs_vxq >= 0.02 and _m(cons) > 0.7:
+  elif np.isfinite(lon_abs_m) and lon_abs_m >= 0.02 and lon_cons_m >= 0.7:
     verdict = "B 步态/残差不对称"
-    why = ("朝向稳定时仍以固定符号横向漂移、且与朝向无关 -> 左右腿出力不等。"
-           "在奖励侧补 lin_vel_x_zero（lateral_drift 已有，但二次项在 0.2 m 处只有 -0.008/步，太弱）。")
+    why = (f"机身系纵向 |v_lon|={lon_abs_m:.3f} m/s、同号 {lon_cons_m:.2f} —— "
+           "朝向怎么转它都往机身前方的同一侧冲，这是步态本身的偏置，不是偏航带出来的。"
+           "先在奖励侧加 lin_vel_x_zero（lateral_drift 已有，但二次项在 0.2 m 处只有 "
+           "-0.00016/步，等于没有）。")
+  elif c_abs > 0.5:
+    verdict = "A 偏航耦合"
+    why = (f"v_lon 很小（{_p(lon_abs_m, '.3f')} m/s）但 vx 与朝向强相关（c={_m(corr):+.2f}）"
+           " -> 横向偏移是偏航带出来的。观测里没有 heading，改奖励治不好，必须补 heading 观测。")
+  elif total_q >= 100 and abs(_m(np.abs(vxq))) >= 0.02:
+    verdict = "B（弱）/ 混合"
+    why = (f"安静段 |vx|={abs(_m(np.abs(vxq))):.3f} m/s，但 c={_p(_m(corr))} 不够干净、"
+           f"v_lon 同号只有 {_p(lon_cons_m, '.2f')}。先按 B 试奖励侧，同时用 --push 排掉 C。")
   else:
-    verdict = "混合（A+B）或 C"
-    why = ("两个特征都不干净。先看 --push 那份报告：恢复慢 / 单向累积 -> C；"
-           "否则按 A 先补观测（观测缺失无法用奖励补偿）。")
+    verdict = "不明确"
+    why = ("没有单一特征占优。先看 --push 那份报告：恢复慢 / 单向累积 -> C；"
+           "否则优先补 heading 观测（观测缺失无法用奖励补偿）。")
 
   print(f"判定: {verdict}")
   print(f"依据: {why}")
