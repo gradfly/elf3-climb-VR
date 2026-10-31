@@ -250,7 +250,29 @@ def _terrain_types(base, n_env: int):
   return arr.astype(int)
 
 
-def _dump_foot(base, target: float = 0.15) -> None:
+def _read_sensor_raw(base, name: str):
+  """多路尝试拿传感器原始 data（mjlab 各版本属性名不同）。返回 (来源, 张量)。"""
+  cands = []
+  for tag, getter in (
+      ("scene.sensors[...]", lambda: base.scene.sensors[name]),
+      ("scene[...]", lambda: base.scene[name]),
+      ("sensor_manager[...]", lambda: base.sensor_manager[name]),
+  ):
+    try:
+      cands.append((tag, getter()))
+    except Exception:
+      pass
+  for tag, obj in cands:
+    for attr in ("data", "_data", "value", "values"):
+      v = getattr(obj, attr, None)
+      if torch.is_tensor(v):
+        return f"{tag}.{attr}", v
+    if torch.is_tensor(obj):
+      return tag, obj
+  return None, None
+
+
+def _dump_foot(base, cfg=None, target: float = 0.15) -> None:
   """打印足底传感器的原始读数，以及 swing_clearance 的每个因子。
 
   为什么要它：训练日志里 `air_time` / `foot_clearance` / `foot_swing_height` /
@@ -262,6 +284,39 @@ def _dump_foot(base, target: float = 0.15) -> None:
   from mjlab.tasks.velocity import mdp as vm
 
   print("-" * 62)
+
+  # ① 先看传感器本身在不在、有没有数。五项同时为 0 时，这是第一个要排除的。
+  names = None
+  try:
+    names = list(base.scene.sensors.keys())
+  except Exception:
+    pass
+  print(f"[foot] 场景传感器：{names if names else '读不到 scene.sensors'}")
+  for nm in ("foot_height_scan", "feet_ground_contact"):
+    tag, v = _read_sensor_raw(base, nm)
+    if v is None:
+      print(f"[foot] 原始 {nm}：❌ 读不到")
+    else:
+      try:
+        flat = v.reshape(v.shape[0], -1)[0]
+        sample = [round(float(x), 4) for x in flat[:8].tolist()]
+      except Exception:
+        sample = "（取样本失败）"
+      print(f"[foot] 原始 {nm}：{tag}  shape={tuple(v.shape)} dtype={v.dtype}  "
+            f"env0[:8]={sample}")
+
+  # ② 再看这些奖励项到底有没有被注册、权重是多少。
+  #    mjlab 对 weight==0 的项直接 continue（连 func 都不调用），日志里就是 0.0000。
+  #    这条能一步分开「权重被置 0」和「函数返回 0」。
+  if cfg is not None:
+    try:
+      for k, term in cfg.rewards.items():
+        if any(s in k for s in ("foot", "air", "swing")):
+          print(f"[foot] 奖励项 {k:<22s} weight={float(term.weight):+.2f} "
+                f"params={getattr(term, 'params', {})}")
+    except Exception as e:
+      print(f"[foot] 读奖励权重失败：{e!r}")
+
   h = c = None
   try:
     h = vm.foot_height(base, sensor_name="foot_height_scan")
@@ -662,7 +717,7 @@ def main(argv=None) -> int:
   if args.dump_foot:
     with torch.no_grad():
       obs = env.step(policy(obs))[0]      # 走一步，让接触/射线是新的一帧
-    _dump_foot(base)
+    _dump_foot(base, env_cfg)
 
   # ---- 轨迹记录（--trace）----
   # 只落盘、不判断；判定逻辑在分析脚本里（见 docs 执行清单 §4）。
