@@ -46,6 +46,9 @@ def _per_env_table(d, skip: int, yaw_thresh: float) -> dict:
   yaw = np.degrees(d["yaw_rel"] if "yaw_rel" in d else d["yaw"])
   vx, vy = d["vx"], d["vy"]
   alive = d["alive"].astype(bool)
+  # 训练配置 episode 固定 20 s，正常跑完也会 dones=True。不把超时剔除，
+  # 表里的"摔倒"就是把通关当成摔了 —— 尤其 1000 步正好等于一整段 episode。
+  timeout = d["timeout"].astype(bool) if "timeout" in d else np.zeros_like(alive)
   n_steps, n_env = dx.shape
 
   idx = np.arange(n_steps)[:, None]
@@ -109,7 +112,8 @@ def _per_env_table(d, skip: int, yaw_thresh: float) -> dict:
         vx_q=q_vx, q_n=q_n, cons=consistency,
         corr=c_vx_yaw, corr_delta=c_delta, corr_head=c_head,
         vx_a=float(vx_e[a].mean()) if a.sum() else float("nan"),
-        n_ep=int((~alive[:, e]).sum()),
+        n_fall=int(((~alive[:, e]) & ~timeout[:, e]).sum()),
+        n_to=int(timeout[:, e].sum()),
     ))
   return dict(rows=rows, valid=valid, end_dx=end_dx, end_dy=end_dy,
               ratio=ratio, quiet=quiet, n_env=n_env, dx=dx, dy=dy,
@@ -184,11 +188,11 @@ def main(argv=None) -> int:
         f"有效样本 {valid_rate * 100:.0f}%")
   print("-" * 78)
   print(f"{'env':>3} {'末|dx|':>7} {'Δy':>7} {'漂移比':>7} {'yaw末':>7} "
-        f"{'yaw总转':>7} {'安静vx':>8} {'同号':>5} {'c(vx,yaw)':>9} {'摔倒':>4}")
+        f"{'yaw总转':>7} {'安静vx':>8} {'同号':>5} {'c(vx,yaw)':>9} {'摔/超':>6}")
   for x in rows:
     print(f"{x['env']:>3} {x['dx']:>7.3f} {x['dy']:>7.3f} {x['ratio']:>7.3f} "
           f"{x['yaw_end']:>7.1f} {x['yaw_travel']:>7.1f} {x['vx_q']:>+8.4f} "
-          f"{x['cons']:>5.2f} {x['corr']:>+9.2f} {x['n_ep']:>4}")
+          f"{x['cons']:>5.2f} {x['corr']:>+9.2f} {x['n_fall']:>3}/{x['n_to']:<2}")
   print("-" * 78)
 
   ratio = np.array([x["ratio"] for x in rows], dtype=float)
@@ -215,6 +219,10 @@ def main(argv=None) -> int:
         f"(原方案用的这个；差分会消掉慢变共模，即便完美耦合也接近 0，别拿它下结论)")
   print(f"c(速度方向,朝向) : {_p(_m(c_head))}  "
         f"(|c|≈1 = 速度矢量跟着朝向转 = 策略在 heading 系里追指令)")
+  n_fall = int(sum(x["n_fall"] for x in rows))
+  n_to = int(sum(x["n_to"] for x in rows))
+  print(f"摔倒 / 超时     : {n_fall} / {n_to} 次"
+        + ("   ← 一次没摔（超时是正常跑完，不是失败）" if n_fall == 0 else ""))
 
   # ---- 判定 ----
   print("-" * 78)

@@ -620,6 +620,16 @@ def main(argv=None) -> int:
     if push_state["buf"] is not None:
       push_b = push_state["buf"].clone() & alive    # 只认存活步：reset 那步别混进来
 
+    # 区分「摔倒」和「超时」：训练配置 episode 固定 20 s，超时也会 dones=True，
+    # 不分开的话表里的"摔倒数"就是把正常跑完当成摔了。
+    timeout_b = torch.zeros(B, dtype=torch.bool, device=device)
+    _to = getattr(base, "reset_time_outs", None)
+    if torch.is_tensor(_to):
+      try:
+        timeout_b = _to.bool() & dones_b
+      except Exception:
+        pass
+
     p = _root_pos(base)[:, :2]
     d = (p - prev) / dt
     prev = p.clone()          # dones 那一步 prev 已是新出生点，下一步差分仍正确
@@ -676,6 +686,7 @@ def main(argv=None) -> int:
           ("ep_t", step_in_ep.to(torch.float32)),   # 本回合内第几步（跳过冷启动要按回合算）
           ("wz", wz_t), ("vx", d[:, 0]), ("vy", d[:, 1]),
           ("push", push_b),
+          ("timeout", timeout_b),
           ("alive", alive)):
         rec.setdefault(key, []).append(val.detach().clone())
 

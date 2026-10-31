@@ -209,9 +209,35 @@ rise 列3 n=8 : 0.126 m ...      ← hard 列，8~22 cm，梯度最明显
 ```
 
 - `rise 列3` 在 level 3/5/7 上单调上升（约 0.12 → 0.16 → 0.19）→ **P0 通过**，继续 §4。
-- 某一列三档几乎相同 → `--terrain-level` 在本版本上是空操作，**B0~B2 无意义**。
-  改走训练配置（`terrain_generator.curriculum=True`，行确实是难度梯度）：
-  **在 §4/§5 的每条命令后面加 `--train-env`**，其余完全不变。
+- 某一列三档几乎相同 → `--terrain-level` 在本版本上是空操作，见 3.1。
+
+### 3.1 实测结论（2026-10-31，32 env）：play 下 P0 **不通过**，改用 `--train-env`
+
+三档实测（`--num-envs 32 --steps 400`，每格是该列 `rise` 均值，单位 m）：
+
+| level | 列0 | 列1 | 列2 | 列3 | `rise=0.00` 占比 |
+|---|---|---|---|---|---|
+| 3 | 0.085 | 0.046 | 0.075 | 0.073 | 25%（8/32）|
+| 5 | 0.056 | 0.091 | 0.063 | 0.089 | 19%（6/32）|
+| 7 | 0.053 | 0.037 | 0.021 | 0.056 | 38%（12/32）|
+
+三条否决理由：
+
+1. **四列没有一列随 level 单调上升**，level 7 反而最平（列2：0.075→0.063→0.021）。
+2. **"列0"出现 0.19 / 0.22**，而配置里 flat 列的上限只有 2 cm。这在
+   `terrain_generator.curriculum=True` 的"列=类型"映射下不可能出现 —— 说明 play 里
+   `curriculum=False`（`env_cfg.py:421`）已经把列含义打乱了：每格地形类型独立抽样，
+   列均值是随机混合，跨 level 不可比。
+3. **`rise=0.00` 占比随 level 上升**，level 7 有 12/32 个 env 根本没检测到上升边
+   （摔/重置太多，一直在碗底）。
+
+还有个更根本的问题：play 每次 reset 都触发 `randomize_terrain`（`env_cfg.py:417`），
+**地形块本身会变**。就算 level 生效，跨回合的 dx 也不可比。
+
+**所以 §4/§5 一律加 `--train-env`**：训练配置里 `curriculum=True`（行=难度、列=类型，
+与 `terrain_cfg.py` 注释一致），且没有 `randomize_terrain`。
+代价是 episode 固定 20 s —— 脚本已记录 `timeout`，`analyze_trace.py` 会把超时从"摔倒"里
+剔除，不会把正常跑完当成摔。
 
 > **别用全 env 的 `rise_est.mean()` 判断**：`terrain_types` 是创建时随机分配、终身不变的，
 > 而各列的高度范围差一个量级（flat 0~2 cm、hard 8~22 cm）。32 个 env 里多抽到几个 hard，
@@ -231,12 +257,15 @@ for spec in "b1 3" "b0 5" "b2 7"; do
   echo "########## $name  (terrain-level $lvl)"
   .venv/bin/python scripts/diagnose_policy.py \
     --task "$TASK" --checkpoint "$CKPT" \
-    --num-envs 16 --steps 1000 --terrain-level $lvl \
+    --num-envs 16 --steps 1000 --terrain-level $lvl --train-env \
     --freeze-command $CMD \
     --trace /tmp/elf3_drift/trace_$name.npz \
     2>&1 | tee /tmp/elf3_drift/$name.log | tail -32
 done
 ```
+
+> `--train-env` 不是可选项：play 下 P0 已判不通过（§3.1）。它会把 episode 固定成 20 s，
+> 所以 `--steps 1000` 正好一整段，跑完记得看"摔倒/超时"是几个。
 
 **先看这一行**，它决定这批数据能不能用：
 
@@ -251,7 +280,7 @@ B3 只录一段看形态（跟拍机位，**看不出位移**，只看"整条斜
 ```bash
 .venv/bin/python scripts/diagnose_policy.py \
   --task "$TASK" --checkpoint "$CKPT" --num-envs 1 --steps 1000 \
-  --terrain-level 5 --freeze-command $CMD \
+  --terrain-level 5 --freeze-command $CMD --train-env \
   --record /tmp/elf3_drift/b3.mp4 --record-elev -35 --record-dist 3.5
 ```
 
@@ -262,15 +291,17 @@ B3 只录一段看形态（跟拍机位，**看不出位移**，只看"整条斜
 ```bash
 .venv/bin/python scripts/diagnose_policy.py \
   --task "$TASK" --checkpoint "$CKPT" \
-  --num-envs 16 --steps 1000 --terrain-level 5 \
+  --num-envs 16 --steps 1000 --terrain-level 5 --train-env \
   --freeze-command $CMD --push \
   --trace /tmp/elf3_drift/trace_b4.npz \
   2>&1 | tee /tmp/elf3_drift/b4.log | tail -32
 ```
 
-`--push` 把 play 里被 pop 掉的 `push_robot` 补回来（3~6 s 一次、x/y ±0.2 m/s、yaw ±0.1 rad/s，
-与 `_retune_safety` 参数一致），并**记录每次推挤发生在哪一步**——没有这个时间戳，
-"恢复时间"只能靠猜。
+`--push` 把扰动补回来（3~6 s 一次、x/y ±0.2 m/s、yaw ±0.1 rad/s，与 `_retune_safety` 参数一致），
+并**记录每次推挤发生在哪一步**——没有这个时间戳，"恢复时间"只能靠猜。
+
+> `--train-env` 下 `push_robot` 本来就在配置里（`_retune_safety` 已调成同样的 3~6 s / ±0.2），
+> 不加 `--push` 时脚本会主动 pop 掉；加了 `--push` 则换成带记录的包装版本。二者不冲突。
 
 ---
 
@@ -303,13 +334,15 @@ echo "########################## b4"
 
 ## 7. 基线表（执行后填写）
 
-| run | terrain | 漂移比 (m/m) | 安静段 vx | c(vx,yaw) | track_ratio | 摔倒 | sat | 结论 |
+| run | terrain | 漂移比 (m/m) | 安静段 vx | c(vx,yaw) | track_ratio | 摔/超 | sat | 结论 |
 |---|---|---|---|---|---|---|---|---|
 | B0 | 5 | | | | | | | |
 | B1 | 3 | | | | | | | |
 | B2 | 7 | | | | | | | |
 | B3 | 5（录像） | — | — | — | — | | — | 整条斜 / 每步蛇形 |
 | B4 | 5 + push | | | | | | | 恢复耗时 / 是否单向累积 |
+
+> 全部用 `--train-env`（§3.1）。`摔/超` 里超时是正常跑完，不是失败。
 
 交付物：上表 + 一句话判定（A / B / C）+ 一段录像。
 
@@ -336,13 +369,16 @@ echo "########################## b4"
 2. **α 必须对齐**：`ELF3_ALPHA` 是"固定"，续训要用 `ELF3_ALPHA_START`，别混。
 3. **录像机位**：`diagnose_policy.py --record` 是跟拍，机器人永远在画面中心，看不出位移。
    判"整条斜"用 `ELF3_VIEWER_ORIGIN=world` 的 play，或直接看漂移比。
-4. **16 个 env 的列不是均匀的**：`terrain_types`（flat/easy/mid/hard）创建时随机分配、终身不变。
-   脚本收尾已按 type 分组打印，组间差异大时**别只看总均值**。
+4. **16 个 env 的列不是均匀的**：`terrain_types`（flat/easy/mid/hard）创建时随机分配、终身不变，
+   各列高度范围差一个量级。**别拿全 env 的 `rise_est.mean()` 当难度判据** —— 它主要由
+   "这次抽到几个 hard" 决定，抖动 ±0.04 就盖过 level 3→7 的梯度。必须按列比。
 5. **`--terrain-level` 会禁用课程**（`_disable_curriculum`），这是刻意的，别去掉。
-6. **play 里每次 reset 都会 `randomize_terrain`**：摔倒重开后地形换了，跨回合的 dx 不可比。
-   摔得多的那档，漂移比可信度也低——先看摔倒次数。
+6. **play 里每次 reset 都会 `randomize_terrain`**：地形块本身会变，跨回合的 dx 不可比。
+   这也是 §4 改用 `--train-env` 的原因之一。
 7. **`--dump-scan` 不要和 `--trace` 同一次跑**：它内部会多走一步，trace 第 0 步会错位。
 8. **本轮不改 `train/mjlab_tasks/crab/*`**：改了奖励，基线就不可比了。
+9. **`--train-env` 下 episode 固定 20 s**，跑满会 `timeout` 而不是摔。脚本已记录 `timeout` 标记，
+   `analyze_trace.py` 的"摔倒/超时"是分开数的；自己另写脚本时别再拿 `dones` 当摔倒。
 
 ---
 
@@ -350,5 +386,5 @@ echo "########################## b4"
 
 | 文件 | 改动 |
 |---|---|
-| `scripts/diagnose_policy.py` | 新增 `--freeze-command`：三重冻结（ranges 钉常数 / `resampling_time_range` 置大 / 每步覆写指令张量）<br>新增 `--train-env`：P0 不通过时的退路<br>`--trace` 增记 `dy_ep` / `yaw_rel` / `ep_t` / `push`<br>收尾漂移比改成同基准，并按 `terrain_types` 分组 |
-| `scripts/analyze_trace.py` | 新增。判定 A/B/C；量纲修正；主判别量换 `corr(vx, yaw_rel)`；冷启动按回合屏蔽；推挤恢复分析 |
+| `scripts/diagnose_policy.py` | 新增 `--freeze-command`：三重冻结（ranges 钉常数 / `resampling_time_range` 置大 / 每步覆写指令张量）<br>新增 `--train-env`：play 的地形语义不可用时的主路径<br>`--trace` 增记 `dy_ep` / `yaw_rel` / `ep_t` / `push` / `timeout`<br>收尾漂移比改同基准；`rise/tread` 按 `terrain_types` 分列打印 |
+| `scripts/analyze_trace.py` | 新增。判定 A/B/C；量纲修正；主判别量换 `corr(vx, yaw_rel)`；冷启动按回合屏蔽；摔倒/超时分开数；推挤恢复分析 |
