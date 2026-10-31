@@ -553,11 +553,16 @@ move_up = (活到 5 s) & (dist >= min_dist)     # dist = 离出生点的水平�
 
 ```bash
 cd ~/elf3 && git pull --ff-only
-CKPT=$(ls -t logs/rsl_rl/elf3_crab/*/model_*.pt | head -1)
 ELF3_ALPHA=1.0 .venv/bin/train Elf3-Crab-Residual \
-  --agent.resume True --checkpoint-file "$CKPT" \
-  --agent.max-iterations 1500
+  --agent.resume True --agent.max-iterations 2000
 ```
+
+> ⚠️ **不要写 `--checkpoint-file`** —— 这版 CLI 没有这个参数，会直接
+> `Unrecognized options: --checkpoint-file`（`scripts/deploy_gpu.sh` 里打印的那行是错的，
+> 和 `train/README.md` §4.2 的实测命令矛盾，以 README 为准）。
+> `--agent.resume True` 自己去 `logs/rsl_rl/elf3_crab/` 找最新 run 的最新 checkpoint。
+> 要从**指定**的 checkpoint 起跑，先跑一次 `--help` 确认本版的字段名
+> （rsl_rl 通常叫 `--agent.load-run` / `--agent.checkpoint`），别猜。
 
 `α` 用**固定 1.0**（不要用 `ELF3_ALPHA_START`：那个是"从 X 继续升到 1"，α 已经满幅时没必要，
 而且和"固定"是两种语义，容易混）。
