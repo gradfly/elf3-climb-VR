@@ -250,6 +250,61 @@ def _terrain_types(base, n_env: int):
   return arr.astype(int)
 
 
+def _dump_foot(base, target: float = 0.15) -> None:
+  """打印足底传感器的原始读数，以及 swing_clearance 的每个因子。
+
+  为什么要它：训练日志里 `air_time` / `foot_clearance` / `foot_swing_height` /
+  `foot_slip` / `swing_clearance` 五项**同时恒为 0**，而 `Metrics/air_time_mean`
+  却是 0.09 —— 同一组接触传感器算出来的两个东西不可能一个活一个死。
+  这一条把原始读数和每个门控因子分开打，能直接定位是哪一环把结果乘成了 0：
+  传感器没数 / 射线没打中 / 脚一直着地 / 机身没直立。
+  """
+  from mjlab.tasks.velocity import mdp as vm
+
+  print("-" * 62)
+  h = c = None
+  try:
+    h = vm.foot_height(base, sensor_name="foot_height_scan")
+    print(f"[foot] foot_height  shape={tuple(h.shape)}  env0={[round(float(v), 4) for v in h[0].tolist()]}")
+  except Exception as e:
+    print(f"[foot] ❌ foot_height 调用失败：{e!r}")
+  try:
+    c = vm.foot_contact(base, sensor_name="feet_ground_contact")
+    print(f"[foot] foot_contact shape={tuple(c.shape)}  dtype={c.dtype}  env0={c[0].tolist()}")
+  except Exception as e:
+    print(f"[foot] ❌ foot_contact 调用失败：{e!r}")
+
+  try:
+    q = None
+    for name in ("root_link_quat_w", "root_quat_w"):
+      q = getattr(base.scene["robot"].data, name, None)
+      if q is not None:
+        break
+    if q is not None:
+      up_z = 1.0 - 2.0 * (q[:, 1] ** 2 + q[:, 2] ** 2)
+      print(f"[foot] up_z（机身竖直度，>0.6 才发钱）  mean {float(up_z.mean()):.3f} "
+            f"min {float(up_z.min()):.3f}  通过率 {(up_z > 0.6).float().mean() * 100:.0f}%")
+  except Exception as e:
+    print(f"[foot] up_z 读不到：{e!r}")
+
+  if h is not None and c is not None:
+    try:
+      hh = h.to(dtype=torch.float32)
+      valid = ((hh > 0.0) & (hh < 0.5)).to(hh.dtype)
+      lift = torch.clamp(hh / float(target), 0.0, 1.0) ** 2
+      swing = (~c).to(hh.dtype) if c.dtype == torch.bool else (1.0 - c.to(hh.dtype)).clamp(0, 1)
+      prod = (lift * swing * valid).mean(dim=-1)
+      print(f"[foot] 分解 env0：lift={[round(float(v), 4) for v in lift[0].tolist()]}  "
+            f"swing={[round(float(v), 2) for v in swing[0].tolist()]}  "
+            f"valid={[int(v) for v in valid[0].tolist()]}")
+      print(f"[foot] 该项当前值（未乘 weight）  mean {float(prod.mean()):.4f} "
+            f"max {float(prod.max()):.4f}  "
+            f"{'-> 恒 0，问题在上面某个因子' if float(prod.max()) == 0 else '-> 有值'}")
+    except Exception as e:
+      print(f"[foot] 分解失败：{e!r}")
+  print("-" * 62)
+
+
 def _dump_scan(base, term, env_i: int = 0) -> None:
   """把 height_scan 原样打印出来，用来判断地形估计链路到底断在哪一环。
 
@@ -323,6 +378,9 @@ def main(argv=None) -> int:
   ap.add_argument("--terrain-level", type=int, default=None,
                   help="钉住地形等级（0=平甲板；越大台阶越高）")
   ap.add_argument("--device", default=None)
+  ap.add_argument("--dump-foot", action="store_true",
+                  help="打印足底传感器原始读数 + swing_clearance 的每个因子，"
+                       "用于定位「五项足底奖励同时恒为 0」")
   ap.add_argument("--dump-scan", action="store_true",
                   help="打印 height_scan 原始高度场 + 估计器内部量，用于定位 rise 恒为 0")
   ap.add_argument("--dump-env", type=int, default=0, help="--dump-scan 打印哪个 env")
@@ -600,6 +658,11 @@ def main(argv=None) -> int:
     else:
       term._update_terrain()              # 不等 terrain_refresh_steps，强制刷新
       _dump_scan(base, term, args.dump_env)
+
+  if args.dump_foot:
+    with torch.no_grad():
+      obs = env.step(policy(obs))[0]      # 走一步，让接触/射线是新的一帧
+    _dump_foot(base)
 
   # ---- 轨迹记录（--trace）----
   # 只落盘、不判断；判定逻辑在分析脚本里（见 docs 执行清单 §4）。
