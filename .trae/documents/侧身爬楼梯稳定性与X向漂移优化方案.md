@@ -560,9 +560,17 @@ ELF3_ALPHA=1.0 .venv/bin/train Elf3-Crab-Residual \
 > ⚠️ **不要写 `--checkpoint-file`** —— 这版 CLI 没有这个参数，会直接
 > `Unrecognized options: --checkpoint-file`（`scripts/deploy_gpu.sh` 里打印的那行是错的，
 > 和 `train/README.md` §4.2 的实测命令矛盾，以 README 为准）。
-> `--agent.resume True` 自己去 `logs/rsl_rl/elf3_crab/` 找最新 run 的最新 checkpoint。
-> 要从**指定**的 checkpoint 起跑，先跑一次 `--help` 确认本版的字段名
-> （rsl_rl 通常叫 `--agent.load-run` / `--agent.checkpoint`），别猜。
+>
+> 本版真实字段（`--help` 实测）：
+>
+> | 参数 | 默认 | 含义 |
+> |---|---|---|
+> | `--agent.resume` | False | 是否续训 |
+> | `--agent.load-run` | `.*` | 要加载的 run 目录（正则） |
+> | `--agent.load-checkpoint` | `model_.*.pt` | 要加载的文件（正则，按字母序取最新的匹配） |
+>
+> 所以 `--agent.resume True` 单独用就是"最新 run 的最新 checkpoint"；
+> 要指定某个就是 `--agent.resume True --agent.load-run 2026-10-30_11-05-08 --agent.load-checkpoint model_7047.pt`。
 
 `α` 用**固定 1.0**（不要用 `ELF3_ALPHA_START`：那个是"从 X 继续升到 1"，α 已经满幅时没必要，
 而且和"固定"是两种语义，容易混）。

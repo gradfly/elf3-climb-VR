@@ -129,6 +129,17 @@ MUJOCO_GL=egl WANDB_MODE=disabled \
   --agent.max-iterations 3000 --agent.resume True
 ```
 
+指定某个 checkpoint（而不是"最新那个"）：
+
+```bash
+  --agent.resume True \
+  --agent.load-run 2026-10-30_11-05-08 \
+  --agent.load-checkpoint model_7047.pt
+```
+
+`--agent.load-run` 默认 `.*`、`--agent.load-checkpoint` 默认 `model_.*.pt`（正则，按字母序取最新匹配）。
+**没有 `--checkpoint-file` 这个参数**，写了会 `Unrecognized options`。
+
 三个**实测**结论（与直觉相反，别按累计理解）：
 
 - `--agent.max-iterations` 是**本次运行再跑多少轮**。从 800 轮的 checkpoint 续训写 2500，  

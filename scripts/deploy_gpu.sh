@@ -238,9 +238,9 @@ echo
 echo "    续训（注意：resume 会把速度/地形课程重置到起点）："
 echo "      WANDB_MODE=disabled PYTHONUNBUFFERED=1 train Elf3-Crab-Residual \\"
 echo "        --agent.resume True --env.scene.num-envs $NUM_ENVS --agent.max-iterations $ITERS"
-echo "      # 本版 CLI 没有 --checkpoint-file（旧文档写错了，会 Unrecognized options）。"
-echo "      # resume=True 自己去 logs/rsl_rl/elf3_crab/ 找最新 run 的最新 checkpoint。"
-echo "      # 要从指定文件起跑：train ... --help | grep -iE 'resume|load|checkpoint' 查真实字段名"
+echo "      # 默认 --agent.load-run '.*' + --agent.load-checkpoint 'model_.*.pt' -> 取最新 run 的最新文件"
+echo "      # 指定某个：--agent.load-run <run目录名> --agent.load-checkpoint <文件名>"
+echo "      # （没有 --checkpoint-file 这个参数，旧文档写错了）"
 echo
 echo "    回放 / 导出（在本地机器执行回传）："
 echo "      python train/export_onnx.py --task Elf3-Crab-Residual \\"
