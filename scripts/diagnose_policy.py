@@ -288,6 +288,10 @@ def main(argv=None) -> int:
                   help="俯仰角，负值=从上往下看（-45 即俯视 45°）")
   ap.add_argument("--record-azim", type=float, default=90.0,
                   help="绕机器人的方位角")
+  ap.add_argument("--trace", default=None, metavar="OUT.npz",
+                  help="逐步轨迹落盘（dx/dy/yaw/vx/vy），用于判定漂移属于哪一类")
+  ap.add_argument("--push", action="store_true",
+                  help="保留扰动（play 默认把 push_robot pop 掉了）")
   args = ap.parse_args(argv)
 
   import mjlab.tasks  # noqa: F401  触发任务注册
@@ -315,6 +319,23 @@ def main(argv=None) -> int:
     viewer = getattr(env_cfg, "viewer", None)
     if viewer is not None and hasattr(viewer, "env_idx"):
       viewer.env_idx = int(args.record_env)
+
+  if args.push:
+    # play 配置会 pop("push_robot")（env_cfg.py），评估抗扰漂移时在这里补回来。
+    # 幅度与 env_cfg_residual._retune_safety 一致：3~6 s 一次，x/y ±0.2 m/s，yaw ±0.1 rad/s。
+    from mjlab.managers.event_manager import EventTermCfg
+    from mjlab.tasks.velocity import mdp as vm
+    env_cfg.events["push_robot"] = EventTermCfg(
+        func=vm.push_by_setting_velocity,
+        mode="interval",
+        interval_range_s=(3.0, 6.0),
+        params={"velocity_range": {
+            "x": (-0.2, 0.2), "y": (-0.2, 0.2), "z": (-0.1, 0.1),
+            "roll": (-0.15, 0.15), "pitch": (-0.15, 0.15), "yaw": (-0.1, 0.1),
+        }},
+    )
+    print("[info] 已恢复扰动 push_robot（3~6 s / ±0.2 m/s / yaw ±0.1）")
+
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device,
                           render_mode="rgb_array" if args.record else None)
   env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
@@ -382,6 +403,7 @@ def main(argv=None) -> int:
   cmd_list: list[float] = []
   z_list: list[float] = []
   prev = _root_pos(base)[:, :2].clone()
+  x0 = _root_pos(base)[:, 0].clone()     # 本回合出生点 x（--trace 用，reset 那一步刷新）
   prev_yaw = _root_yaw(base)          # None 表示这个版本读不到四元数
   yaw_ok = _root_yaw_rate(base) is not None
   yaw_rate: list[float] = []          # 存活期 |ω_z|
@@ -403,6 +425,10 @@ def main(argv=None) -> int:
     else:
       term._update_terrain()              # 不等 terrain_refresh_steps，强制刷新
       _dump_scan(base, term, args.dump_env)
+
+  # ---- 轨迹记录（--trace）----
+  # 只落盘、不判断；判定逻辑在分析脚本里（见 docs 执行清单 §4）。
+  rec: dict[str, list] = {}
 
   for _ in range(args.steps):
     with torch.no_grad():
@@ -484,6 +510,19 @@ def main(argv=None) -> int:
     net_dy += torch.where(alive, d[:, 1] * dt, torch.zeros_like(net_dy))
     net_dx += torch.where(alive, d[:, 0] * dt, torch.zeros_like(net_dx))
 
+    if args.trace:
+      # reset 那一步 p 已是新出生点：先刷新 x0，于是该步 dx=0（且 alive=False，分析时会屏蔽）
+      if bool(dones_b.any()):
+        x0 = torch.where(dones_b, p[:, 0], x0)
+      yw_t = _root_yaw(base)
+      wz_t = _root_yaw_rate(base)
+      yw_t = torch.zeros(B, device=device) if yw_t is None else yw_t
+      wz_t = torch.zeros(B, device=device) if wz_t is None else wz_t
+      for key, val in (("dx", p[:, 0] - x0), ("dy", net_dy), ("yaw", yw_t),
+                       ("wz", wz_t), ("vx", d[:, 0]), ("vy", d[:, 1]),
+                       ("alive", alive)):
+        rec.setdefault(key, []).append(val.detach().clone())
+
     step_in_ep += 1
     if bool(dones_b.any()):
       for k in torch.nonzero(dones_b, as_tuple=False).flatten().tolist():
@@ -556,6 +595,30 @@ def main(argv=None) -> int:
   print(f"净 Δx 均值     : {float(net_dx.mean()):+.3f} m / {t_run:.1f}s "
         f"=> {float(net_dx.mean()) / t_run:+.3f} m/s")
   print(f"净 Δy 最差/最好: {float(net_dy.min()):+.2f} / {float(net_dy.max()):+.2f} m")
+
+  if args.trace and rec:
+    import os
+
+    import numpy as np
+    os.makedirs(os.path.dirname(os.path.abspath(args.trace)), exist_ok=True)
+    arrays = {k: np.stack([t.cpu().numpy() for t in v]) for k, v in rec.items()}
+    np.savez_compressed(args.trace, **arrays)
+
+    dx, dy, alive = arrays["dx"], arrays["dy"], arrays["alive"]
+    n_steps, n_env = dx.shape
+    idx = np.arange(n_steps)[:, None]
+    mask = alive & (idx > 60)          # 跳过冷启动 1.2 s
+    cnt = np.maximum(mask.sum(axis=0), 1)
+    mean_abs = (np.abs(dx) * mask).sum(axis=0) / cnt
+    end_dx = np.abs(dx[-1])
+    climbed = np.abs(dy[-1]) > 0.3
+    ratio = np.where(climbed, end_dx / np.maximum(np.abs(dy[-1]), 1e-3), np.nan)
+    print(f"[trace] 已保存      : {args.trace}  ({n_steps} 步 × {n_env} env)")
+    print(f"[trace] end |dx|     : mean {end_dx.mean():.3f} m  max {end_dx.max():.3f} m")
+    print(f"[trace] mean |dx|    : {mean_abs.mean():.3f} m")
+    if np.isfinite(ratio).any():
+      print(f"[trace] 漂移比        : mean {np.nanmean(ratio):.3f} m/m "
+            f"(p90 {np.nanpercentile(ratio, 90):.3f}，{int(climbed.sum())}/{n_env} env 爬过 0.3 m)")
   print("=" * 62)
   env.close()
   return 0
