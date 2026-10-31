@@ -90,6 +90,30 @@ def _root_yaw_rate(env):
   return None
 
 
+def _pin_command(base, vec, name: str = "twist") -> bool:
+  """把指令张量**就地**写死。
+
+  为什么要这一步：`UniformVelocityCommand` 每 3~8 s 会 `_resample_command` 一次，
+  而且 play 配置为了 viser 滑块把 `lin_vel_x` 放宽到 (0, 0.1)、`ang_vel_z` 放宽到
+  (0, 0.1)。测 X 向漂移时这两条都必须在**结构上**关掉，不能靠"记得别开"。
+  这里 cfg 层已经把范围钉成常数，函数内再每步覆写一次，防止别的版本仍在重采样。
+  """
+  try:
+    term = base.command_manager.get_term(name)
+  except Exception:
+    return False
+  for attr in ("command", "_command", "vel_command", "cmd"):
+    t = getattr(term, attr, None)
+    if torch.is_tensor(t) and t.dim() == 2 and t.shape[-1] >= vec.numel():
+      try:
+        # 只写前 3 列：有的版本指令是 (N,4)（多一个 heading），末尾那列留着不动。
+        t[:, :vec.numel()] = vec
+        return True
+      except Exception:
+        continue
+  return False
+
+
 def _disable_curriculum(base) -> None:
   """把课程计算哑掉。
 
@@ -290,8 +314,16 @@ def main(argv=None) -> int:
                   help="绕机器人的方位角")
   ap.add_argument("--trace", default=None, metavar="OUT.npz",
                   help="逐步轨迹落盘（dx/dy/yaw/vx/vy），用于判定漂移属于哪一类")
+  ap.add_argument("--freeze-command", type=float, default=None, metavar="V_Y",
+                  help="把速度指令钉死为 (0, V_Y, 0)：不重采样、不站立、不转向。"
+                       "**测 X 向漂移必须开**——play 配置里 lin_vel_x=(0,0.1)、"
+                       "ang_vel_z=(0,0.1) 会被随机采样，否则净 Δx 主要是指令驱动的")
   ap.add_argument("--push", action="store_true",
                   help="保留扰动（play 默认把 push_robot pop 掉了）")
+  ap.add_argument("--train-env", action="store_true",
+                  help="用训练配置（play=False）建环境，而不是 play 配置。"
+                       "只有当 --terrain-level 在本版本上不改变地形高度时才需要它"
+                       "（训练配置的 terrain_generator.curriculum=True，行=难度梯度）")
   args = ap.parse_args(argv)
 
   import mjlab.tasks  # noqa: F401  触发任务注册
@@ -302,7 +334,7 @@ def main(argv=None) -> int:
   device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
 
   try:
-    env_cfg = load_env_cfg(args.task, play=True)
+    env_cfg = load_env_cfg(args.task, play=not args.train_env)
     agent_cfg = load_rl_cfg(args.task)
   except KeyError:
     from mjlab.tasks.registry import list_tasks
@@ -313,6 +345,20 @@ def main(argv=None) -> int:
     return 2
 
   env_cfg.scene.num_envs = args.num_envs
+  if args.train_env:
+    # 训练配置自带观测噪声和 push_robot（_retune_safety 已把它调成 3~6 s / ±0.2）。
+    # 量化漂移时这两样都不是我们要测的变量：噪声关掉，push 按需保留。
+    try:
+      env_cfg.observations["actor"].enable_corruption = False
+    except Exception as e:
+      print(f"[warn] 关观测噪声失败（{e}），数字会带一点噪声抖动")
+    if not args.push:
+      try:
+        env_cfg.events.pop("push_robot", None)
+      except Exception:
+        pass
+    print("[info] 使用训练配置（play=False）：episode 20 s、无观测噪声、"
+          f"{'保留' if args.push else '去掉'} push_robot")
   if args.record:
     # 离屏渲染器只画主 env（cfg.viewer.env_idx），跟踪相机跟的也是这一份数据。
     # 不同步的话 `--record-env 2` 会录成「镜头对着 env2、画面里是 env0 的空地」。
@@ -320,13 +366,58 @@ def main(argv=None) -> int:
     if viewer is not None and hasattr(viewer, "env_idx"):
       viewer.env_idx = int(args.record_env)
 
+  if args.trace and args.freeze_command is None:
+    print("[warn] 开了 --trace 但没冻结指令。play 配置里 lin_vel_x=(0,0.1)、"
+          "ang_vel_z=(0,0.1)，20 s 内净 Δx 平均 ~+0.05 m/s、偏航 ~+0.05 rad/s，"
+          "量到的全是指令，不是漂移。加 --freeze-command 0.17 再跑。")
+
+  if args.freeze_command is not None:
+    # 三层保险：范围钉成常数 / 不重采样 / 不抽站立 env。函数内每步还会再覆写一次。
+    tw = env_cfg.commands["twist"]
+    v = float(args.freeze_command)
+    for k, val in (("lin_vel_x", (0.0, 0.0)),
+                   ("lin_vel_y", (v, v)),
+                   ("ang_vel_z", (0.0, 0.0))):
+      try:
+        setattr(tw.ranges, k, val)
+      except Exception as e:
+        print(f"[warn] 冻结指令：ranges.{k} 设置失败（{e}）")
+    for k, val in (("resampling_time_range", (1e9, 1e9)),
+                   ("rel_standing_envs", 0.0)):
+      try:
+        setattr(tw, k, val)
+      except Exception as e:
+        print(f"[warn] 冻结指令：{k} 设置失败（{e}）")
+    print(f"[info] 指令已冻结为 (0, {v}, 0)：不重采样 / 不站立 / 不转向")
+
+  push_state: dict[str, object] = {"buf": None}
   if args.push:
     # play 配置会 pop("push_robot")（env_cfg.py），评估抗扰漂移时在这里补回来。
     # 幅度与 env_cfg_residual._retune_safety 一致：3~6 s 一次，x/y ±0.2 m/s，yaw ±0.1 rad/s。
+    #
+    # 另外包一层记录：哪一步、哪些 env 被推了。没有这个时间戳，「恢复时间」就只能靠猜
+    # （每 3~6 s 推一次、方向随机，事后无法把某段 dx 归因到某次推挤）。
     from mjlab.managers.event_manager import EventTermCfg
     from mjlab.tasks.velocity import mdp as vm
+    _orig_push = vm.push_by_setting_velocity
+
+    def _logged_push(*a, **k):
+      buf = push_state["buf"]
+      if buf is not None:
+        ids = k.get("env_ids")
+        if ids is None and len(a) > 1:
+          ids = a[1]
+        try:
+          if ids is None:
+            buf[:] = True
+          else:
+            buf[torch.as_tensor(ids, device=buf.device).long()] = True
+        except Exception:
+          pass
+      return _orig_push(*a, **k)
+
     env_cfg.events["push_robot"] = EventTermCfg(
-        func=vm.push_by_setting_velocity,
+        func=_logged_push,
         mode="interval",
         interval_range_s=(3.0, 6.0),
         params={"velocity_range": {
@@ -334,7 +425,7 @@ def main(argv=None) -> int:
             "roll": (-0.15, 0.15), "pitch": (-0.15, 0.15), "yaw": (-0.1, 0.1),
         }},
     )
-    print("[info] 已恢复扰动 push_robot（3~6 s / ±0.2 m/s / yaw ±0.1）")
+    print("[info] 已恢复扰动 push_robot（3~6 s / ±0.2 m/s / yaw ±0.1），并记录推力时刻")
 
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device,
                           render_mode="rgb_array" if args.record else None)
@@ -342,6 +433,19 @@ def main(argv=None) -> int:
   base = _unwrap(env)
   B = base.num_envs
   dt = float(getattr(base, "step_dt", 0.02))
+
+  if push_state["buf"] is None and args.push:
+    push_state["buf"] = torch.zeros(B, dtype=torch.bool, device=device)
+
+  frozen_vec = None
+  if args.freeze_command is not None:
+    frozen_vec = torch.tensor([0.0, float(args.freeze_command), 0.0], device=device)
+
+  def _pin():
+    """在当前 obs 生成前把指令写死；返回是否成功。"""
+    if frozen_vec is None:
+      return True
+    return _pin_command(base, frozen_vec)
 
   if args.zero or not args.checkpoint:
     if not args.zero:
@@ -383,6 +487,16 @@ def main(argv=None) -> int:
     else:
       print("[warn] 这个版本拿不到 terrain_levels，按默认等级 0 跑")
 
+  if not _pin():
+    print("[warn] 拿不到 twist 指令项，--freeze-command 没生效（cmd 仍会被随机采样）")
+  elif frozen_vec is not None:
+    try:
+      cm = base.command_manager.get_command("twist")
+      print(f"[info] 冻结后实测 cmd（env0）= {[round(float(x), 4) for x in cm[0].tolist()]}"
+            f" / 各 env 均值 {[round(float(x), 4) for x in cm.mean(0).tolist()]}")
+    except Exception:
+      pass
+
   cam = None
   cam_tracks = False
   if args.record:
@@ -404,7 +518,9 @@ def main(argv=None) -> int:
   z_list: list[float] = []
   prev = _root_pos(base)[:, :2].clone()
   x0 = _root_pos(base)[:, 0].clone()     # 本回合出生点 x（--trace 用，reset 那一步刷新）
+  y0 = _root_pos(base)[:, 1].clone()     # 本回合出生点 y（漂移比的分母，必须同基准）
   prev_yaw = _root_yaw(base)          # None 表示这个版本读不到四元数
+  yaw0 = prev_yaw.clone() if prev_yaw is not None else torch.zeros(B, device=device)
   yaw_ok = _root_yaw_rate(base) is not None
   yaw_rate: list[float] = []          # 存活期 |ω_z|
   yaw_travel = torch.zeros(B, device=device)   # 每 env 累计 |Δyaw|（rad）
@@ -431,6 +547,9 @@ def main(argv=None) -> int:
   rec: dict[str, list] = {}
 
   for _ in range(args.steps):
+    _pin()                       # 每步写回：防某些版本的 compute() 仍在重采样
+    if push_state["buf"] is not None:
+      push_state["buf"].zero_()  # 清标记，step 内部若触发 interval 事件会置 True
     with torch.no_grad():
       actions = policy(obs)
 
@@ -474,6 +593,10 @@ def main(argv=None) -> int:
     dones_b = dones.bool()
     alive = ~dones_b
 
+    push_b = torch.zeros(B, dtype=torch.bool, device=device)
+    if push_state["buf"] is not None:
+      push_b = push_state["buf"].clone() & alive    # 只认存活步：reset 那步别混进来
+
     p = _root_pos(base)[:, :2]
     d = (p - prev) / dt
     prev = p.clone()          # dones 那一步 prev 已是新出生点，下一步差分仍正确
@@ -511,16 +634,26 @@ def main(argv=None) -> int:
     net_dx += torch.where(alive, d[:, 0] * dt, torch.zeros_like(net_dx))
 
     if args.trace:
-      # reset 那一步 p 已是新出生点：先刷新 x0，于是该步 dx=0（且 alive=False，分析时会屏蔽）
+      # reset 那一步 p 已是新出生点：先刷新基线，于是该步 dx=dy=0（且 alive=False，分析时会屏蔽）
+      yw_t = _root_yaw(base)
+      yw_t = torch.zeros(B, device=device) if yw_t is None else yw_t
+      wz_t = _root_yaw_rate(base)
+      wz_t = torch.zeros(B, device=device) if wz_t is None else wz_t
       if bool(dones_b.any()):
         x0 = torch.where(dones_b, p[:, 0], x0)
-      yw_t = _root_yaw(base)
-      wz_t = _root_yaw_rate(base)
-      yw_t = torch.zeros(B, device=device) if yw_t is None else yw_t
-      wz_t = torch.zeros(B, device=device) if wz_t is None else wz_t
-      for key, val in (("dx", p[:, 0] - x0), ("dy", net_dy), ("yaw", yw_t),
-                       ("wz", wz_t), ("vx", d[:, 0]), ("vy", d[:, 1]),
-                       ("alive", alive)):
+        y0 = torch.where(dones_b, p[:, 1], y0)
+        yaw0 = torch.where(dones_b, yw_t, yaw0)      # 初值 yaw 是 ±0.15 rad 随机的，必须扣除
+      yaw_rel = torch.atan2(torch.sin(yw_t - yaw0), torch.cos(yw_t - yaw0))
+      for key, val in (
+          ("dx", p[:, 0] - x0),      # 本回合 X 偏移（世界系）
+          ("dy_ep", p[:, 1] - y0),   # 本回合 Y 位移 —— 漂移比的分母，与 dx 同基准
+          ("dy", net_dy),            # 跨回合累计 Y（老字段，保留兼容）
+          ("yaw", yw_t),             # 世界系绝对 yaw
+          ("yaw_rel", yaw_rel),      # 相对本回合出生朝向（判定用这个）
+          ("ep_t", step_in_ep.to(torch.float32)),   # 本回合内第几步（跳过冷启动要按回合算）
+          ("wz", wz_t), ("vx", d[:, 0]), ("vy", d[:, 1]),
+          ("push", push_b),
+          ("alive", alive)):
         rec.setdefault(key, []).append(val.detach().clone())
 
     step_in_ep += 1
@@ -590,6 +723,14 @@ def main(argv=None) -> int:
     print(f"基座 z         : {z_list[0]:.3f} -> {z_list[-1]:.3f} m "
           f"(Δ{z_list[-1] - z_list[0]:+.3f}；爬上台阶会升高)")
   t_run = args.steps * dt
+  if frozen_vec is not None:
+    try:
+      cm = base.command_manager.get_command("twist").mean(0)
+      ok_cmd = abs(float(cm[0])) < 1e-6 and abs(float(cm[2])) < 1e-6
+      print(f"指令 cmd       : x {float(cm[0]):+.3f} / y {float(cm[1]):+.3f} / wz {float(cm[2]):+.3f}"
+            f"  {'✅ 已冻结（Δx 不含指令成分）' if ok_cmd else '❌ 没冻住，下面的 Δx 不可用'}")
+    except Exception:
+      pass
   print(f"净 Δy 均值     : {float(net_dy.mean()):+.3f} m / {t_run:.1f}s "
         f"=> {float(net_dy.mean()) / t_run:+.3f} m/s")
   print(f"净 Δx 均值     : {float(net_dx.mean()):+.3f} m / {t_run:.1f}s "
@@ -604,21 +745,61 @@ def main(argv=None) -> int:
     arrays = {k: np.stack([t.cpu().numpy() for t in v]) for k, v in rec.items()}
     np.savez_compressed(args.trace, **arrays)
 
-    dx, dy, alive = arrays["dx"], arrays["dy"], arrays["alive"]
+    dx, alive = arrays["dx"], arrays["alive"]
+    dy_ep = arrays["dy_ep"] if "dy_ep" in arrays else arrays["dy"]
     n_steps, n_env = dx.shape
     idx = np.arange(n_steps)[:, None]
     mask = alive & (idx > 60)          # 跳过冷启动 1.2 s
     cnt = np.maximum(mask.sum(axis=0), 1)
     mean_abs = (np.abs(dx) * mask).sum(axis=0) / cnt
-    end_dx = np.abs(dx[-1])
-    climbed = np.abs(dy[-1]) > 0.3
-    ratio = np.where(climbed, end_dx / np.maximum(np.abs(dy[-1]), 1e-3), np.nan)
+
+    # 「末值」取每个 env 最后一个存活步：直接取 dx[-1] 会撞上 reset 步（那一步 dx 被清零）
+    last = np.where(mask, np.broadcast_to(idx, dx.shape), -1).max(axis=0)
+    ok = last >= 0
+    last_c = np.clip(last, 0, n_steps - 1)
+    cols = np.arange(n_env)
+    end_dx = np.where(ok, np.abs(dx[last_c, cols]), np.nan)
+    end_dy = np.where(ok, np.abs(dy_ep[last_c, cols]), np.nan)
+    ratio = np.where(end_dy > 0.05, end_dx / np.maximum(end_dy, 1e-3), np.nan)
+
     print(f"[trace] 已保存      : {args.trace}  ({n_steps} 步 × {n_env} env)")
-    print(f"[trace] end |dx|     : mean {end_dx.mean():.3f} m  max {end_dx.max():.3f} m")
-    print(f"[trace] mean |dx|    : {mean_abs.mean():.3f} m")
+
+    def _nm(a):
+      """nanmean，但全 NaN 时不喷 RuntimeWarning。"""
+      a = np.asarray(a, dtype=float)
+      return float(np.nanmean(a)) if np.isfinite(a).any() else float("nan")
+
+    fin = end_dx[np.isfinite(end_dx)]
+    max_dx = float(fin.max()) if fin.size else float("nan")
+    print(f"[trace] 末 |dx|      : mean {_nm(end_dx):.3f} m  max {max_dx:.3f} m")
+    print(f"[trace] mean |dx|     : mean {mean_abs.mean():.3f} m")
     if np.isfinite(ratio).any():
-      print(f"[trace] 漂移比        : mean {np.nanmean(ratio):.3f} m/m "
-            f"(p90 {np.nanpercentile(ratio, 90):.3f}，{int(climbed.sum())}/{n_env} env 爬过 0.3 m)")
+      print(f"[trace] 漂移比 |dx|/Δy: mean {_nm(ratio):.3f} m/m "
+            f"(p90 {np.nanpercentile(ratio, 90):.3f}，{int(np.isfinite(ratio).sum())}/{n_env} env 走过 >5cm)")
+    else:
+      print("[trace] 漂移比        : 分母全是 0（这些 env 根本没侧移，先看 track_ratio）")
+
+    # 按地形类型分组：16 env 的列（flat/easy/mid/hard）是终身随机分配的，
+    # 不分组的话 4 种台阶混在一个均值里，看起来像"漂移"，其实是"难度不同"。
+    ttypes = None
+    try:
+      ttypes = np.asarray(base.scene.terrain.terrain_types.detach().cpu()).ravel()
+    except Exception:
+      try:
+        ttypes = np.asarray(base.scene.terrain.terrain_types).ravel()
+      except Exception:
+        pass
+    if ttypes is not None and ttypes.shape[0] == n_env:
+      print(f"[trace] terrain_types : {ttypes.astype(int).tolist()}")
+      for t in sorted(set(ttypes.astype(int).tolist())):
+        sel = ttypes.astype(int) == t
+        if sel.sum() == 0:
+          continue
+        print(f"[trace]   type {t} (n={int(sel.sum()):2d}) : "
+              f"末|dx| {_nm(end_dx[sel]):.3f} m / "
+              f"漂移比 {_nm(ratio[sel]):.3f} m/m / "
+              f"Δy {_nm(end_dy[sel]):.3f} m")
+    print(f"[trace] 深度分析请跑: python scripts/analyze_trace.py {args.trace}")
   print("=" * 62)
   env.close()
   return 0
