@@ -235,8 +235,8 @@ def main(argv=None) -> int:
 
   p90 = np.nanpercentile(ratio, 90) if np.isfinite(ratio).any() else float("nan")
   print(f"漂移比 |dx|/Δy  : mean {_p(_m(ratio), '.3f')}  p90 {_p(p90, '.3f')}  m/m")
-  print(f"机身系 v_lon    : mean {_p(_m(lon), '+.4f')}  |v_lon| {_p(_m(lon_abs), '.4f')}  "
-        f"同号 {_p(_m(lon_cons), '.2f')}   <- 螃蟹步应为 0；B 类硬判据（不受偏航影响）")
+  print(f"机身系 v_lon    : 偏置 {_p(_m(lon), '+.4f')}  (逐帧 |v_lon| {_p(_m(lon_abs), '.4f')}，"
+        f"同号 {_p(_m(lon_cons), '.2f')})   <- 螃蟹步应≈0；B 类硬判据（不受偏航影响）")
   print(f"机身系 v_lat    : mean {_p(_m(lat), '+.4f')}   <- 应 ≈ 指令 cmd_y")
   print(f"安静段 vx       : mean {_p(_m(vxq), '+.4f')}  |vx| {_p(_m(np.abs(vxq)), '.4f')} m/s "
         f"(安静样本 {int(np.nansum(qn))}，只有 {int((qn > 0).sum())}/{n_env} 个 env 有)")
@@ -257,25 +257,27 @@ def main(argv=None) -> int:
   print("-" * 78)
   c_abs = abs(_m(corr))
   lon_abs_m = _m(lon_abs)
+  lon_bias = _m(lon)        # 带符号的整周期均值才是"偏置"；|v_lon| 是步态摆动幅度
   lon_cons_m = _m(lon_cons)
   total_q = int(np.nansum(qn))
 
-  if not np.isfinite(c_abs) and not np.isfinite(lon_abs_m):
+  if not np.isfinite(c_abs) and not np.isfinite(lon_bias):
     verdict = "无法判定"
     why = ("朝向或速度读不到（t≈0 且 yaw 恒定 / 全静止）。检查 _root_yaw 是否取到四元数、"
            "reset 后 yaw 是否落在 ±0.15 rad 内。")
   elif np.isfinite(ratio).all() and np.nanmax(ratio) < 0.08:
     verdict = "已达标"
     why = "漂移比 < 0.08，不需要改任何东西；把漂移比加进训练日志防回归即可。"
-  elif np.isfinite(lon_abs_m) and lon_abs_m >= 0.02 and lon_cons_m >= 0.7:
+  elif np.isfinite(lon_bias) and abs(lon_bias) >= 0.02:
     verdict = "B 步态/残差不对称"
-    why = (f"机身系纵向 |v_lon|={lon_abs_m:.3f} m/s、同号 {lon_cons_m:.2f} —— "
-           "朝向怎么转它都往机身前方的同一侧冲，这是步态本身的偏置，不是偏航带出来的。"
-           "先在奖励侧加 lin_vel_x_zero（lateral_drift 已有，但二次项在 0.2 m 处只有 "
-           "-0.00016/步，等于没有）。")
+    why = (f"机身系纵向**偏置** {lon_bias:+.3f} m/s（逐帧 |v_lon| 有 {lon_abs_m:.3f}，那是步态摆动，"
+           f"不算病）；同号 {lon_cons_m:.2f}。朝向怎么转它都往机身前/后同一个方向净漂 —— "
+           f"这是步态自带的偏置，不是偏航带出来的。"
+           "在奖励侧加 `X.lateral_bias`（一个周期平均后的纵向偏置项），"
+           "`lateral_drift` 的二次项在 0.2 m 处只有 -0.00016/步，等于没有。")
   elif c_abs > 0.5:
     verdict = "A 偏航耦合"
-    why = (f"v_lon 很小（{_p(lon_abs_m, '.3f')} m/s）但 vx 与朝向强相关（c={_m(corr):+.2f}）"
+    why = (f"v_lon 偏置很小（{_p(lon_bias, '+.3f')} m/s）但 vx 与朝向强相关（c={_m(corr):+.2f}）"
            " -> 横向偏移是偏航带出来的。观测里没有 heading，改奖励治不好，必须补 heading 观测。")
   elif total_q >= 100 and abs(_m(np.abs(vxq))) >= 0.02:
     verdict = "B（弱）/ 混合"

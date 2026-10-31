@@ -177,6 +177,15 @@ def _rebuild_rewards(cfg) -> None:
     # 相对单回合回报 ~75 分够痛但不主导；0.1 rad/s 只 -0.015/步，不干扰正常步态。
     r["yaw_drift"] = RewardTermCfg(func=X.yaw_drift, weight=-1.5, params={})
     r["lateral_drift"] = RewardTermCfg(func=X.lateral_drift, weight=-0.2, params={})
+    # 2026-10-31：X 向漂移实测判定为 **B（步态不对称）**。证据：三档（L3/L5/L7）机身系
+    # 纵向速度的整周期均值都是 +0.10~0.13 m/s，是侧向指令(0.17)的 60%，且与难度无关；
+    # 而 corr(vx, yaw) 只有 -0.20~-0.40（A 的证据很弱）。
+    # 上面那条 lateral_drift 是 (x-x0)²，0.2 m 处每步只 -0.00016 分（回合 -0.003），
+    # 等于没罚，所以补这一条：EMA(一个周期) 后的纵向偏置，死区 0.03 放过正常摆动。
+    # 权重标定见 mdp_extra.lateral_bias 的 docstring：0.10 m/s -> 约 -4.7/回合。
+    r["lateral_bias"] = RewardTermCfg(
+        func=X.lateral_bias, weight=-80.0, params={"tau": 1.8, "deadzone": 0.03},
+    )
     # ⚠️ 奖励按 dt 缩放：一次性惩罚实际值 = weight × 0.02。
     # 原来 −5 只等于每次摔倒扣 0.1 分，而当时一个 episode 回报 ~10 分 ——
     # 摔倒几乎免费，策略自然选择"用速度换摔"。−150 时小回合 ≈ 30%。

@@ -212,6 +212,71 @@ def lateral_drift(env) -> torch.Tensor:
     return (x - env._crab_x0) ** 2
 
 
+def lateral_bias(env, tau: float = 1.8, deadzone: float = 0.03) -> torch.Tensor:
+    """机身系纵向速度的**一个步态周期平均**，超过门限后平方 —— 只罚偏置，不罚迈步。
+
+    为什么需要它（2026-10-31 实测）
+    ------------------------------
+    三个难度档位跑 16 env × 20 s，机身系纵向速度的整周期均值都是 **+0.10 m/s**
+    （L3 +0.125 / L5 +0.098 / L7 +0.109），是侧向指令 0.17 的 60%，且**与地形无关**
+    —— 这是步态自带的偏置，不是台阶几何造成的。逐帧 |v_lon| 有 0.18，但那是正常
+    摆动（参考步态 COM 是脉冲式，v_y 峰值 1.618、26% 帧倒退），不能拿来罚。
+
+    为什么不能用现有的 `lateral_drift`
+    --------------------------------
+    它是 `(x-x0)²`、权重 -0.2：0.2 m 偏移时每步只 -0.00016 分，整个回合 -0.003 分，
+    量级太小等于没罚。而且它罚的是"已经漂出去的位移"，梯度在起点最弱；
+    纵向偏置是**每步都在产生**的，直接在速度层罚更早、更线性。
+
+    为什么用 EMA + 死区
+    -------------------
+    逐帧罚会重罚正常迈步，把策略逼回匀速蹭走（`track_linear_velocity` 的老毛病，
+    见 forward_progress_y 的注释）。tau=1.8 s 正好一个步态周期，把"冲-停-退"平均掉，
+    剩下的才是净偏置。deadzone=0.03 m/s 放过正常残余摆动。
+
+    标定（正奖励约 50~75 分/回合，回合 ≈ 600 步）
+    --------------------------------------------
+        |偏置| = 0.03 -> 0                      （不罚）
+        |偏置| = 0.10 -> (0.07)²=0.0049 -> 每步 -0.49×wt/100  …
+        取 weight=-80：0.10 -> -0.39/步 -> -4.7/回合（约 7%，够形成梯度不主导）
+                       0.20 -> -2.31/步 -> -27.7/回合（约 40%，明确压制）
+    """
+    pos = _root_pos(env)[:, :2]
+    prev = getattr(env, "_crab_prev_xy", None)
+    if prev is None or prev.shape != pos.shape:
+        env._crab_prev_xy = pos.clone()
+        return torch.zeros(env.num_envs, device=pos.device)
+
+    dt = float(getattr(env, "step_dt", 0.02))
+    v_w = (pos - prev) / max(dt, 1e-6)
+    env._crab_prev_xy = pos.clone()
+
+    try:
+        q = _root_quat(env)
+        w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+        yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    except Exception:
+        yaw = torch.zeros(env.num_envs, device=pos.device)
+
+    # 世界系 -> 机身系：机身 +X 方向 = (cos yaw, sin yaw)
+    v_lon = v_w[:, 0] * torch.cos(yaw) + v_w[:, 1] * torch.sin(yaw)
+
+    a = 1.0 - math.exp(-dt / max(float(tau), 1e-6))
+    ema = getattr(env, "_crab_vlon_ema", None)
+    if ema is None or ema.shape != v_lon.shape:
+        ema = v_lon.clone()
+    ema = ema + a * (v_lon - ema)
+
+    # reset 那一步位置会跳好几个米（换地形块），EMA 必须丢掉这个样本
+    if hasattr(env, "episode_length_buf"):
+        rst = env.episode_length_buf <= 1
+        if bool(rst.any()):
+            ema = torch.where(rst, torch.zeros_like(ema), ema)
+    env._crab_vlon_ema = ema.clone()
+
+    return torch.clamp(ema.abs() - float(deadzone), min=0.0) ** 2
+
+
 def is_terminated(env) -> torch.Tensor:
     """终止标志（一次性惩罚用）。字段名随版本不同，取不到就返回 0。"""
     for name in ("reset_terminated", "reset_buf", "terminated"):
