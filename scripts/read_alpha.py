@@ -38,6 +38,10 @@ def main() -> int:
   ap.add_argument("--tag", default=TAG, help=f"默认 {TAG}")
   ap.add_argument("--stat", action="store_true",
                   help="打印整条曲线的 min/mean/max/末值（判断某个指标是不是恒 0 时用）")
+  ap.add_argument("--list", action="store_true",
+                  help="列出这个 run 里所有 scalar tag（找学习率、KL 这类不常见的名字时用）")
+  ap.add_argument("--first", type=int, default=0, metavar="N",
+                  help="只打印前 N 个采样点（看起点用，配合 --stat 一起判断是不是从一开始就在漂）")
   a = ap.parse_args()
 
   run = a.run
@@ -64,6 +68,10 @@ def main() -> int:
   ea = EventAccumulator(run, size_guidance={"scalars": 0})
   ea.Reload()
   tags = ea.Tags()["scalars"]
+  if a.list:
+    for t in tags:
+      print(t)
+    return 0
   if a.tag not in tags:
     print(f"[ERR] {run} 里没有 {a.tag}（ref_probe 没跑？现有 tag 样例：{tags[:4]}）",
           file=sys.stderr)
@@ -83,6 +91,16 @@ def main() -> int:
           file=sys.stderr)
     print(f"[stat] 恒 0? {'是 —— 这条指标没在动，别拿它推理' if hi <= 1e-9 else '否'}"
           f"   恒定值? {'是（可能没被更新）' if hi - lo <= 1e-9 else '否'}", file=sys.stderr)
+    # 首尾对比：发散类问题（学习率失控、熵爆炸）看的是「起点 vs 终点」而不是极值
+    if len(arr) >= 10:
+      head = sum(arr[:5]) / 5
+      tail = sum(arr[-5:]) / 5
+      print(f"[stat] 前5均值 {head:.4f} -> 后5均值 {tail:.4f}"
+            f"（{'涨' if tail > head else '降'} {abs(tail - head) / max(abs(head), 1e-9) * 100:.0f}%）",
+            file=sys.stderr)
+  if a.first:
+    for e in vals[: a.first]:
+      print(f"[curve] step {e.step:>7d}  {e.value:.6g}", file=sys.stderr)
   return 0
 
 
