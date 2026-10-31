@@ -194,9 +194,14 @@ def _rebuild_rewards(cfg) -> None:
     # 而 corr(vx, yaw) 只有 -0.20~-0.40（A 的证据很弱）。
     # 上面那条 lateral_drift 是 (x-x0)²，0.2 m 处每步只 -0.00016 分（回合 -0.003），
     # 等于没罚，所以补这一条：EMA(一个周期) 后的纵向偏置，死区 0.03 放过正常摆动。
-    # 权重标定见 mdp_extra.lateral_bias 的 docstring：0.10 m/s -> 约 -4.7/回合。
+    # 2026-10-31 第二次调：weight -80 -> -20。实测 -80 下偏置不但没降（0.086 -> 0.114 m/s），
+    # 反而把整条策略压垮了：535 轮时 lateral_bias 占 forward_progress_y 的 62%
+    # （-0.564 vs +0.902），ref_tracking 从 0.976 崩到 0.295、upright 0.32 -> 0.08、
+    # ep_len 7.4 -> 4.4 s —— 典型的"靠别动来避罚"。
+    # -20 时 0.11 m/s 的偏置约 -0.14/步（推进的 15%），是提示不是重锤。
+    # ⚠️ 修好步态（ep_len > 15 s）之前不要再往上加，漂移是第二步的事。
     r["lateral_bias"] = RewardTermCfg(
-        func=X.lateral_bias, weight=-80.0, params={"tau": 1.8, "deadzone": 0.03},
+        func=X.lateral_bias, weight=-20.0, params={"tau": 1.8, "deadzone": 0.03},
     )
     # ⚠️ 奖励按 dt 缩放：一次性惩罚实际值 = weight × 0.02。
     # 原来 −5 只等于每次摔倒扣 0.1 分，而当时一个 episode 回报 ~10 分 ——

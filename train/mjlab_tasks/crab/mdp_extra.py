@@ -234,12 +234,15 @@ def lateral_bias(env, tau: float = 1.8, deadzone: float = 0.03) -> torch.Tensor:
     见 forward_progress_y 的注释）。tau=1.8 s 正好一个步态周期，把"冲-停-退"平均掉，
     剩下的才是净偏置。deadzone=0.03 m/s 放过正常残余摆动。
 
-    标定（正奖励约 50~75 分/回合，回合 ≈ 600 步）
-    --------------------------------------------
-        |偏置| = 0.03 -> 0                      （不罚）
-        |偏置| = 0.10 -> (0.07)²=0.0049 -> 每步 -0.49×wt/100  …
-        取 weight=-80：0.10 -> -0.39/步 -> -4.7/回合（约 7%，够形成梯度不主导）
-                       0.20 -> -2.31/步 -> -27.7/回合（约 40%，明确压制）
+    标定（以 weight=-20 计，实测取这个值）
+    ------------------------------------
+        |偏置| = 0.03 -> 0                        （死区内，不罚）
+        |偏置| = 0.11 -> (0.08)²=0.0064 -> -0.13/步（约为 forward_progress_y 的 15%）
+
+    ⚠️ 2026-10-31 教训：**别用重权重**。原来 weight=-80 时，535 轮下来偏置
+    从 0.086 涨到 0.114（罚了没降），而这一项占了 forward_progress_y 的 62%：
+    ref_tracking 0.976 -> 0.295、upright 0.32 -> 0.08、ep_len 7.4 -> 4.4 s。
+    策略的选择是"少动来避罚"而不是"走直"。步态没稳之前，这一项只当提示。
     """
     pos = _root_pos(env)[:, :2]
     prev = getattr(env, "_crab_prev_xy", None)
@@ -255,11 +258,18 @@ def lateral_bias(env, tau: float = 1.8, deadzone: float = 0.03) -> torch.Tensor:
         q = _root_quat(env)
         w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
         yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+        # 机身 z 轴的世界系分量：直立 1 / 侧倒 0 / 翻转 -1
+        upright = (1.0 - 2.0 * (x ** 2 + y ** 2)) > 0.6
     except Exception:
         yaw = torch.zeros(env.num_envs, device=pos.device)
+        upright = torch.ones(env.num_envs, dtype=torch.bool, device=pos.device)
 
     # 世界系 -> 机身系：机身 +X 方向 = (cos yaw, sin yaw)
     v_lon = v_w[:, 0] * torch.cos(yaw) + v_w[:, 1] * torch.sin(yaw)
+
+    # 摔倒时机身系分解没有意义（yaw/pitch 都是任意的），而且"向前扑倒"会被算成巨大偏置。
+    # 摔倒本身已经由 is_terminated 罚过，这里不要重复计。倾倒时输入置 0，让 EMA 自然衰减。
+    v_lon = torch.where(upright, v_lon, torch.zeros_like(v_lon))
 
     a = 1.0 - math.exp(-dt / max(float(tau), 1e-6))
     ema = getattr(env, "_crab_vlon_ema", None)
@@ -274,7 +284,7 @@ def lateral_bias(env, tau: float = 1.8, deadzone: float = 0.03) -> torch.Tensor:
             ema = torch.where(rst, torch.zeros_like(ema), ema)
     env._crab_vlon_ema = ema.clone()
 
-    return torch.clamp(ema.abs() - float(deadzone), min=0.0) ** 2
+    return torch.clamp(ema.abs() - float(deadzone), min=0.0) ** 2 * upright.to(ema.dtype)
 
 
 def swing_clearance(env, sensor_name: str = "foot_height_scan",
