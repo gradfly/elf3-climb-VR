@@ -346,7 +346,11 @@ def _retune_curriculum(cfg) -> None:
     if cfg.curriculum is not None and "terrain_levels" in cfg.curriculum:
         cfg.curriculum["terrain_levels"] = CurriculumTermCfg(
             func=X.terrain_levels_time,
-            params={"promote_frac": 0.25, "demote_frac": 0.10, "min_dist": 0.30},
+            # min_dist 0.30 -> 0.90（2026-10-31）：碗底平台半宽 0.52~0.80 m，
+            # 原来"在平台上蹭 0.3 m"就够升级 —— 课程涨到 levels≈5.8 的同时，
+            # 一批 env 仍卡在第一级台阶边缘（Δy≈0.83 m）。0.90 在四列上都超出平台边缘，
+            # 等于要求"至少踏上第一级台阶"。
+            params={"promote_frac": 0.25, "demote_frac": 0.10, "min_dist": 0.90},
         )
 
     # 初始等级只给 0~1。

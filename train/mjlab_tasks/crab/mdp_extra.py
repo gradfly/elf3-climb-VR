@@ -379,7 +379,7 @@ def ref_probe(env, action_name: str = "joint_pos") -> torch.Tensor:
 
 
 def terrain_levels_time(env, env_ids, promote_frac: float = 0.25,
-                        demote_frac: float = 0.10, min_dist: float = 0.30,
+                        demote_frac: float = 0.10, min_dist: float = 0.90,
                         **kwargs) -> dict:
     """按「活够久 + 真的挪了」升降地形，取代内置的「走够远」。
 
@@ -403,9 +403,22 @@ def terrain_levels_time(env, env_ids, promote_frac: float = 0.25,
 
     现在的判据
     ---------
-        升级：活到 max_episode_length 的 25%（5 s）**且**离开出生点 >= 0.30 m
+        升级：活到 max_episode_length 的 25%（5 s）**且**离开出生点 >= 0.90 m
         降级：活不到 10%（2 s）
         其余：保持不变
+
+    ⚠️ min_dist 为什么从 0.30 提到 0.90（2026-10-31）
+    ------------------------------------------------
+    倒置金字塔的碗底平台半宽是 0.52~0.80 m（flat 0.60 / easy 0.80 / mid 0.52 /
+    hard 0.62）。原来的 0.30 意味着**在平台上原地蹭 0.3 m 就能升级，一步都不用爬**。
+    实测后果：`Curriculum/terrain_levels/mean` 一路涨到 5.8，但 eval 时仍有一批 env
+    卡在第一级台阶边缘（Δy 全部 ≈0.83 m）动不了 —— 它从来没被要求"爬上去"，
+    只被要求"挪一挪"。
+    0.90 在四列上都落在平台边缘之外（flat 0.60 / easy 0.80 / mid 0.52 / hard 0.62），
+    即"至少要踏上第一级台阶"才够格升级。用水平距离而不是竖直位移，是因为
+    `env_origins` 的 z 含义随版本不同（可能是表面高度也可能恒 0），判不准。
+    若升级停住不再上涨，说明策略连第一级都上不去 —— 那是抬脚的问题，去调
+    `swing_clearance`，不要把这个门槛再调回去。
 
     升降不对称（25% vs 10%），避免偶尔摔一次就被打回 level 0。
     `min_dist` 那一条专门防「原地罚站也能升级」——站着不动拿不到难地形。
