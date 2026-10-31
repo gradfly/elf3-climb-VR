@@ -118,44 +118,50 @@ v1 用 `corr(Δdx, Δyaw)` 判 A 类。但偏航耦合的物理形式是 `vx ≈
 
 ## 2. 前置（5 分钟，GPU 服务器仓库根目录）
 
-变量一次赋好，后面全部复用。
+变量一次赋好，后面全部复用。**`ALPHA` 是硬性要求**，理由见 §2.1。
 
 ```bash
 cd ~/elf3
+export MUJOCO_GL=egl
 TASK=Elf3-Crab-Residual-Play
 
-# 最新 checkpoint 及其 run 目录（按修改时间倒序取第一个）
+# 最新 checkpoint（按修改时间倒序取第一个）
 CKPT=$(ls -t logs/rsl_rl/elf3_crab/*/model_*.pt | head -1)
-RUN=$(dirname "$CKPT")
+[ -n "$CKPT" ] || { echo "[ERR] 没找到 checkpoint"; return 1 2>/dev/null || exit 1; }
 
-# 该 run 的 ref_alpha（取最后一条；判断 α 课程是否已满幅）
-ALPHA=$(.venv/bin/python - "$RUN" <<'PY'
-import sys
-from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-ea = EventAccumulator(sys.argv[1]); ea.Reload()
-tag = "Metrics/ref_alpha"
-if tag not in ea.Tags()["scalars"]:
-    print("nan")
-else:
-    print(f"{[e.value for e in ea.Scalars(tag)][-1]:.3f}")
-PY
-)
+# 该 run 训练时的参考步态幅度 α（脚本把数字打到 stdout，说明走 stderr）
+ALPHA=$( .venv/bin/python scripts/read_alpha.py --ckpt "$CKPT" )
 
 # 任务是否注册（输出为空 = venv 里那份任务包是旧的，先跑 bash train/install_task.sh）
 .venv/bin/python -c "import mjlab.tasks; from mjlab.tasks.registry import list_tasks; print([t for t in list_tasks() if 'Crab' in t])"
 
-# 变量落定 + 门槛检查
-printf 'TASK=%s\nRUN=%s\nCKPT=%s\nALPHA=%s\n' "$TASK" "$RUN" "$CKPT" "$ALPHA"
-[ -n "$CKPT" ] || { echo "[ERR] 没找到 checkpoint"; exit 1; }
-if awk -v a="$ALPHA" 'BEGIN{exit !(a<0.95)}'; then
-  echo "[warn] ALPHA<0.95：评估必须带 ELF3_ALPHA=$ALPHA，否则测的是「满幅参考 + 半幅残差」"
-fi
-export MUJOCO_GL=egl
-export ELF3_ALPHA="$ALPHA"
+printf 'TASK=%s\nCKPT=%s\nALPHA=%s\n' "$TASK" "$CKPT" "$ALPHA"
 ```
 
-`ALPHA=nan` 说明这个 run 没写 `Metrics/ref_alpha`（`ref_probe` 没跑），
-那就退回 `ELF3_ALPHA=1.0` 并在结论里注明"α 未核实"。
+### 2.1 为什么 α 必须显式给（这是最贵的静默失败）
+
+`env_cfg_residual._alpha_fixed` 的取值规则：
+
+| 情形 | α |
+|---|---|
+| `play=True`（默认） | **1.0** |
+| `play=False`（即 `--train-env`）且没给 `ELF3_ALPHA` | **走课程，从 `alpha_start=0` 开始 ramp** |
+
+课程总长 1500 iter × 24 步，而动作项每次都是新建实例、`_step_i` 从 0 起。所以
+
+```
+--train-env 跑 1000 步  ->  α = 1000 / 36000 = 0.028
+```
+
+α=0.028 时参考步态 ≈ **站姿**，残差（限幅 ±0.55 rad）要独自憋出整个步态。实测表现：
+**60% 维度顶死限幅、每 2.7 s 摔一次、20 s 自转 1.7 圈、跟踪比 2.6~3.5**。
+看起来像"策略很烂"，其实所有数字都和策略水平无关。
+
+所以：**所有命令都带 `--alpha "$ALPHA"`**，脚本会在建完环境后立刻打印 `ref_alpha`，
+小于 0.9 会打一整块 `!!!!` 警告。
+
+> `ALPHA` 是**每个 shell 会话独立**的。新开窗口必须重跑本节，或命令里带兜底：
+> `[ -n "$ALPHA" ] || ALPHA=$(.venv/bin/python scripts/read_alpha.py)`。
 
 ---
 
@@ -182,16 +188,18 @@ git pull --ff-only                     # 没更新过就拉一次
 mkdir -p /tmp/elf3_drift
 [ -n "$TASK" ] || TASK=Elf3-Crab-Residual-Play
 [ -n "$CKPT" ] || CKPT=$(ls -t logs/rsl_rl/elf3_crab/*/model_*.pt | head -1)
-printf 'TASK=%s\nCKPT=%s\n' "$TASK" "$CKPT"
+[ -n "$ALPHA" ] || ALPHA=$(.venv/bin/python scripts/read_alpha.py --ckpt "$CKPT")
+printf 'TASK=%s\nCKPT=%s\nALPHA=%s\n' "$TASK" "$CKPT" "$ALPHA"
 
 for lvl in 3 5 7; do
   echo "=== terrain-level $lvl ==="
   .venv/bin/python scripts/diagnose_policy.py \
     --task "$TASK" --checkpoint "$CKPT" \
     --num-envs 32 --steps 400 --terrain-level $lvl --freeze-command 0.17 \
+    --alpha "$ALPHA" \
     > /tmp/elf3_drift/pre_p0_$lvl.log 2>&1
   echo "exit=$?"
-  grep -E "rise 列|terrain_levels|指令 cmd" /tmp/elf3_drift/pre_p0_$lvl.log \
+  grep -E "rise 列|terrain_levels|指令 cmd|ref_alpha" /tmp/elf3_drift/pre_p0_$lvl.log \
     || { echo "[没有匹配行，日志尾部如下]"; tail -15 /tmp/elf3_drift/pre_p0_$lvl.log; }
 done
 ```
@@ -251,21 +259,22 @@ rise 列3 n=8 : 0.126 m ...      ← hard 列，8~22 cm，梯度最明显
 ```bash
 mkdir -p /tmp/elf3_drift
 CMD=0.17                    # 训练指令区间 (0.14, 0.20) 的中点
+[ -n "$ALPHA" ] || ALPHA=$(.venv/bin/python scripts/read_alpha.py --ckpt "$CKPT")
 
 for spec in "b1 3" "b0 5" "b2 7"; do
   name=${spec%% *}; lvl=${spec##* }
-  echo "########## $name  (terrain-level $lvl)"
+  echo "########## $name  (terrain-level $lvl, alpha $ALPHA)"
   .venv/bin/python scripts/diagnose_policy.py \
     --task "$TASK" --checkpoint "$CKPT" \
     --num-envs 16 --steps 1000 --terrain-level $lvl --train-env \
-    --freeze-command $CMD \
+    --freeze-command $CMD --alpha "$ALPHA" \
     --trace /tmp/elf3_drift/trace_$name.npz \
     2>&1 | tee /tmp/elf3_drift/$name.log | tail -32
 done
 ```
 
-> `--train-env` 不是可选项：play 下 P0 已判不通过（§3.1）。它会把 episode 固定成 20 s，
-> 所以 `--steps 1000` 正好一整段，跑完记得看"摔倒/超时"是几个。
+> `--train-env` 不是可选项：play 下 P0 已判不通过（§3.1）。
+> **`--alpha` 更不是可选项**：不给的话 α 会从 0 开始 ramp，跑完只到 0.028（§2.1）。
 
 **先看这一行**，它决定这批数据能不能用：
 
@@ -280,7 +289,7 @@ B3 只录一段看形态（跟拍机位，**看不出位移**，只看"整条斜
 ```bash
 .venv/bin/python scripts/diagnose_policy.py \
   --task "$TASK" --checkpoint "$CKPT" --num-envs 1 --steps 1000 \
-  --terrain-level 5 --freeze-command $CMD --train-env \
+  --terrain-level 5 --freeze-command $CMD --train-env --alpha "$ALPHA" \
   --record /tmp/elf3_drift/b3.mp4 --record-elev -35 --record-dist 3.5
 ```
 
@@ -289,10 +298,11 @@ B3 只录一段看形态（跟拍机位，**看不出位移**，只看"整条斜
 ## 5. B4 扰动恢复（区分"走歪"和"被打歪"）
 
 ```bash
+[ -n "$ALPHA" ] || ALPHA=$(.venv/bin/python scripts/read_alpha.py --ckpt "$CKPT")
 .venv/bin/python scripts/diagnose_policy.py \
   --task "$TASK" --checkpoint "$CKPT" \
   --num-envs 16 --steps 1000 --terrain-level 5 --train-env \
-  --freeze-command $CMD --push \
+  --freeze-command $CMD --alpha "$ALPHA" --push \
   --trace /tmp/elf3_drift/trace_b4.npz \
   2>&1 | tee /tmp/elf3_drift/b4.log | tail -32
 ```
@@ -366,7 +376,10 @@ echo "########################## b4"
 ## 9. 坑（v1 的 + 新增的）
 
 1. **别用训练日志的 `Mean reward` 判断好坏**：`forward_progress_y` 与 `yaw_drift` 都出现过自洽地虚高。
-2. **α 必须对齐**：`ELF3_ALPHA` 是"固定"，续训要用 `ELF3_ALPHA_START`，别混。
+2. **α 必须钉死，而且必须传给脚本**：`--train-env` 下不给 `--alpha`，α 会从 0 ramp，
+   1000 步只到 **0.028** —— 参考步态退化成站姿，实测「60% 维度顶死限幅、每 2.7 s 摔一次、
+   20 s 自转 1.7 圈」，看着像策略烂，其实是参数错。脚本现在会在建完环境后立刻打印
+   `ref_alpha`，< 0.9 会打 `!!!!` 警告。`ELF3_ALPHA` 是"固定"，续训要用 `ELF3_ALPHA_START`，别混。
 3. **录像机位**：`diagnose_policy.py --record` 是跟拍，机器人永远在画面中心，看不出位移。
    判"整条斜"用 `ELF3_VIEWER_ORIGIN=world` 的 play，或直接看漂移比。
 4. **16 个 env 的列不是均匀的**：`terrain_types`（flat/easy/mid/hard）创建时随机分配、终身不变，
@@ -386,5 +399,6 @@ echo "########################## b4"
 
 | 文件 | 改动 |
 |---|---|
-| `scripts/diagnose_policy.py` | 新增 `--freeze-command`：三重冻结（ranges 钉常数 / `resampling_time_range` 置大 / 每步覆写指令张量）<br>新增 `--train-env`：play 的地形语义不可用时的主路径<br>`--trace` 增记 `dy_ep` / `yaw_rel` / `ep_t` / `push` / `timeout`<br>收尾漂移比改同基准；`rise/tread` 按 `terrain_types` 分列打印 |
+| `scripts/diagnose_policy.py` | 新增 `--freeze-command`：三重冻结（ranges 钉常数 / `resampling_time_range` 置大 / 每步覆写指令张量）<br>新增 `--train-env`：play 的地形语义不可用时的主路径<br>新增 `--alpha`：写 `ELF3_ALPHA`，并在建完环境后立刻校验 `ref_alpha`（<0.9 打 `!!!!` 警告）<br>`--trace` 增记 `dy_ep` / `yaw_rel` / `ep_t` / `push` / `timeout`<br>收尾漂移比改同基准；`rise/tread` 按 `terrain_types` 分列打印 |
+| `scripts/read_alpha.py` | 新增。从 run 的 tensorboard 读 `Metrics/ref_alpha` 末值，stdout 只给数字 |
 | `scripts/analyze_trace.py` | 新增。判定 A/B/C；量纲修正；主判别量换 `corr(vx, yaw_rel)`；冷启动按回合屏蔽；摔倒/超时分开数；推挤恢复分析 |

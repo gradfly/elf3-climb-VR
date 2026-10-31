@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import statistics
 import sys
 from dataclasses import asdict
@@ -347,7 +348,15 @@ def main(argv=None) -> int:
                   help="用训练配置（play=False）建环境，而不是 play 配置。"
                        "只有当 --terrain-level 在本版本上不改变地形高度时才需要它"
                        "（训练配置的 terrain_generator.curriculum=True，行=难度梯度）")
+  ap.add_argument("--alpha", type=float, default=None, metavar="A",
+                  help="参考步态幅度 α，覆盖 ELF3_ALPHA。**必须等于 checkpoint 训练时的值**。"
+                       "⚠️ --train-env 下 α 默认走课程、从 0 ramp：跑 1000 步只到 0.028，"
+                       "参考退化成站姿，残差独自憋步态 -> 位移/漂移/摔倒全不可信")
   args = ap.parse_args(argv)
+
+  if args.alpha is not None:
+    # 在 load_env_cfg 之前写进环境变量，env_cfg_residual._alpha_fixed 就是读它。
+    os.environ["ELF3_ALPHA"] = repr(float(args.alpha))
 
   import mjlab.tasks  # noqa: F401  触发任务注册
   from mjlab.envs import ManagerBasedRlEnv
@@ -555,6 +564,26 @@ def main(argv=None) -> int:
     term = base.action_manager.get_term("joint_pos")
   except Exception:
     term = None
+
+  # α 立刻查一次：这是最贵的静默失败——α≈0 时参考退化成站姿，残差独自憋步态，
+  # 结果是"跑得动、但每 2~3 s 摔一次、还带自转"，看起来像策略差，其实是评估参数错。
+  if term is not None:
+    try:
+      a_now = float(term.ref_alpha)
+      if a_now < 0.9:
+        print("!" * 66)
+        print(f"[!!] ref_alpha = {a_now:.3f}  < 0.9：参考步态≈站姿，残差在独自憋整个步态。")
+        print("     这批位移/漂移/摔倒数**不能代表策略水平**，先别下结论。")
+        print("     原因：train 配置的 α 默认走课程（alpha_start=0 起步，")
+        print("           1000 步只到 0.028）。必须显式给训练时的值：")
+        print(f"           .venv/bin/python scripts/read_alpha.py   # 读出 α")
+        print("           ... diagnose_policy.py ... --alpha <读到的值>")
+        print("     play 配置默认 α=1.0，所以只有 --train-env 会踩这个坑。")
+        print("!" * 66)
+      else:
+        print(f"[info] ref_alpha = {a_now:.3f}（参考步态幅度，与训练对齐）")
+    except Exception:
+      pass
 
   if args.dump_scan:
     with torch.no_grad():
@@ -786,8 +815,6 @@ def main(argv=None) -> int:
   print(f"净 Δy 最差/最好: {float(net_dy.min()):+.2f} / {float(net_dy.max()):+.2f} m")
 
   if args.trace and rec:
-    import os
-
     os.makedirs(os.path.dirname(os.path.abspath(args.trace)), exist_ok=True)
     arrays = {k: np.stack([t.cpu().numpy() for t in v]) for k, v in rec.items()}
     np.savez_compressed(args.trace, **arrays)
