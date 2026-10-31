@@ -457,12 +457,39 @@ def _dump_scan(base, term, env_i: int = 0, brief: bool = False) -> None:
     print(f"[scan] 机器人 root=({float(_root_pos(base)[env_i, 0]):+.2f}, "
           f"{float(_root_pos(base)[env_i, 1]):+.2f}, "
           f"{float(_root_pos(base)[env_i, 2]):+.2f})")
-    terr = getattr(getattr(base, "scene", None), "terrain", None)
-    for attr in ("terrain_levels", "levels"):
-      v = getattr(terr, attr, None)
-      if v is not None and torch.is_tensor(v):
-        print(f"[scan] 地形等级 env{env_i} = {int(v[env_i])}")
+  terr = getattr(getattr(base, "scene", None), "terrain", None)
+  for attr in ("terrain_levels", "levels"):
+    v = getattr(terr, attr, None)
+    if v is not None and torch.is_tensor(v):
+      print(f"[scan] 地形等级 env{env_i} = {int(v[env_i])}")
+      break
+
+  # 反查这个 env 真正落在哪一行哪一列。
+  # 为什么要它：`terrain_levels` 只是一个计数器的读数，和实际出生点不一定是同一件事
+  # （2026-10-31 实测矛盾：level 全 0，但 rise_est 均值 0.17，而被强制 level 0 的探针
+  #   只有 0.086）。`terrain_origins` 是 (行, 列, 3) 的格子原点表，拿 env_origins 去匹配
+  # 最接近的格子，就能绕开计数器直接看它在哪一行。
+  try:
+    grid = None
+    for attr in ("terrain_origins", "origins"):
+      g = getattr(terr, attr, None)
+      if torch.is_tensor(g) and g.dim() == 3:
+        grid = g
         break
+    eo = getattr(getattr(base, "scene", None), "env_origins", None)
+    if grid is not None and torch.is_tensor(eo):
+      p = eo[env_i, :2].to(grid.dtype)
+      d = torch.norm(grid[..., :2] - p, dim=-1)
+      r, c = np.unravel_index(int(torch.argmin(d).item()), tuple(d.shape))
+      lv = getattr(terr, "terrain_levels", None)
+      lvv = int(lv[env_i]) if torch.is_tensor(lv) else -1
+      flag = "  ⚠️ 与计数器不符 -> 别信 terrain_levels" if (lvv >= 0 and lvv != int(r)) else ""
+      print(f"[scan] env{env_i} 实际格子 row={int(r)} col={int(c)}"
+            f"（terrain_levels={lvv}，格子数 {tuple(d.shape)}）{flag}")
+    else:
+      print("[scan] 拿不到 terrain_origins，无法反查行号")
+  except Exception as e:
+    print(f"[scan] 反查格子失败：{e!r}")
   print("-" * 62)
 
 
