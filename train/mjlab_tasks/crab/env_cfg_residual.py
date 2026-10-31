@@ -156,6 +156,18 @@ def _rebuild_rewards(cfg) -> None:
             threshold_min=0.05, threshold_max=1.2, command_threshold=0.05,
         )
 
+    # ②-b 抬脚的**正收益**（2026-10-31 加）
+    # 上面 air_time 的收益门槛是 0.05 s，贴地蹭时压根不触发；两条 swing/clearance 又都是
+    # 惩罚、且只在"已经在摆"时才生效。合起来的效果是：**"从不抬脚"在奖励函数里完全中性**，
+    # 而抬脚失衡一次就是 -5 分（is_terminated）—— 于是稳态解就是顶在台阶边缘蹭。
+    # 这里直接量脚底离地高度：3 cm 拿 0.2、15 cm 拿 1.0，从第一步就有梯度。
+    # 标定：两脚平均 + 摆动期占比 ~50%，典型值 0.15~0.25；
+    #       weight 2.0 -> 每步 0.3~0.5 分 -> 回合 +3.6~6 分（正奖励 50~75 的 5%~8%）。
+    r["swing_clearance"] = RewardTermCfg(
+        func=X.swing_clearance, weight=2.0,
+        params={"target": 0.15, "max_height": 0.5},
+    )
+
     # ③ 参考跟踪是唯一逼出「真正侧步」的项，但 0.3 的权重给的分太少：
     #    实测 ref_tracking 报 0.49（等价 12 腿 RMS 偏差 0.42 rad，已经"没在跟"）。
     #    而速度项已经退化成"平均推进"（跟参考 0.83 / 蹭走 0.70，只差 0.13），

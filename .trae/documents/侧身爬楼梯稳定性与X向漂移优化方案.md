@@ -469,6 +469,93 @@ b1 同样（0.85/0.81/0.89/0.84/0.84）。这些 env 站了 19 s 没上去。
 
 ---
 
+## 11. 抬脚不足（卡在台阶边缘）：先判别，再改奖励，再续训
+
+### 11.1 先花 30 秒排除「参考步态锁在平地档」
+
+`ref_table` 是用 `rise_est` **选参考步态档位**的：`rise_est≈0` → 参考用平地档（几乎不抬脚）。
+所以"抬脚不够"有两种原因，处理方式相反：
+
+```bash
+cd ~/elf3
+.venv/bin/python scripts/read_alpha.py --tag Metrics/rise_est --stat
+.venv/bin/python scripts/read_alpha.py --tag Metrics/scan_ok --stat
+```
+
+| 结果 | 判定 | 处理 |
+|---|---|---|
+| `rise_est` 的 **max 也接近 0**，或 `scan_ok` 恒 0 | **估计链路断了** | 参考从没抬过脚，加奖励 = 让残差对抗站姿参考，白训。先查 `terrain_scan`（geom group、`_read_heights` 广播），修好再回来 |
+| `rise_est` 有正常波动（0.05~0.2） | 参考正常 | 走 11.2 |
+
+> 上一轮三档跑完时 `rise_est` 打印的都是 `0.000`、`tread` 都是初值 `0.360`。有可能只是
+> "末步刚好站在没有台阶边缘的平台上"（脚本只取末值），也可能真的断了 —— 所以这里必须
+> 看**整条曲线**的 max，而不是末值。
+
+### 11.2 奖励侧：给抬脚一个「从 0 开始就有梯度」的正项
+
+现有配置里抬脚**只有惩罚、没有收益**，而且惩罚全部带门控：
+
+| 项 | 权重 | 为什么不触发 |
+|---|---|---|
+| `air_time` | +1.0 | 门槛 0.05 s，贴地蹭时不触发 |
+| `foot_swing_height` | −1.0 | 只在"已经在摆"时才罚 |
+| `foot_clearance` | −2.0 | target 0.15，3 cm 时每步只 −0.03 分 |
+
+净效果：**"从不抬脚"在奖励函数里是完全中性的**，而抬脚失衡一次是 −5 分（`is_terminated`）。
+稳态解自然就是顶在台阶边上蹭。
+
+已加 `mdp_extra.swing_clearance`：
+
+```python
+r["swing_clearance"] = RewardTermCfg(
+    func=X.swing_clearance, weight=2.0,
+    params={"target": 0.15, "max_height": 0.5},
+)
+```
+
+- 量的是**脚底离地高度 / 0.15**，夹到 [0,1]，按脚平均，只在"该脚不接触地面"且"有速度指令"时计。
+- 抬 3 cm 拿 0.2、抬 15 cm 拿 1.0 —— 从第一步就有梯度，不需要先"已经在摆"。
+- `max_height=0.5` 截断：射线没打到地形时传感器返回 1.0，不截断会把奖励刷满（reward hacking）。
+- 标定：典型值 0.15~0.25 → 每步 0.3~0.5 分 → **回合 +3.6~6 分**（正奖励总量 50~75 的 5%~8%）。
+  抬到满值 15 cm 时约 +6/回合，而摔一次 −5 分——只要不明显提高摔倒率就划算。
+
+**验证这一项真的在动**：训练日志里看 `Episode_Reward/swing_clearance`，应从 ~0.05 涨到 0.2+。
+如果它一直是 0，说明 `foot_height`/`foot_contact` 取数有问题（函数里已经 try/except 兜底成 0，
+不会报错，只会静默无效）。
+
+### 11.3 续训
+
+```bash
+cd ~/elf3 && git pull --ff-only
+CKPT=$(ls -t logs/rsl_rl/elf3_crab/*/model_*.pt | head -1)
+ELF3_ALPHA=1.0 .venv/bin/train Elf3-Crab-Residual \
+  --agent.resume True --checkpoint-file "$CKPT" \
+  --agent.max-iterations 1500
+```
+
+`α` 用**固定 1.0**（不要用 `ELF3_ALPHA_START`：那个是"从 X 继续升到 1"，α 已经满幅时没必要，
+而且和"固定"是两种语义，容易混）。
+
+**看四个数**（每 50-100 iter 扫一眼）：
+
+| 指标 | 期望 | 不合格怎么办 |
+|---|---|---|
+| `Episode_Reward/swing_clearance` | 0.05 → 0.2+ | 恒 0 → `foot_height` 取数问题 |
+| `Metrics/peak_height_mean` | 0.03 → 0.10+ | 不涨 → weight 2.0 → 4.0 |
+| `ep_len` | 不下降 | 明显下降 → 抬脚代价过高，weight 降到 1.0 |
+| `Curriculum/terrain_levels/mean` | 逐步上升 | 卡住 → 说明还是爬不上去 |
+
+> ⚠️ `--agent.resume` 会**重置速度/地形课程**（`max-iterations` 是本次轮数，不累计）。
+> 所以前几百轮都在简单地形上跑，`ep_len` 会先变好 —— 别当成策略进步，以 `peak_height`
+> 和 `terrain_levels` 为准。
+
+### 11.4 如果抬脚修好了、但漂移比还是 >0.08
+
+回到 §8：`lateral_bias` 已经把"会走时"的纵向偏置压住了，剩下的就是偏航
+（`yaw 累计 219~231°`，判据 15°）。那时才轮到 A 类那条：补 `heading_sincos` 观测，必须重训。
+
+---
+
 ## 附：本版改了哪些代码（审阅用）
 
 | 文件 | 改动 |
@@ -476,5 +563,6 @@ b1 同样（0.85/0.81/0.89/0.84/0.84）。这些 env 站了 19 s 没上去。
 | `scripts/diagnose_policy.py` | 新增 `--freeze-command`：三重冻结（ranges 钉常数 / `resampling_time_range` 置大 / 每步覆写指令张量）<br>新增 `--train-env`：play 的地形语义不可用时的主路径<br>新增 `--alpha`：写 `ELF3_ALPHA`，并在建完环境后立刻校验 `ref_alpha`（<0.9 打 `!!!!` 警告）<br>`--trace` 增记 `dy_ep` / `yaw_rel` / `ep_t` / `push` / `timeout`<br>收尾漂移比改同基准；`rise/tread` 按 `terrain_types` 分列打印 |
 | `scripts/read_alpha.py` | 新增。从 run 的 tensorboard 读 `Metrics/ref_alpha` 末值，stdout 只给数字 |
 | `scripts/analyze_trace.py` | 新增。判定 A/B/C；量纲修正；主判别量换 `corr(vx, yaw_rel)`；冷启动按回合屏蔽；摔倒/超时分开数；推挤恢复分析；**加机身系 `v_lon` 偏置作 B 类硬判据** |
-| `train/mjlab_tasks/crab/mdp_extra.py` | 新增 `lateral_bias`：EMA(1.8 s) 后的机身系纵向偏置，死区 0.03 后平方 |
-| `train/mjlab_tasks/crab/env_cfg_residual.py` | 挂上 `r["lateral_bias"]`，weight −80（标定见 §10.1） |
+| `train/mjlab_tasks/crab/mdp_extra.py` | 新增 `lateral_bias`：EMA(1.8 s) 后的机身系纵向偏置，死区 0.03 后平方<br>新增 `swing_clearance`：脚底离地高度 / 0.15，接触与指令双门控 |
+| `train/mjlab_tasks/crab/env_cfg_residual.py` | 挂上 `r["lateral_bias"]`（weight −80）与 `r["swing_clearance"]`（weight 2.0），标定见 §10.1 / §11.2 |
+| `scripts/read_alpha.py` | 新增 `--stat`：打印指标整条曲线的 min/mean/max，用来判断"是不是恒 0" |

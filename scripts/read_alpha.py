@@ -36,6 +36,8 @@ def main() -> int:
   ap.add_argument("run", nargs="?", default=None, help="run 目录（含 events.out.tfevents*）")
   ap.add_argument("--ckpt", default=None, help="从 checkpoint 路径取它的父目录当 run 目录")
   ap.add_argument("--tag", default=TAG, help=f"默认 {TAG}")
+  ap.add_argument("--stat", action="store_true",
+                  help="打印整条曲线的 min/mean/max/末值（判断某个指标是不是恒 0 时用）")
   a = ap.parse_args()
 
   run = a.run
@@ -73,6 +75,14 @@ def main() -> int:
   print(f"[info] run={run}", file=sys.stderr)
   print(f"[info] 采样点 {len(vals)} 个，末值 {last.value:.3f} @ step {last.step}",
         file=sys.stderr)
+  if a.stat:
+    arr = [e.value for e in vals]
+    lo, hi = min(arr), max(arr)
+    mean = sum(arr) / len(arr)
+    print(f"[stat] {a.tag}: min {lo:.4f}  mean {mean:.4f}  max {hi:.4f}  last {last.value:.4f}",
+          file=sys.stderr)
+    print(f"[stat] 恒 0? {'是 —— 这条指标没在动，别拿它推理' if hi <= 1e-9 else '否'}"
+          f"   恒定值? {'是（可能没被更新）' if hi - lo <= 1e-9 else '否'}", file=sys.stderr)
   return 0
 
 

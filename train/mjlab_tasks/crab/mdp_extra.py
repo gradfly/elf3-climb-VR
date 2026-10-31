@@ -277,6 +277,58 @@ def lateral_bias(env, tau: float = 1.8, deadzone: float = 0.03) -> torch.Tensor:
     return torch.clamp(ema.abs() - float(deadzone), min=0.0) ** 2
 
 
+def swing_clearance(env, sensor_name: str = "foot_height_scan",
+                    contact_sensor: str = "feet_ground_contact",
+                    target: float = 0.15, max_height: float = 0.5,
+                    command_name: str = "twist",
+                    command_threshold: float = 0.05) -> torch.Tensor:
+    """摆动腿离地高度 / target，夹到 [0,1]，按脚平均 —— **正奖励**。
+
+    为什么必须给正的
+    --------------
+    现有配置里抬脚只有惩罚没有收益：
+        air_time        weight 1.0，但门槛 0.05 s —— 贴地蹭时压根不触发，等于 0；
+        foot_swing_height weight -1.0，同样只在"已经在摆"的时候才罚；
+        foot_clearance  weight -2.0，target 0.15，3 cm 时每步只 -0.03 分。
+    也就是说"从不抬脚"这个状态在奖励函数里是**完全中性**的（惩罚项全都不触发），
+    而抬脚一旦失衡就是 is_terminated 的 -5 分。实测于是收敛到"贴地蹭/顶在台阶边上"。
+    这个不对称只能用**正的、从 0 开始就有梯度**的项来破：抬 3 cm 拿 0.2，抬 15 cm 拿 1.0。
+
+    为什么用脚离地高度，而不是关节角
+    ------------------------------
+    ref_tracking 罚的是关节角误差，而残差限幅 ±0.55 rad 足以把参考的抬腿整个抵消掉，
+    关节角层面的"跟得上"不等于"脚真的抬起来了"。这里直接量脚底到地形的高度。
+
+    为什么要 max_height 截断
+    ----------------------
+    射线没打到地形时传感器会返回 max_distance(1.0) 或 0。不截断的话"没打到"会被当成
+    "抬到 1 m 高"，直接把这条奖励刷满 —— 又是一个静默的 reward hacking。
+    """
+    from mjlab.tasks.velocity import mdp as _m
+
+    try:
+        h = _m.foot_height(env, sensor_name=sensor_name).to(dtype=torch.float32)
+        c = _m.foot_contact(env, sensor_name=contact_sensor)
+    except Exception:
+        return torch.zeros(env.num_envs, device=_root_pos(env).device)
+
+    if c.dtype == torch.bool:
+        swing = (~c).to(h.dtype)
+    else:
+        swing = (1.0 - c.to(h.dtype)).clamp(0.0, 1.0)
+
+    valid = ((h > 0.0) & (h < float(max_height))).to(h.dtype)
+    lift = torch.clamp(h / max(float(target), 1e-6), 0.0, 1.0)
+
+    try:
+        v_cmd = env.command_manager.get_command(command_name)[:, 1].abs()
+        gate = (v_cmd > float(command_threshold)).to(h.dtype).unsqueeze(-1)
+    except Exception:
+        gate = torch.ones_like(h)
+
+    return (lift * swing * valid * gate).mean(dim=-1)
+
+
 def is_terminated(env) -> torch.Tensor:
     """终止标志（一次性惩罚用）。字段名随版本不同，取不到就返回 0。"""
     for name in ("reset_terminated", "reset_buf", "terminated"):
