@@ -156,19 +156,46 @@ def main() -> int:
             print(f"[INFO] 远端 base 本地缺失，改用同 tree 的本地提交 {diff_base[:10]} 计算差异")
 
         # 差异清单
-        out = git("diff", "--name-status", diff_base, head).decode().strip()
-        if not out:
-            print("[!] base..HEAD 无文件差异，但提交不同（可能只差元数据）。仍会推送。")
-        for line in out.splitlines():
-            parts = line.split("\t")
-            status, path = parts[0], parts[-1]
+        # ⚠️ 必须用 -z：文本模式下 git 会把非 ASCII 路径写成 `"…\344\276\247…"` 这种
+        # 引号+八进制转义（core.quotepath 默认开），解析出来的 path 再喂回 ls-tree
+        # 必然查不到 -> IndexError: list index out of range。中文文件名就是这么炸的。
+        out = git("diff", "--name-status", "-z", diff_base, head)
+        toks = out.split(b"\0")
+
+        # 建一次 path -> (mode, blob_sha) 索引：既避免把中文路径再当 argv 传回 git
+        # （Windows 上会按 ANSI 代码页转，同样会坏），也省掉每文件一次 ls-tree。
+        index: dict[bytes, tuple[str, str]] = {}
+        for rec in git("ls-tree", "-r", "-z", head).split(b"\0"):
+            if not rec:
+                continue
+            meta, _, p = rec.partition(b"\t")
+            f = meta.split()
+            index[p] = (f[0].decode(), f[2].decode())
+
+        n_diff, i = 0, 0
+        while i < len(toks):
+            status = toks[i].decode("utf-8", "replace")
+            if not status:
+                i += 1
+                continue
+            if status.startswith(("R", "C")):     # 重命名/复制多一个旧路径
+                p = toks[i + 2]
+                i += 3
+            else:
+                p = toks[i + 1]
+                i += 2
+            n_diff += 1
+            path = p.decode("utf-8", "surrogateescape")
             if status.startswith("D"):
                 entries.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
                 deletions += 1
                 print(f"  删除 {path}")
                 continue
-            mode = git("ls-tree", head, path).decode().split()[0]
-            raw = git("show", f"{head}:{path}")
+            info = index.get(p)
+            if info is None:
+                sys.exit(f"[ERR] {path} 不在 {head[:10]} 的 tree 里（重命名/子模块？先人工确认）")
+            mode, blob_sha = info
+            raw = git("cat-file", "blob", blob_sha)
             blob = api(
                 "POST",
                 "/git/blobs",
@@ -177,6 +204,8 @@ def main() -> int:
             )["sha"]
             entries.append({"path": path, "mode": mode, "type": "blob", "sha": blob})
             print(f"  写入 {path} ({mode})")
+        if n_diff == 0:
+            print("[!] base..HEAD 无文件差异，但提交不同（可能只差元数据）。仍会推送。")
 
     if deletions > MAX_DELETIONS:
         sys.exit(f"[ERR] 删除 {deletions} 个文件，超过安全阈值 {MAX_DELETIONS}，已中止")
