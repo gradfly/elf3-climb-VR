@@ -621,6 +621,46 @@ ELF3_ALPHA=1.0 .venv/bin/train Elf3-Crab-Residual \
 
 ---
 
+## 12. 台阶高度覆盖：7~25 cm 够不够
+
+**结论：下限够，上限原来不够。** 三层各自封顶在 22 cm。
+
+| 层 | 改之前 | 25 cm 时会怎样 |
+|---|---|---|
+| 训练地形 | flat 0–2 / easy 2–10 / mid 5–16 / hard 8–**22** cm | hard 列顶格 22 → 25 cm 那 3 cm 从没练过 |
+| 参考步态表 | `rise 0.00–0.22`（step 0.02）× tread 0.24/0.30/0.36/0.40 | `_rise_index` 把它 **clamp** 到 0.22 → 参考少抬 3 cm |
+| 高度估计 | clamp 到表范围 | 跟随表，自动 |
+
+`7 cm` 落在 easy(2–10) 与 mid(5–16) 的重叠区，网格有 0.06 / 0.08 两点，插值没问题。
+
+### 12.1 已改（2026-10-31）
+
+1. `terrain_cfg.hard_stairs.step_height_range`：`(0.08, 0.22)` → **`(0.08, 0.25)`**
+2. 参考表重建到 `rise 0.00–0.26`（12 → 14 行）；`build_ref_tables.py --rise-max` 默认同步改 0.26
+3. **原有 12 行逐位一致**（`max|Δ| = 0`），所以 0~22 cm 的参考步态一点没变，老 checkpoint 不受影响
+
+重建实测（本机，`rise 0~0.26` × 4 档踏面，56 组）：
+
+```
+[ 49/56] rise=+0.24 tread=0.24  ok   err=0.22mm
+[ 53/56] rise=+0.26 tread=0.24  ok   err=0.30mm
+[done] 通过 56/56，用时 123 s
+```
+
+最陡的组合（**25 cm 高 + 24 cm 窄踏面**）IK 误差 0.30 mm，可行——这原本是最可能失败的一组。
+`ref_table` 自检全过：`[table] R=14 T=4 ... rise 0.00..0.26`、`[selftest] ALL OK`。
+
+### 12.2 还没覆盖的：20 cm 踏面
+
+`crab_config.json` 的 tread 范围是 0.20–0.40，而参考表只有 0.24 / 0.30 / 0.36 / 0.40。
+20 cm 踏面会 clamp 到 0.24，参考的步幅比实际需要的偏大。
+
+如果实景确实有 20 cm 踏面，要先把表加一列：`--treads 0.20,0.24,0.30,0.36,0.40`（重建约 2 分钟，
+会多跑 14 组）。**但 25 cm + 20 cm 踏面是最陡的组合，得先确认 IK 有没有解**——不过不用猜，
+构建脚本对无解的组会直接打 `NO SOLUTION`。这条没做，因为你问的是高度。
+
+---
+
 ## 附：本版改了哪些代码（审阅用）
 
 | 文件 | 改动 |
@@ -631,3 +671,6 @@ ELF3_ALPHA=1.0 .venv/bin/train Elf3-Crab-Residual \
 | `train/mjlab_tasks/crab/mdp_extra.py` | 新增 `lateral_bias`：EMA(1.8 s) 后的机身系纵向偏置，死区 0.03 后平方<br>新增 `swing_clearance`：脚底离地高度 / 0.15，接触与指令双门控 |
 | `train/mjlab_tasks/crab/env_cfg_residual.py` | 挂上 `r["lateral_bias"]`（weight −80）与 `r["swing_clearance"]`（weight 2.0），标定见 §10.1 / §11.2 |
 | `scripts/read_alpha.py` | 新增 `--stat`：打印指标整条曲线的 min/mean/max，用来判断"是不是恒 0" |
+| `train/mjlab_tasks/crab/terrain_cfg.py` | `hard_stairs.step_height_range` 0.22 → 0.25（目标 7~25 cm，原来 25 cm 那 3 cm 没练过） |
+| `train/assets/ref_tables/crab_ref_v1.npz` | 重建到 `rise 0~0.26`（12 → 14 行），原有 12 行逐位不变 |
+| `train/assets/build_ref_tables.py` | `--rise-max` 默认 0.22 → 0.26 |

@@ -168,7 +168,7 @@ def check(q, swing, dy, tread, worst) -> tuple[bool, list[str]]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(ROOT / "train/assets/ref_tables/crab_ref_v1.npz"))
-    ap.add_argument("--rise-max", type=float, default=0.22)
+    ap.add_argument("--rise-max", type=float, default=0.26)
     ap.add_argument("--rise-step", type=float, default=0.02)
     ap.add_argument("--treads", default="0.24,0.30,0.36,0.40")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 组（冒烟）")

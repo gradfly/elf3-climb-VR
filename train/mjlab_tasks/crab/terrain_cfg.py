@@ -5,7 +5,8 @@
 的速度指令 —— 往 +Y 走就是「侧向上台阶」，正好对应螃蟹步，无需自定义地形生成器。
 
 难度分级用 step_height_range（级高）与 step_width（踏面进深）控制，
-与仓库 crab_config.json 的范围一致（rise 0.10–0.22、tread 0.24–0.40）。
+与仓库 crab_config.json 的范围对齐（目标 rise 7–25 cm、tread 0.20–0.40；
+训练地形实际覆盖 0–25 cm、tread 0.24–0.40，见文件末尾 hard_stairs 的注释）。
 
 ⚠️ 2026-10-29 修正（这是之前训练一直学不会的直接原因）
 ------------------------------------------------------
@@ -54,7 +55,7 @@
 
 行内插值：`step_height = h_min + (h_max-h_min) * difficulty`，difficulty 是该行
 在本 sub_terrain 内的归一化位置（第一行 -> 0，最后一行 -> 1）。所以下限降低
-**不会**削弱最终难度，hard 的顶格仍是 0.22 m。
+**不会**削弱最终难度，hard 的顶格仍是 0.25 m。
 
 `proportion` 在 curriculum 模式下不参与分列（每型固定占一列），留着他处兼容。
 """
@@ -96,10 +97,13 @@ CRAB_STAIRS_CFG = TerrainGeneratorCfg(
             platform_width=1.0,     # -> 半宽 0.52 m；两级边缘 0.52 / 0.84 都在 1 m 内
             border_width=0.6,
         ),
-        # 难（行 0 是 8 cm，顶格仍是 22 cm）
+        # 难（行 0 是 8 cm，顶格 25 cm）
+        # ⚠️ 2026-10-31：顶格 0.22 -> 0.25。目标台阶范围是 7~25 cm（crab_config.json 的
+        # rise_min/max = 0.12/0.25），而原来 22 cm 封顶 —— 25 cm 那 3 cm 完全没练过，
+        # 参考表也 clamp 在 0.22（表已同步重建到 0.26，见 train/assets/ref_tables/）。
         "hard_stairs": pyramid_stairs_inv(
             proportion=0.15,
-            step_height_range=(0.08, 0.22),
+            step_height_range=(0.08, 0.25),
             step_width=0.24,
             platform_width=1.0,     # -> 半宽 0.62 m；两级边缘 0.62 / 0.86
             border_width=0.5,
