@@ -96,8 +96,14 @@ def main() -> int:
       tail = sum(vals[-n:]) / n
       pct = abs(tail - head) / max(abs(head), 1e-9) * 100.0
       arrow = "涨" if tail > head else "降"
-      print(f"{t:<40s} {min(vals):>9.4f} {sum(vals) / len(vals):>9.4f} "
-            f"{max(vals):>9.4f} {vals[-1]:>9.4f}   {arrow} {pct:>5.0f}%")
+      # 量级自适应的格式：学习率这类量是 1e-3 或 1e-7，固定 4 位小数会把它们
+      # 全打成 0.0000，看上去像"lr 变成 0 了"（2026-11-03 真踩过）。
+      mx = max(abs(min(vals)), abs(max(vals)))
+      if mx < 1e-2:
+        cells = " ".join(f"{v:>9.2e}" for v in (min(vals), sum(vals) / len(vals), max(vals), vals[-1]))
+      else:
+        cells = " ".join(f"{v:>9.4f}" for v in (min(vals), sum(vals) / len(vals), max(vals), vals[-1]))
+      print(f"{t:<40s} {cells}   {arrow} {pct:>5.0f}%")
     print(f"[info] run={run}  共 {len(sel)} 个指标", file=sys.stderr)
     return 0
   if a.tag not in tags:
