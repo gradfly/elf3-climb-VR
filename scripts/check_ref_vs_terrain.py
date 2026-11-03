@@ -24,6 +24,8 @@
    「机器人站在地形上、射线以 0.1 m 栅格向下打」时真正会看到的高度场。机器人沿 +Y
    从出生点(平台中心)一路走到第三级踏面，位置连续扫一遍 —— 因为栅格与台阶的相对
    相位是任意的，测出来的值不是一个常数，而是一个分布。
+   测不到边时的兜底 tread 默认**按当前地形列**取（等价模拟
+   `ResidualGaitAction` 的 per-env 兜底）；`--global-fallback` 切回旧的单值行为。
 
 3. **匹配判据**：`select()` 用最近档选 tread（不插值），步态的 `dy_cycle` 恒等于该档
    的 tread —— 即一个周期前进一个踏面。所以
@@ -38,6 +40,7 @@
     python scripts/check_ref_vs_terrain.py              # 全表 + 分布
     python scripts/check_ref_vs_terrain.py --brief      # 只出结论
     python scripts/check_ref_vs_terrain.py --x-offset 0.4   # 机器人横向偏离中心
+    python scripts/check_ref_vs_terrain.py --brief --global-fallback  # 对比旧兜底
 """
 from __future__ import annotations
 
@@ -136,6 +139,8 @@ def main() -> int:
     ap.add_argument("--brief", action="store_true")
     ap.add_argument("--x-offset", type=float, default=0.0)
     ap.add_argument("--samples", type=int, default=60, help="沿 +Y 的站位采样点数")
+    ap.add_argument("--global-fallback", action="store_true",
+                    help="模拟旧的「全 batch 一个兜底 tread」，用于对比回归")
     args = ap.parse_args()
 
     subs = parse_sub_terrains(TERRAIN_CFG)
@@ -143,6 +148,7 @@ def main() -> int:
     rise_grid = np.asarray(tb.rise.cpu())
     tread_grid = np.asarray(tb.tread.cpu())
     geo = {k: geometry(v) for k, v in subs.items()}
+    global_fb = float(tb.mid_tread)          # 旧行为：全 batch 一个兜底值
 
     print(f"[table] {TABLE.name}: rise {rise_grid[0]:.2f}..{rise_grid[-1]:.2f} "
           f"/{rise_grid[1]-rise_grid[0]:.2f} ({tb.R} 档)  "
@@ -158,6 +164,7 @@ def main() -> int:
           f"{'覆盖 OK' if max_rise <= rise_grid[-1] + 1e-9 else '超出表范围！'}")
     print(f"[cover] 踏面真值 {sorted({round(g['step_width'],2) for g in geo.values()})} vs "
           f"表网格 {[round(float(t),2) for t in tread_grid]}")
+    print(f"[fallb] {'全局兜底 %.2f（旧行为）' % global_fb if args.global_fallback else '按列兜底（与 ResidualGaitAction 运行时一致）'}")
     print()
 
     hdr = (f"{'lvl':>3} {'col':<12} {'级高':>5} {'踏面':>5} | {'rise测':>6} {'tread测':>13} "
@@ -170,6 +177,9 @@ def main() -> int:
     col_stat: dict[str, list] = {}
     for col, sub in subs.items():
         g = geo[col]
+        # 运行时每个 env 的兜底 tread 取自它所在的地形列；这里没有 env，
+        # 就按当前列直接把兜底设成该列真踏面，等价模拟。
+        tb.mid_tread = global_fb if args.global_fallback else g["step_width"]
         lo, hi = sub["step_height_range"]
         y_max = min(g["platform_half"] + 3 * g["step_width"], 3.0)
         y_rs = np.linspace(0.0, y_max, args.samples)
@@ -213,8 +223,9 @@ def main() -> int:
         sels = sorted({x[4] for x in st})
         note = ""
         if ne < 2:
-            note = (f"  ← tread 测不出来（<2 条边），一直用兜底 mid_tread "
-                    f"{tb.mid_tread:.2f}")
+            fb = global_fb if args.global_fallback else st[0][3]
+            note = (f"  ← tread 测不出来（<2 条边），用"
+                    f"{'全局' if args.global_fallback else '本列'}兜底 {fb:.2f}")
         print(f"  {col:<12} 踏面 {st[0][3]*100:.0f}cm  选中档 {[round(s*100) for s in sels]}  "
               f"误差 {errs.min()*100:+.0f}%~{errs.max()*100:+.0f}%  "
               f"边数中位 {ne}  valid {vf:.0%}{note}")
@@ -244,7 +255,8 @@ def main() -> int:
     # 单独列出来，免得把兜底值的选择误读成「有台阶的档位失配」。
     rows_with_edge = [x for st in col_stat.values() for x in st if x[6] >= 0.01]
     n_ok_edge = sum(1 for x in rows_with_edge if abs(x[2]) <= 0.03)
-    print(f"  其中 valid=0（近乎平地、测不到台沿，判据不适用）"
+    mode = "全局兜底（旧）" if args.global_fallback else "按列兜底（现）"
+    print(f"  [{mode}] valid=0（近乎平地、测不到台沿，判据本不适用）"
           f" {40 - len(rows_with_edge)} 个；有台沿的 {len(rows_with_edge)} 个里 "
           f"步幅误差 ≤3% 的有 {n_ok_edge} 个。")
     return 0

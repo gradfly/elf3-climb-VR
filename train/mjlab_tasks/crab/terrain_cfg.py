@@ -149,6 +149,26 @@ CRAB_STAIRS_CFG = TerrainGeneratorCfg(
 )
 
 
+def column_treads() -> tuple[float, ...]:
+    """按 `sub_terrains` 的列顺序返回每列的真实踏面（米）。
+
+    `curriculum=True` 时 mjlab 把 num_cols 覆盖成 len(sub_terrains)，一列一种地形，
+    列号就是这里 dict 的插入顺序：flat / easy / mid / hard -> 0.40/0.40/0.30/0.24。
+    `ResidualGaitAction` 用它给每个 env 生成「测不到台阶边」时的兜底 tread：
+    四列踏面不同，单一全局兜底值不可能同时对齐（2026-11-04）。
+    这里从配置对象直接读，避免在动作项里再硬编码一份、日后漂移。
+    """
+    vals: list[float] = []
+    for name, sub in CRAB_STAIRS_CFG.sub_terrains.items():
+        sw = getattr(sub, "step_width", None)
+        if sw is None:                       # 有些 mjlab 版本把参数藏在 function 里
+            sw = getattr(getattr(sub, "function", None), "step_width", None)
+        if sw is None:
+            raise RuntimeError(f"sub_terrain {name!r} 读不到 step_width")
+        vals.append(float(sw))
+    return tuple(vals)
+
+
 def _height_cap() -> float:
   """`ELF3_TERRAIN_CAP`（米）。0 / 未设 = 不封顶。"""
   try:

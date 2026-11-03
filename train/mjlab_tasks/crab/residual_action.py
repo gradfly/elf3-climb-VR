@@ -180,7 +180,11 @@ class ResidualGaitAction(JointPositionAction):
         # ---- per-env 状态 ----
         self._phase = torch.zeros(self._B, device=dev)
         self._rise = torch.zeros(self._B, device=dev)
-        self._tread = torch.full((self._B,), float(self._table.mid_tread), device=dev)
+        # 兜底踏面按「env 所在地形列」给，而不是全 batch 一个标量。四列真实踏面
+        # 0.40/0.40/0.30/0.24 各不相同，单个全局值最多只能对齐一列。
+        self._warned_fallback = False
+        self._refresh_fallback()
+        self._tread = self._fallback.clone()
         self._ref_q = torch.zeros(self._B, self._D, device=dev)
         self._ref_v = torch.zeros(self._B, device=dev)
         self._step_i = 0
@@ -203,6 +207,79 @@ class ResidualGaitAction(JointPositionAction):
             print(f"[residual] target_joints={names}")
             print(f"[residual] table={self._table.R}x{self._table.T} "
                   f"period={self._table.period}")
+
+    # ------------------------------------------------------------ 地形列兜底
+    def _column_index(self) -> torch.Tensor | None:
+        """反查每个 env 站在哪一列地形，返回 [B] long；拿不到返回 None。
+
+        只用 `terrain_origins` 网格和 `env_origins` 做最近邻匹配（与
+        `diagnose_policy.py` 里已验证过的反查方式一致）。
+        **不读 `terrain.terrain_types`**：2026-10-31 实测本版 mjlab 里它与真实
+        台阶高度对不上（type=0 同时出现 12.5 和 8.0 cm），拿它当列号会静默
+        给错兜底 tread —— 比「拿不到、退回全局值」更糟。
+        """
+        dev = self._raw_actions.device
+        scene = getattr(self._env, "scene", None)
+        terr = getattr(scene, "terrain", None)
+        eo = getattr(scene, "env_origins", None)
+        if (terr is None or not torch.is_tensor(eo)
+                or eo.dim() != 2 or eo.shape[0] != self._B or eo.shape[1] < 2):
+            return None
+        grid = None
+        for attr in ("terrain_origins", "origins"):
+            g = getattr(terr, attr, None)
+            if torch.is_tensor(g) and g.dim() == 3 and g.shape[-1] >= 2:
+                grid = g
+                break
+        if grid is None:
+            return None
+        n_col = int(grid.shape[1])
+        cells = grid[..., :2].reshape(-1, 2).to(dev, eo.dtype)     # [R*C, 2]
+        p = eo[:, :2].to(dev, eo.dtype)                              # [B, 2]
+        dd = torch.norm(cells[None, :, :] - p[:, None, :], dim=-1)  # [B, R*C]
+        return (dd.argmin(-1) % n_col).long()
+
+    def _refresh_fallback(self) -> None:
+        """按地形列重算 `self._fallback` [B]；任何一步失败就退回全局兜底值。
+
+        设计成「要么全对、要么保持现状」：宁可这几档不对齐，也不能因为版本
+        差异静默给每个 env 一个错误的步幅。失败只打印一次警告。
+        """
+        dev = self._raw_actions.device
+        default = float(self._table.mid_tread)
+        self._fallback = torch.full((self._B,), default, device=dev)
+
+        def warn(msg: str) -> None:
+            if not self._warned_fallback:
+                print(f"[residual][warn] {msg}；兜底 tread 保持全局 {default:.2f}")
+                self._warned_fallback = True
+
+        try:
+            from .terrain_cfg import column_treads
+            treads = column_treads()
+        except Exception as e:
+            warn(f"读不到地形列踏面（{e!r}）")
+            return
+
+        tv = torch.tensor(treads, dtype=torch.float32, device=dev)
+        # 每列都必须命中参考表网格，否则 select() 会抓到别的档
+        off = (tv[:, None] - self._table.tread[None, :]).abs().min(-1).values
+        if bool((off > 1e-4).any()):
+            warn(f"地形列踏面 {treads} 有值不在表网格上")
+            return
+        cols = self._column_index()
+        if cols is None:
+            warn("拿不到 terrain_origins / env_origins，无法反查地形列")
+            return
+        self._fallback.copy_(tv[cols.to(dev).clamp(0, len(treads) - 1)])
+        # 成功启用时打印一次，供训练机核对「列号 -> 踏面」是否与实测一致。
+        # 这是本地（无 mjlab）唯一验证不了的一环，必须能在日志里看到。
+        if not getattr(self, "_printed_fallback", False):
+            counts = torch.bincount(cols.cpu(), minlength=len(treads)).tolist()
+            print(f"[residual] 列兜底 tread 已启用：列->踏面 "
+                  f"{dict(enumerate(round(x, 2) for x in treads))}，"
+                  f"各列 env 数 {counts}（请用 --dump-scan-all 核对）")
+            self._printed_fallback = True
 
     # ------------------------------------------------------------ 辅助
     def _target_joint_names(self):
@@ -300,9 +377,12 @@ class ResidualGaitAction(JointPositionAction):
             self._scan_ok = False
             return
         self._scan_ok = True
-        rise, tread, valid = self._table.estimate(h, nx=nx, ny=ny,
-                                                  size_y=float(self.cfg.scan_size[1]),
-                                                  res=float(self.cfg.scan_resolution))
+        rise, tread, valid = self._table.estimate(
+            h, nx=nx, ny=ny,
+            size_y=float(self.cfg.scan_size[1]),
+            res=float(self.cfg.scan_resolution),
+            fallback_tread=self._fallback,   # 只有 1 条边时也要按本列兜底，别污染 EMA
+        )
         self._last_valid = valid
         self._last_raw_rise = rise
         a = float(self.cfg.rise_ema_alpha)
@@ -334,7 +414,10 @@ class ResidualGaitAction(JointPositionAction):
         pick = torch.randint(0, choices.numel(), (n,), device=self._raw_actions.device)
         self._phase[env_ids] = choices[pick]
         self._rise[env_ids] = 0.0
-        self._tread[env_ids] = self._table.mid_tread
+        # __init__ 时 scene 的 terrain_origins 可能还没就绪，reset 再取一次。
+        # 列终身不变、只有课程行会变，所以重算不会引入跳变。
+        self._refresh_fallback()
+        self._tread[env_ids] = self._fallback[env_ids]
         r = getattr(super(), "reset", None)
         if callable(r):
             r(env_ids)

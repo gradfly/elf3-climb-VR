@@ -129,8 +129,14 @@ class RefTable:
     def estimate(self, heights: torch.Tensor, *, nx: int = 13, ny: int = 21,
                  size_y: float = 2.0, res: float = 0.1, edge_thr: float = 0.03,
                  y_min: float = 0.15, y_max: float = 1.00, sigma: float = 0.50,
-                 dh_max: float = 0.30):
+                 dh_max: float = 0.30,
+                 fallback_tread: float | torch.Tensor | None = None):
         """从 height_scan（米，[B, nx*ny]）估计 (rise[B], tread[B], valid[B])。
+
+        `fallback_tread`：测不到两条边（gap_cnt<1，近平地/真平地）时用的兜底踏面。
+        标量 = 全 batch 同一个值（默认 `self.mid_tread`）；[B] 张量 = 每个 env
+        用自己那一列地形的真实踏面。后者是 2026-11-04 加的：全局兜底只能对齐
+        一列，四列踏面 0.40/0.40/0.30/0.24 不可能同时命中。
 
         三处关键修正（2026-10-29，两次实跑数据反推）
         ------------------------------------------
@@ -196,7 +202,19 @@ class RefTable:
             prev_idx = torch.where(is_edge, torch.full_like(prev_idx, float(i)), prev_idx)
 
         tread = gap_sum / gap_cnt.clamp_min(1.0)
-        tread = torch.where(gap_cnt >= 1, tread, torch.full_like(tread, self.mid_tread))
+        if fallback_tread is None:
+            fallback = torch.full_like(tread, self.mid_tread)
+        elif torch.is_tensor(fallback_tread):
+            fb = fallback_tread.to(self.device, torch.float32).reshape(-1)
+            if fb.numel() == 1:
+                fallback = fb.expand(B)
+            elif fb.numel() == B:
+                fallback = fb
+            else:
+                raise ValueError(f"fallback_tread 长度 {fb.numel()} != batch {B}")
+        else:
+            fallback = torch.full_like(tread, float(fallback_tread))
+        tread = torch.where(gap_cnt >= 1, tread, fallback)
         tread = tread.clamp(float(self.tread[0]), float(self.tread[-1]))
         return rise, tread, valid
 
@@ -271,6 +289,19 @@ def _selftest() -> int:
           f"(want {FALLBACK_TREAD:.2f}) valid={bool(v0[0])} "
           f"{'OK' if flat_fb_ok else 'FAIL'}")
     ok_all = ok_all and flat_fb_ok
+
+    # 4e) per-env 兜底：同一个 batch 里两个 env 可以按各自地形列取不同值。
+    #     B>1 也顺带守住「别把 [B] 张量广播成 [B,B]」这类形状错误。
+    hs2 = torch.cat([profile_to_heights(np.full(ny, 1.0)),
+                     profile_to_heights(np.full(ny, 1.0))], 0)
+    fb2 = torch.tensor([FALLBACK_TREAD, 0.40], dtype=torch.float32)
+    _, t2, v2 = tb.estimate(hs2, fallback_tread=fb2)
+    per_env_ok = (abs(float(t2[0]) - FALLBACK_TREAD) < 1e-5
+                  and abs(float(t2[1]) - 0.40) < 1e-5
+                  and not bool(v2.any()))
+    print(f"[selftest] per-env fallback   tread={[round(float(x), 3) for x in t2]} "
+          f"(want [{FALLBACK_TREAD:.2f}, 0.40]) {'OK' if per_env_ok else 'FAIL'}")
+    ok_all = ok_all and per_env_ok
 
     # 5) 含无效射线（5.0）要被过滤
     p = np.full(ny, 1.0); p[ys >= 0.4] -= 0.12
