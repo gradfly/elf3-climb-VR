@@ -42,6 +42,10 @@ def main() -> int:
                   help="列出这个 run 里所有 scalar tag（找学习率、KL 这类不常见的名字时用）")
   ap.add_argument("--first", type=int, default=0, metavar="N",
                   help="只打印前 N 个采样点（看起点用，配合 --stat 一起判断是不是从一开始就在漂）")
+  ap.add_argument("--grep", action="append", default=[], metavar="PAT",
+                  help="一次打印所有【tag 名包含 PAT】的指标的统计（可重复，"
+                       "如 --grep ref_tracking --grep rise_est）。"
+                       "省得为了几个指标反复查 tag 名")
   a = ap.parse_args()
 
   run = a.run
@@ -71,6 +75,30 @@ def main() -> int:
   if a.list:
     for t in tags:
       print(t)
+    return 0
+  if a.grep:
+    # 一次性把关心的几个指标全打出来：min/mean/max/末值 + 首5→后5 的变化率。
+    # 「首→末」比极值有用：发散类问题（熵压过任务奖励、奖励被某一项主导）
+    # 看的就是这个箭头，极值反而会被开局前几轮带偏。
+    import re
+    pat = re.compile("|".join(re.escape(g) for g in a.grep), re.I)
+    sel = [t for t in tags if pat.search(t)]
+    if not sel:
+      print(f"[ERR] 没有匹配 {a.grep} 的 tag。先跑 --list 看真实名字", file=sys.stderr)
+      return 2
+    print(f"{'tag':<40s} {'min':>9s} {'mean':>9s} {'max':>9s} {'last':>9s}   首→末")
+    for t in sel:
+      vals = [e.value for e in ea.Scalars(t)]
+      if not vals:
+        continue
+      n = min(5, len(vals))
+      head = sum(vals[:n]) / n
+      tail = sum(vals[-n:]) / n
+      pct = abs(tail - head) / max(abs(head), 1e-9) * 100.0
+      arrow = "涨" if tail > head else "降"
+      print(f"{t:<40s} {min(vals):>9.4f} {sum(vals) / len(vals):>9.4f} "
+            f"{max(vals):>9.4f} {vals[-1]:>9.4f}   {arrow} {pct:>5.0f}%")
+    print(f"[info] run={run}  共 {len(sel)} 个指标", file=sys.stderr)
     return 0
   if a.tag not in tags:
     print(f"[ERR] {run} 里没有 {a.tag}（ref_probe 没跑？现有 tag 样例：{tags[:4]}）",
