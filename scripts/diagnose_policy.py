@@ -702,6 +702,34 @@ def main(argv=None) -> int:
     runner = runner_cls(env, asdict(agent_cfg), device=device)
     runner.load(args.checkpoint, load_cfg={"actor": True}, strict=True, map_location=device)
     policy = runner.get_inference_policy(device=device)
+
+    # 归一化统计量体检（2026-11-03）。
+    # 为什么：`obs_normalization=True` 时 actor 内部带着 running mean/var，策略的行为
+    # 依赖它。如果 checkpoint 里这部分没被加载（或训练中漂移到别的尺度），策略就会
+    # 在"错误的输入尺度"下推理 —— 表现为「训练报 7.3 s、eval 报 2.98 s」这种
+    # 同模型同配置却差 2.4 倍的情况。打出来一眼可判：
+    #   mean|v| ≈ 0 且 std ≈ 1  ->  基本是恒等，多半没加载
+    #   mean|v| 明显非 0        ->  有真实统计量，加载正常
+    try:
+        _obj = getattr(getattr(runner, "alg", None), "actor", None)
+        _hit = False
+        for _name, _mod in getattr(_obj, "named_modules", lambda: [])():
+            _parts = []
+            for _attr in ("running_mean", "running_var"):
+                _v = getattr(_mod, _attr, None)
+                if torch.is_tensor(_v) and _v.numel() > 1:
+                    _parts.append(f"{_attr}: |v|均值={float(_v.abs().mean()):.4f} "
+                                  f"[{float(_v.min()):+.3f}, {float(_v.max()):+.3f}]")
+            if _parts:
+                print(f"[norm] {_name or 'actor'}  " + "  ".join(_parts))
+                _hit = True
+                break
+        if not _hit:
+            print("[norm] 没找到 running_mean/running_var（这个版本可能用别的名字，"
+                  "或归一化在别处实现）")
+    except Exception as _e:
+        print(f"[norm] 体检失败：{_e!r}")
+
     print(f"[info] 已加载 checkpoint: {args.checkpoint}")
 
   out = env.reset()
