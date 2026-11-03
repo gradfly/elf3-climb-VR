@@ -465,6 +465,44 @@ def evaluate_conditions(env, base, policy, *, levels, cmds, episodes, seconds,
         except Exception:
             pass
 
+    # ---- 开关生效自检 ----
+    # 环境变量设了但服务器代码没更新时，动作项会**静默忽略**它，表现是
+    # "五档数据纹丝不动"——2026-11-03 连续两次把「没生效」当成数据读。
+    # 这里对照动作项的真实状态硬校验，不匹配直接退出，杜绝第三次。
+    def _env_float(name: str):
+        _v = os.environ.get(name, "").strip()
+        try:
+            return float(_v) if _v else None
+        except ValueError:
+            return None
+
+    if term is not None:
+        _want_rs = _env_float("ELF3_RESIDUAL_SCALE")
+        if _want_rs is not None:
+            _got = getattr(term, "_res_scale", float("nan"))
+            if _got != _got or abs(float(_got) - _want_rs) > 1e-6:
+                raise SystemExit(
+                    f"[ERR] ELF3_RESIDUAL_SCALE={_want_rs} 没生效"
+                    f"（动作项实际 _res_scale={_got}）。"
+                    f"代码缺 residual_scale 支持（commit 2a658d8 才有）——"
+                    f"先在服务器上 git fetch origin main && git reset --hard origin/main。")
+        _want_leg = _env_float("ELF3_LEG_CLIP")
+        if _want_leg is not None and clip_action is not None:
+            try:
+                _sc = getattr(term, "_scale", None)
+                _rad = (clip_action.float() *
+                        (float(_sc) if not torch.is_tensor(_sc) else _sc.float()))[0]
+                _leg_rad = float(_rad[leg_ids].mean())
+                if abs(_leg_rad - _want_leg) > 1e-3:
+                    raise SystemExit(
+                        f"[ERR] ELF3_LEG_CLIP={_want_leg} 没生效"
+                        f"（腿实际限幅 {_leg_rad:.3f} rad）。"
+                        f"代码缺 ELF3_*_CLIP 支持（commit fd981e3 才有）—— 先对齐 origin/main。")
+            except SystemExit:
+                raise
+            except Exception:
+                pass
+
     ref_ok = False
     records: list[dict] = []
     cond_idx = 0
