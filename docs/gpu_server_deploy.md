@@ -213,14 +213,14 @@ bash train/install_task.sh              # 期望：已注册 4 个 Elf3-Crab-* �
 
 ### 4.6 确认残差参考表
 
-`train/assets/ref_tables/crab_ref_v1.npz`（约 207 KB，48 组 rise × tread）**已随仓库提供**，
+`train/assets/ref_tables/crab_ref_v1.npz`（约 241 KB，56 组 rise × tread）**已随仓库提供**，
 clone 下来即可用。确认一下它在：
 
 ```bash
-ls -l train/assets/ref_tables/crab_ref_v1.npz   # 期望约 207 KB
+ls -l train/assets/ref_tables/crab_ref_v1.npz   # 期望约 241 KB
 ```
 
-只有在「改了几何参数域、要按新范围重建」或「文件缺失」时才需要重算（纯 CPU，约 90 s）：
+只有在「改了几何参数域、要按新范围重建」或「文件缺失」时才需要重算（纯 CPU，约 100 s）：
 
 ```bash
 python train/assets/build_ref_tables.py

@@ -383,10 +383,17 @@ def _retune_curriculum(cfg) -> None:
     if cfg.curriculum is not None and "terrain_levels" in cfg.curriculum:
         cfg.curriculum["terrain_levels"] = CurriculumTermCfg(
             func=X.terrain_levels_time,
-            # min_dist 0.30 -> 0.90（2026-10-31）：碗底平台半宽 0.52~0.80 m，
+            # min_dist 0.30 -> 0.90（2026-10-31；半宽 2026-11-03 订正）：
+            # 碗底平台半宽按 mjlab 源码实算是 flat 1.00 / easy 0.80 / mid 0.40 /
+            # hard 0.62 m（旧的「0.52~0.80、flat 0.60」是误注：flat 的
+            # (8-2*1.0-1.2)/(2*0.40)=5.999999999999999 被 int() 截成 5 -> 1.00 m）。
             # 原来"在平台上蹭 0.3 m"就够升级 —— 课程涨到 levels≈5.8 的同时，
-            # 一批 env 仍卡在第一级台阶边缘（Δy≈0.83 m）。0.90 在四列上都超出平台边缘，
-            # 等于要求"至少踏上第一级台阶"。
+            # 一批 env 仍卡在第一级台阶边缘（Δy≈0.83 m）。
+            # 0.90 在 easy/mid/hard 三列都落在平台边缘之外（0.80/0.40/0.62），
+            # 等于要求"至少踏上第一级台阶"；flat 列半宽 1.00 m > 0.90 是例外，
+            # 但该列级高 ≤2 cm 本来就没有台阶可爬。
+            # 2026-11-03 mid 半宽 0.52 -> 0.40 后判据更严：0.90 需在平台外再走 0.50 m
+            #（越过 0.40 与 0.70 两级）。若升级变慢去调 swing_clearance，别回调门槛。
             # demote_frac 0.10 -> 0.40（8 s）：0.10 的降级线是 2 s，而略差的策略会稳定在
             # 2~4 s —— 落在 [2 s, 5 s] 的死带里，既不降级也升不了级，课程被冻死。
             # 实测 1400 轮 ep_len=2.52 s、rise_est=0.15，就是这个死锁。

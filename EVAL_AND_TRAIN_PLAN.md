@@ -122,7 +122,7 @@ ELF3_ALPHA=1.0 ELF3_PUSH_SCALE=0.75 ...后续同上...
 - 验证：`Metrics/ref_alpha` 与 `Metrics/rise_est` 接近 1.0；`climb_rate`（L≥4）≥ 80%；`track_ratio` 不随 push 加大而跌破 0.75。
 
 **第 3 步：只解决"站上台阶后的末端稳定性"**
-- 平台末端（平台宽度 0.52~0.80 m）站稳后再迈步是关键瓶颈。若 2b 后 climb_rate 仍不足：
+- 平台末端（碗底平台半宽 0.40~1.00 m：flat 1.00 / easy 0.80 / mid 0.40 / hard 0.62；2026-11-03 mid 由 0.52 缩到 0.40 m）站稳后再迈步是关键瓶颈。若 2b 后 climb_rate 仍不足：
   - 用 `ELF3_REWARD_OFF` 做单项 A/B（repo 已支持），先关 `track_angular_velocity`（只鼓励转圈、不鼓励前进）或 `foot_slip`，找出哪个项在"搬石头砸自己脚"。
   - 给 `upright`/`lin_vel_z` 权重微调前，先确认 2a/2b 已到位，否则容易把"没站稳"误诊成"站不稳"。
 

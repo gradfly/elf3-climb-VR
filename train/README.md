@@ -244,12 +244,12 @@ python web/tools/bake_crab.py
 旧任务 `Elf3-Crab-Stairs` 保持不动，可继续用 `model_9297.pt` 对比。  
 新任务把 `crab_climb.py` 的步态离线做成参考表，策略只输出限幅残差。
 
-### 9.1 生成参考表（纯 CPU，约 90 s）
+### 9.1 生成参考表（纯 CPU，约 100 s）
 
 ```bash
 python train/assets/build_ref_tables.py
-# 48 组（rise 0–0.22 步长 0.02 × tread 0.24/0.30/0.36/0.40）
-# 全部通过后写出 train/assets/ref_tables/crab_ref_v1.npz（约 0.2 MB）
+# 56 组（rise 0–0.26 步长 0.02 × tread 0.24/0.30/0.36/0.40）  2026-10-31 起
+# 全部通过后写出 train/assets/ref_tables/crab_ref_v1.npz（约 0.24 MB）
 ```
 
 自检项：IK 误差、帧间二阶差（不是一阶——抬腿快是正常钟形加速）、  
