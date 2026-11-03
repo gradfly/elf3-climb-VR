@@ -69,10 +69,12 @@ import glob
 import json
 import math
 import os
+import random
 import statistics
 import sys
 from dataclasses import asdict
 
+import numpy as np
 import torch
 
 EXPECTED_OBS = {"residual": 393, "base": 290}
@@ -275,6 +277,13 @@ def _force_terrain_level(base, level: int) -> int | None:
     if origins is not None:
         types = getattr(terr, "terrain_types", None)
         if types is not None and torch.is_tensor(types):
+            # 列（地形类型）也做成确定性的：env i 固定落在第 i % ncols 列。
+            # 默认是建模时随机分配的，同一 checkpoint 两次评测会抽到不同的列配比，
+            # 实测 L0 的 fall 能差 9% vs 64% —— 那样任何 A/B 都不成立。
+            ncols = int(origins.shape[1]) if origins.dim() >= 2 else 0
+            if ncols > 0 and types.numel() > 0:
+                idx = torch.arange(types.numel(), device=types.device)
+                types[:] = (idx % ncols).to(types.dtype)
             terr.env_origins[:] = origins[int(level), types]
     return int(level)
 
@@ -909,6 +918,16 @@ def main(argv=None) -> int:
             setattr(tw, k, val)
         except Exception:
             pass
+
+    # ⚠️ 建环境之前必须固定全局随机源。
+    # 地形块的**列分配**（每个 env 落在 flat/easy/mid/hard 哪一列）是在建模时随机生成的，
+    # 而 `torch.manual_seed()` 只在每个条件 reset 前调用 —— 它管不到建模那一次。
+    # 后果实测（同一个 model_7047、同一条命令、两次运行）：
+    #     L0 的 fall 9% -> 64%，L4 58% -> 79%，dy 3.26 -> 1.57
+    # 也就是说这种差异全部来自"这次抽到几个 hard 列"，与模型无关。
+    random.seed(int(args.seed))
+    np.random.seed(int(args.seed) % (2 ** 32))
+    torch.manual_seed(int(args.seed))
 
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
