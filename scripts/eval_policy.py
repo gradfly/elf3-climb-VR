@@ -443,6 +443,28 @@ def evaluate_conditions(env, base, policy, *, levels, cmds, episodes, seconds,
                     break
             except Exception:
                 continue
+    # 打印**有效限幅（弧度）**：ELF3_*_CLIP 是否真的生效，一眼可查。
+    # 为什么要打印：限幅是动作空间的映射，改它不报错、也不改网络维度。
+    # 若环境变量没被读到（服务器代码没更新 / 名字拼错），表现就是
+    # "五个档位什么都没变"——极易把「没生效」误判成「假设被推翻」。
+    if clip_action is not None:
+        try:
+            _sc = getattr(term, "_scale", None)
+            if _sc is not None:
+                _ca = clip_action.float()
+                _rad = (_ca * (float(_sc) if not torch.is_tensor(_sc)
+                               else _sc.float()))[0].flatten()
+                if leg_ids is not None:
+                    _m = torch.ones(_rad.numel(), dtype=torch.bool,
+                                    device=_rad.device)
+                    _m[leg_ids.to(_rad.device)] = False
+                    print(f"[cfg] 有效残差限幅：腿 {_rad[leg_ids.to(_rad.device)].mean():.3f} rad "
+                          f"/ 非腿 {_rad[_m].mean():.3f} rad（ELF3_LEG/WAIST/ARM_CLIP 可覆盖）")
+                else:
+                    print(f"[cfg] 有效残差限幅（均值）：{_rad.mean():.3f} rad")
+        except Exception:
+            pass
+
     ref_ok = False
     records: list[dict] = []
     cond_idx = 0
@@ -866,6 +888,13 @@ def main(argv=None) -> int:
     # 环境变量必须在注册任务之前设置：env_cfg_residual 在构造时读取它们。
     if args.alpha is not None:
         os.environ["ELF3_ALPHA"] = repr(float(args.alpha))
+    # 奖励项只作用于**训练**。评测时策略已冻结，关掉某项奖励不会改变行为，
+    # 多跑几组之间的差异全是采样噪声 —— 别用它判断"这项奖励有没有咬住"。
+    # 正确姿势：读训练曲线 Episode_Reward/<term> 的量级（scripts/read_alpha.py）。
+    _off = os.environ.get("ELF3_REWARD_OFF", "").strip()
+    if _off:
+        print(f"[warn] ELF3_REWARD_OFF={_off!r} 在评测阶段不改变策略行为"
+              f"（奖励只影响训练期）。本组结果只能当噪声样本 / 可复现性检查用。")
 
     import mjlab.tasks  # noqa: F401
     from mjlab.envs import ManagerBasedRlEnv
