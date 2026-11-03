@@ -36,6 +36,7 @@ viser 里靠肉眼只能看到「站一会儿就倒」，无法区分：
 from __future__ import annotations
 
 import argparse
+import glob
 import math
 import os
 import statistics
@@ -457,18 +458,18 @@ def _dump_scan(base, term, env_i: int = 0, brief: bool = False) -> None:
     print(f"[scan] 机器人 root=({float(_root_pos(base)[env_i, 0]):+.2f}, "
           f"{float(_root_pos(base)[env_i, 1]):+.2f}, "
           f"{float(_root_pos(base)[env_i, 2]):+.2f})")
-  terr = getattr(getattr(base, "scene", None), "terrain", None)
-  for attr in ("terrain_levels", "levels"):
-    v = getattr(terr, attr, None)
-    if v is not None and torch.is_tensor(v):
-      print(f"[scan] 地形等级 env{env_i} = {int(v[env_i])}")
-      break
 
-  # 反查这个 env 真正落在哪一行哪一列。
-  # 为什么要它：`terrain_levels` 只是一个计数器的读数，和实际出生点不一定是同一件事
-  # （2026-10-31 实测矛盾：level 全 0，但 rise_est 均值 0.17，而被强制 level 0 的探针
-  #   只有 0.086）。`terrain_origins` 是 (行, 列, 3) 的格子原点表，拿 env_origins 去匹配
-  # 最接近的格子，就能绕开计数器直接看它在哪一行。
+  # 反查这个 env 真正落在哪一行哪一列（brief 模式也打，因为「level 和实际格子是不是一回事」
+  # 正是这套地形最反复出问题的地方，扫全部 env 时最需要它）。
+  # `terrain_origins` 是 (行, 列, 3) 的格子原点表，拿 env_origins 去匹配最接近的格子，
+  # 就能绕开 `terrain_levels` 这个计数器直接看它站在哪一行。
+  terr = getattr(getattr(base, "scene", None), "terrain", None)
+  lvv = -1
+  try:
+    lv = getattr(terr, "terrain_levels", None)
+    lvv = int(lv[env_i]) if torch.is_tensor(lv) else -1
+  except Exception:
+    pass
   try:
     grid = None
     for attr in ("terrain_origins", "origins"):
@@ -479,18 +480,20 @@ def _dump_scan(base, term, env_i: int = 0, brief: bool = False) -> None:
     eo = getattr(getattr(base, "scene", None), "env_origins", None)
     if grid is not None and torch.is_tensor(eo):
       p = eo[env_i, :2].to(grid.dtype)
-      d = torch.norm(grid[..., :2] - p, dim=-1)
-      r, c = np.unravel_index(int(torch.argmin(d).item()), tuple(d.shape))
-      lv = getattr(terr, "terrain_levels", None)
-      lvv = int(lv[env_i]) if torch.is_tensor(lv) else -1
+      dd = torch.norm(grid[..., :2] - p, dim=-1)
+      r, c = np.unravel_index(int(torch.argmin(dd).item()), tuple(dd.shape))
       flag = "  ⚠️ 与计数器不符 -> 别信 terrain_levels" if (lvv >= 0 and lvv != int(r)) else ""
       print(f"[scan] env{env_i} 实际格子 row={int(r)} col={int(c)}"
-            f"（terrain_levels={lvv}，格子数 {tuple(d.shape)}）{flag}")
-    else:
+            f"（terrain_levels={lvv}，格子数 {tuple(dd.shape)}）{flag}")
+    elif not brief:
       print("[scan] 拿不到 terrain_origins，无法反查行号")
   except Exception as e:
-    print(f"[scan] 反查格子失败：{e!r}")
-  print("-" * 62)
+    if not brief:
+      print(f"[scan] 反查格子失败：{e!r}")
+  if not brief:
+    print("-" * 62)
+  else:
+    print(f"[scan] {'-' * 40}")
 
 
 def main(argv=None) -> int:
@@ -677,6 +680,24 @@ def main(argv=None) -> int:
 
     policy = _Zero()
   else:
+    # ⚠️ 先体检：训练被 kill / Ctrl-C 时，正在写盘的那个 checkpoint 会是**空文件或截断**，
+    # torch.load 一路走到 pickle 才炸，报的是 `EOFError: Ran out of input` ——
+    # 这个报错完全看不出是「文件坏了」，实测浪费过一整轮排查（2026-11-03）。
+    # 而且 `ls -t | head -1`（以及 --agent.resume 的默认取法）恰好都会选中它。
+    sz = os.path.getsize(args.checkpoint) if os.path.exists(args.checkpoint) else -1
+    if sz < 4096:
+      print(f"[ERR] checkpoint 只有 {sz} 字节，是被截断的（训练中断时正在写盘）。")
+      d = os.path.dirname(os.path.abspath(args.checkpoint))
+      good = [c for c in sorted(glob.glob(os.path.join(d, "model_*.pt")),
+                                key=os.path.getmtime, reverse=True)
+              if os.path.getsize(c) > 4096]
+      if good:
+        print("      同目录下最近 3 个完好的（挑一个重跑）：")
+        for c in good[:3]:
+          print(f"        {c}  ({os.path.getsize(c) // 1024} KB)")
+      else:
+        print(f"      {d} 里没有完好的 checkpoint。")
+      return 2
     runner_cls = load_runner_cls(args.task) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=device)
     runner.load(args.checkpoint, load_cfg={"actor": True}, strict=True, map_location=device)
