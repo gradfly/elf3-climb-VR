@@ -229,6 +229,18 @@ python train/assets/build_ref_tables.py
 自检会验证 IK 误差、帧间二阶差（不是一阶——抬腿快是正常钟形加速）、`dy_cycle ≈ tread`、
 限位余量，任一不过会直接报错。文件缺失时跑 `Elf3-Crab-Residual`，会在 reset 时报找不到参考表。
 
+兜底踏面（测不到台阶边时用的值）按 env 所在地形列取，映射靠
+`terrain_cfg.column_treads()` + `env_origins`/`terrain_origins` 反查。**启动时检查这一行**：
+
+```
+[residual] 列兜底 tread 已启用：列->踏面 {0: 0.4, 1: 0.4, 2: 0.3, 3: 0.24}，各列 env 数 [...]
+```
+
+- 看到它 = 映射生效，40 个地形档位的参考步幅全部对齐。
+- 看到 `[residual][warn] ... 兜底 tread 保持全局 0.30` = 这个 mjlab 版本拿不到列信息。
+  训练仍能正常跑，只是近平地档位的步幅会差 25%（原因与修法见 `train/README.md` 9.1.1）。
+- 列号与实测踏面是否一致，用 `diagnose_policy.py --dump-scan-all` 核对一次。
+
 ---
 
 ## 5. 首次验收：三层冒烟

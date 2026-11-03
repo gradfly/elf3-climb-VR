@@ -261,6 +261,56 @@ python train/assets/build_ref_tables.py
 python train/mjlab_tasks/crab/ref_table.py
 ```
 
+### 9.1.1 兜底踏面：测不到台阶边时按地形列取（2026-11-04）
+
+`RefTable.estimate()` 只在「+Y 半侧至少找到两条上升边」时给得出 tread。级高 ≤
+`edge_thr`（0.03 m）的行、以及级高恰为 0 的行（flat row0 / easy row0）都找不到边，
+tread 走兜底值。四列地形的真实踏面是 **0.40 / 0.40 / 0.30 / 0.24**，所以兜底值
+**必须按 env 所在的地形列给**，一个全局标量最多只能对齐一列：
+
+| 兜底方式 | 40 个 (列,行) 档位的步幅误差 |
+|---|---|
+| 全局 0.30（2026-11-03 版） | 26 个 ≤3%、0 个 3~10%、**14 个 >10%**（flat 全 10 行、easy row0-2 各 −25%，hard row0 +25%） |
+| 按列兜底（现） | **40 个全部 ≤3%**（24 个有台沿档位 + 16 个近平地档位误差都是 0） |
+
+实现分三处，**缺一处就会被 EMA 污染**：
+
+1. `terrain_cfg.column_treads()`：按 `CRAB_STAIRS_CFG.sub_terrains` 的列顺序读
+   `step_width`，得到 `(0.40, 0.40, 0.30, 0.24)`，不在动作项里硬编码第二份配置。
+2. `ResidualGaitAction._fallback [B]`：用 `terrain.terrain_origins`（[行,列,3]）与
+   `scene.env_origins`（[B,3]）最近邻反查列号（`idx % 列数`），映射成该列踏面。
+   `__init__`、`reset()`、`_update_terrain()` 三处都用它。
+3. `RefTable.estimate(fallback_tread=...)`：接受标量或 `[B]` 张量。**「只找到 1 条边」
+   时 `gap_cnt=0` 也会返回兜底值**，所以这里也必须传 per-env 值。
+
+> **不要用 `terrain.terrain_types` 当列号**：2026-10-31 实测本版 mjlab 里它与真实
+> 台阶高度对不上（type=0 同时出现 12.5 和 8.0 cm）。静默给错列比拿不到更糟。
+
+全链路降级：`terrain_cfg` 导入失败 / 列踏面不在表网格 / 拿不到列号 → 打印一次
+`[residual][warn]` 并退回全局 0.30（即上一版行为），训练不会崩。成功时启动日志有：
+
+```
+[residual] 列兜底 tread 已启用：列->踏面 {0: 0.4, 1: 0.4, 2: 0.3, 3: 0.24}，各列 env 数 [...]
+```
+
+**训练机上要核对一次**这个「列号 → 踏面」映射与实测一致（这是本地唯一验证不了的一环）：
+
+```bash
+MUJOCO_GL=egl .venv/bin/python scripts/diagnose_policy.py --dump-scan-all --terrain-level 6
+```
+
+离线回归（不需要 mjlab / GPU）：
+
+```bash
+python scripts/check_ref_vs_terrain.py --brief
+# 期望：匹配 40 / 轻微 0 / 明显 0
+python scripts/check_ref_vs_terrain.py --brief --global-fallback   # 对照旧行为 26/0/14
+```
+
+行为影响：平地 env 现在分别走 0.40 档（`v_ref` 0.2222 m/s）/ 0.30（0.1667）/ 0.24（0.1333），
+好处是「平地兜底 → 走到台阶边实测」不再有步频跳变。**旧 checkpoint 的分数卡不可横比**，
+需续训 + 重评测。
+
 ### 9.2 安装与训练
 
 ```bash
