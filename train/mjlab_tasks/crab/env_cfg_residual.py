@@ -522,6 +522,33 @@ def _alpha_start() -> float:
         return 0.0
 
 
+def _clip_rad(tag: str, default: float) -> float:
+    """残差限幅（弧度）可用环境变量覆盖：ELF3_LEG_CLIP / ELF3_WAIST_CLIP / ELF3_ARM_CLIP。
+
+    为什么要有这个开关：`leg_clip_rad` 是「策略能在多大程度上推翻脚本步态」的
+    硬上限。它同时是**动作空间的映射**——改它不需要改网络维度，所以可以用
+    旧 checkpoint 做零样本对拍（限幅收紧 = 同样的策略输出被压小），
+    先花 5 分钟验证假设，再决定要不要重训。
+
+    读法上注意：`sat_frac` 的定义是「|残差| 顶到限幅」，限幅一变阈值就变，
+    **跨限幅不可比**。要跨设置比较，看 yaw / v_lon / ref_track / ref_rms。
+    """
+    env = f"ELF3_{tag.upper()}_CLIP"
+    raw = os.environ.get(env)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        val = float(raw)
+    except ValueError:
+        print(f"[cfg][warn] {env}={raw!r} 不是数字，用默认 {default}")
+        return default
+    if val <= 0.0:
+        print(f"[cfg][warn] {env}={val} 必须 > 0，用默认 {default}")
+        return default
+    print(f"[cfg] 限幅覆盖 {tag}_clip_rad: {default} -> {val} rad（{env}）")
+    return val
+
+
 def _ramp_steps(play: bool) -> int:
     """α 课程总步数。可用 `ELF3_RAMP_ITERS`（单位 iteration，内部 ×24）覆盖。"""
     default = 1500 * 24
@@ -555,9 +582,9 @@ def crab_residual_env_cfg(play: bool = False):
         # 而腿残差限幅换算下来约 2.0 action 单位 —— 策略想动但被 clamp 卡死，
         # 限幅外梯度恒为 0，再想加力也没用。放宽到 0.55（≈2.75 单位）解除天花板。
         # 代价：实际动作幅度上限 +37%，单腿支撑时更容易失衡，ep_len 短期会掉。
-        leg_clip_rad=0.55,
-        waist_clip_rad=0.20,
-        arm_clip_rad=0.20,
+        leg_clip_rad=_clip_rad("leg", 0.55),
+        waist_clip_rad=_clip_rad("waist", 0.20),
+        arm_clip_rad=_clip_rad("arm", 0.20),
         scan_size=SCAN_SIZE,
         scan_resolution=0.1,
         terrain_refresh_steps=5,

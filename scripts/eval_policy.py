@@ -735,15 +735,16 @@ def grade(s: dict, level: int, *, success_level: int) -> tuple[str, list[str]]:
         fails.append(f"yaw {s['yaw_rate']:.2f}>0.15")
     if abs(s["vlon_bias"]) > 0.05:
         fails.append(f"v_lon {s['vlon_bias']:+.2f}>0.05")
-    if s["sat_frac"] > 0.60:
-        # 括号里给拆分：腿顶死是真问题（步态调不动），手臂顶死基本无害
-        # （14 个手臂维度 clip 只有 0.20 rad，action 空间上限 ~0.65~0.97，天然容易饱和）。
-        leg = s.get("sat_leg_frac", float("nan"))
-        oth = s.get("sat_oth_frac", float("nan"))
-        extra = ""
-        if leg == leg and oth == oth:
-            extra = f" (腿 {leg:.0%} / 非腿 {oth:.0%})"
-        fails.append(f"sat {s['sat_frac']:.0%}>60%{extra}")
+    # 只看**腿**的残差饱和：腿顶死 = 步态推不动，是真问题。
+    # 非腿（腰 3 + 臂 14）不参与评分，原因不是"手臂不重要"，而是这个指标在
+    # 它们身上**没有信息量**：arm_clip_rad=0.20 rad，除以 action_scale≈0.21 约
+    # 0.95 action 单位，而策略输出是 tanh，|a| 几乎必然顶到 1.0 —— 实测 83% 的
+    # 非腿维度常年贴在限幅上。贴死的维度梯度恒为 0（clamp 外导数为 0），
+    # 于是策略对它们"随便挂"：既说明不了用力，也说明不了吃力。
+    # 把它们算进混合 sat_frac，等于给一个恒 >60% 的常数项，任何模型都过不了。
+    leg_sat = s.get("sat_leg_frac", float("nan"))
+    if leg_sat == leg_sat and leg_sat > 0.45:
+        fails.append(f"腿残差顶死 {leg_sat:.0%}>45%")
     if level >= success_level and s["climb_rate"] < 0.80:
         fails.append(f"climb {s['climb_rate']:.0%}<80%")
     return ("PASS" if not fails else "FAIL"), fails
