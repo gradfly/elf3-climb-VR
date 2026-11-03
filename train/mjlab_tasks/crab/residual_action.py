@@ -257,9 +257,11 @@ class ResidualGaitAction(JointPositionAction):
         `reshape(B, -1)` 于是得到 [B, B*N]（B=4 时 1092 列而不是 273），
         紧接着被 `_update_terrain` 的维度守卫判为不符 -> **每帧都直接 return，
         estimate() 一次都没执行过**。于是 `_rise` 永远停在 0、`_tread` 永远
-        停在 mid_tread(0.36)，参考步态锁死在平地档：
+        停在当时的 mid_tread(0.36)，参考步态锁死在平地档：
           * `rise_est = 0.000 (min 0.000 / max 0.000)`
-          * `tread_est = 0.360`  <- 恰好等于 RefTable.mid_tread 初值
+          * `tread_est = 0.360`  <- 恰好等于当时的 RefTable.mid_tread 初值
+            （2026-11-04 起兜底踏面改为 0.30，这个判据值随之变成 0.300；
+             判断依据仍是「恰好等于兜底值且一动不动」，不是具体数字）
         B=1 时 (1,1,1)-(1,N) 广播恰好是 (1,1,N)，reshape 后正确，
         所以单环境回放看不出来，1024 env 的训练与 4/8 env 的诊断里全程失效。
         正确写法与 mjlab 自己的 `envs_mdp.height_scan` 保持一致：

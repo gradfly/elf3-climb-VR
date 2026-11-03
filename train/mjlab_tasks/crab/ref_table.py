@@ -15,6 +15,15 @@ from pathlib import Path
 import numpy as np
 import torch
 
+# 地形「测不到台阶边」时的兜底踏面（estimate 里 valid=False / gap_cnt<1）。
+# 2026-11-04 前取的是 tread[T//2] = 0.36（中间列），但四档地形的真实踏面是
+# flat/easy 0.40、mid 0.30、hard 0.24 —— 0.36 谁都不是。级高 ≤2.7 cm 的行
+# 被 edge_thr=0.03 全部滤掉时，mid row0/1 会凭空拿到 +20% 步幅、hard row0
+# 甚至 +50%。改取 0.30：mid 全程对齐，且它是 0.1 m 射线栅格能精确测量的值。
+# ⚠️ 属性名沿用 mid_tread（crab_replay 等外部脚本在用），但它**不再是中间列**，
+#    别再用 T//2 反推；重建表时若改了 tread 网格，下面的校验会直接报错。
+FALLBACK_TREAD = 0.30
+
 
 def scan_to_heights(frame_z: torch.Tensor, hit_z: torch.Tensor,
                     distances: torch.Tensor, max_distance: float) -> torch.Tensor:
@@ -58,7 +67,15 @@ class RefTable:
         self.q_flat = self.q.reshape(self.R * self.T, self.P, self.J)
         self.v_flat = self.v_ref.reshape(self.R * self.T)
         self.device = device
-        self.mid_tread = float(self.tread[self.T // 2])
+        # 兜底值必须命中表里某一列。否则 estimate() 返回 0.30、select() 却又
+        # 按最近档抓到别的列，「兜底步幅」与「实际步幅」悄悄不一致。
+        j_fb = int((self.tread - FALLBACK_TREAD).abs().argmin())
+        if abs(float(self.tread[j_fb]) - FALLBACK_TREAD) > 1e-4:
+            raise ValueError(
+                f"FALLBACK_TREAD={FALLBACK_TREAD} 不在表 tread 网格 "
+                f"{[round(float(x), 3) for x in self.tread]} 上；"
+                "请给表补一列，或同步修改 ref_table.FALLBACK_TREAD")
+        self.mid_tread = float(self.tread[j_fb])
 
     # ------------------------------------------------------------ 选表
     def _rise_index(self, rise: torch.Tensor):
@@ -195,6 +212,9 @@ def _selftest() -> int:
     print(f"[table] R={tb.R} T={tb.T} P={tb.P} J={tb.J} "
           f"rise {float(tb.rise[0]):.2f}..{float(tb.rise[-1]):.2f} "
           f"tread {[round(float(x),2) for x in tb.tread]}")
+    fb_ok = abs(tb.mid_tread - FALLBACK_TREAD) < 1e-6
+    print(f"[selftest] fallback tread     {tb.mid_tread:.3f} "
+          f"(want {FALLBACK_TREAD:.2f}) {'OK' if fb_ok else 'FAIL'}")
 
     nx, ny, res, size_y = 13, 21, 0.1, 2.0
     ys = -size_y / 2 + np.arange(ny) * res          # 每个射线点的 y
@@ -229,7 +249,7 @@ def _selftest() -> int:
     p = np.full(ny, 1.0); p[ys >= 0.9] -= 0.12
     cases.append(("edge at 0.9", p, 0.12, None))
 
-    ok_all = True
+    ok_all = fb_ok
     for name, prof, want_rise, want_tread in cases:
         hs = profile_to_heights(prof)
         rise, tread, valid = tb.estimate(hs)
@@ -242,6 +262,15 @@ def _selftest() -> int:
         msg += "  OK" if good else "  FAIL"
         print(msg)
         ok_all = ok_all and good
+
+    # 4d) 平地（valid=False）时 tread 必须回落到兜底值，不能再用中间列 0.36。
+    #     这是 2026-11-04 的回归测试：低级高行全部走这条路径。
+    r0, t0, v0 = tb.estimate(profile_to_heights(np.full(ny, 1.0)))
+    flat_fb_ok = (not bool(v0[0])) and abs(float(t0[0]) - FALLBACK_TREAD) < 1e-5
+    print(f"[selftest] flat fallback      tread={float(t0[0]):.3f} "
+          f"(want {FALLBACK_TREAD:.2f}) valid={bool(v0[0])} "
+          f"{'OK' if flat_fb_ok else 'FAIL'}")
+    ok_all = ok_all and flat_fb_ok
 
     # 5) 含无效射线（5.0）要被过滤
     p = np.full(ny, 1.0); p[ys >= 0.4] -= 0.12

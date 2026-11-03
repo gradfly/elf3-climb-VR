@@ -213,7 +213,8 @@ def main() -> int:
         sels = sorted({x[4] for x in st})
         note = ""
         if ne < 2:
-            note = "  ← tread 测不出来（<2 条边），一直用 mid_tread 0.36"
+            note = (f"  ← tread 测不出来（<2 条边），一直用兜底 mid_tread "
+                    f"{tb.mid_tread:.2f}")
         print(f"  {col:<12} 踏面 {st[0][3]*100:.0f}cm  选中档 {[round(s*100) for s in sels]}  "
               f"误差 {errs.min()*100:+.0f}%~{errs.max()*100:+.0f}%  "
               f"边数中位 {ne}  valid {vf:.0%}{note}")
@@ -238,6 +239,14 @@ def main() -> int:
     for k, v in tier.items():
         print(f"  {k:<14} {v:>2} 个")
     print("  判据：一个周期前进一个踏面。误差 = 每周期落点相对台沿的漂移量，不收敛。")
+    # 判据只在「真的有台沿」时成立：级高 ≤edge_thr 的档位 valid=0、tread 走兜底值，
+    # 地形其实就是一片平地，dy_cycle 与名义 step_width 不相等也不会踩空。
+    # 单独列出来，免得把兜底值的选择误读成「有台阶的档位失配」。
+    rows_with_edge = [x for st in col_stat.values() for x in st if x[6] >= 0.01]
+    n_ok_edge = sum(1 for x in rows_with_edge if abs(x[2]) <= 0.03)
+    print(f"  其中 valid=0（近乎平地、测不到台沿，判据不适用）"
+          f" {40 - len(rows_with_edge)} 个；有台沿的 {len(rows_with_edge)} 个里 "
+          f"步幅误差 ≤3% 的有 {n_ok_edge} 个。")
     return 0
 
 

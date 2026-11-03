@@ -625,7 +625,11 @@ def run_policy_residual(m, d, *, onnx_path, cmd=(0.0, 0.20, 0.0), steps=2000,
     # ---- 初始状态：参考表 phase=0（含双支撑平移）的姿势 ----
     phase = 0.0
     rise, tread = 0.0, float(tb.mid_tread)
-    v_ref = float(tb.v_ref[0, tb.T // 2])
+    # v_ref 必须按 tread 实际选中的列取，不能按下标 T//2：兜底踏面 2026-11-04
+    # 从中间列 0.36 改成 0.30 后，T//2 仍指向 0.36，会让初始 ref_meta 观测里的
+    # v_ref 与 q_ref / 相位速率用的表档不一致。
+    j0 = int((tb.tread - tread).abs().argmin())
+    v_ref = float(tb.v_ref[0, j0])
     q_ref = tb.select(torch.tensor([rise]), torch.tensor([tread]),
                       torch.tensor([phase + RES_PHASE_SHIFT]))[0][0].numpy()
 
