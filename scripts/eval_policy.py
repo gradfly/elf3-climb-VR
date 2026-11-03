@@ -462,6 +462,8 @@ def evaluate_conditions(env, base, policy, *, levels, cmds, episodes, seconds,
                     obs, _rew, dones = out
                 dones_b = dones.bool()
                 alive = ~dones_b
+                # 回合结束的 env 会在 step 内重采样指令；立刻写回，保证下一步的 obs 一致。
+                _pin_command(base, frozen)
 
                 p = _root_pos(base)
                 dxy = (p[:, :2] - prev_xy) / dt
