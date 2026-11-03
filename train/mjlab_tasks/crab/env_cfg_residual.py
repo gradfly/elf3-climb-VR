@@ -187,13 +187,18 @@ def _rebuild_rewards(cfg) -> None:
     # 现在看每步的 (Δyaw/dt)²，绕圈会持续累计。
     # 标定：0.7 rad/s -> 0.49 -> 每步 -0.735（×dt×600 ≈ -8.8/回合），
     # 相对单回合回报 ~75 分够痛但不主导；0.1 rad/s 只 -0.015/步，不干扰正常步态。
-    # 标定（2026-11-03 按 Episode_Reward 实测重标）：weight -1.5 + 纯平方时
-    # 训练期只攒到 -0.156/回合（wz_rms≈0.09 rad/s），是设计痛感的 1/60 ——
-    # 平方在 0.1 rad/s 处梯度塌缩，0.2~0.3 rad/s 的偏航全程没人管。
-    # 改成死区二次型：dz=0.08 以下不罚；wz=0.25 时 -0.015/步（推进项的 17%），
-    # wz=0.40 时 -0.05/步 重锤。旧 run 复现用 deadzone=0 / weight=-1.5。
+    # 标定（2026-11-03 按 Episode_Reward 实测重标，两版教训都在）：
+    # 实测分母：Episode_Reward/forward_progress_y 末值 1.785/回合（run
+    # 2026-10-30_11-05-08）。旧 weight -1.5 + 纯平方时 yaw 只攒到 -0.156/回合
+    # （占推进 8.7%），且 wz_rms≈0.09 处梯度塌缩——每改善 0.01 rad/s 只省
+    # 推进的 ~1.5%，优化器没动力转直，偏航首→末恶化 296%。
+    # 死区二次型 + weight -4：wz=0.25 时每回合惩罚 ≈ 推进的 66%（ep_len 512 步），
+    # 0.40 时 ≈ 推进的 4.7 倍（重锤），0.08 以下不罚正常摆动。
+    # 换 ep_len 时按 w ≈ 1853/ep_len步数 重算（0.6×1.785/0.000578/ep_len）。
+    # ⚠️ -25 那版是拿错的分母（0.085/步）标出来的，会把惩罚推到推进的 4 倍，
+    # 复刻 lateral_bias -80 的「别转也别走」坍缩——已撤。
     r["yaw_drift"] = RewardTermCfg(
-        func=X.yaw_drift, weight=-25.0, params={"deadzone": 0.08},
+        func=X.yaw_drift, weight=-4.0, params={"deadzone": 0.08},
     )
     r["lateral_drift"] = RewardTermCfg(func=X.lateral_drift, weight=-0.2, params={})
     # 2026-10-31：X 向漂移实测判定为 **B（步态不对称）**。证据：三档（L3/L5/L7）机身系
@@ -205,7 +210,9 @@ def _rebuild_rewards(cfg) -> None:
     # 反而把整条策略压垮了：535 轮时 lateral_bias 占 forward_progress_y 的 62%
     # （-0.564 vs +0.902），ref_tracking 从 0.976 崩到 0.295、upright 0.32 -> 0.08、
     # ep_len 7.4 -> 4.4 s —— 典型的"靠别动来避罚"。
-    # -20 时 0.11 m/s 的偏置约 -0.14/步（推进的 15%），是提示不是重锤。
+    # -20 时 0.11 m/s 的偏置 = -20×(0.08)²×0.02 = **-0.0026/步**（⚠️ 2026-11-03
+    # 修正：早先注释写 -0.13/步漏乘了 dt）。按实测推进 1.785/回合（约
+    # 0.0035/步@512 步）占比 ~70% —— 疼但不主导，定性结论不变。
     # ⚠️ 修好步态（ep_len > 15 s）之前不要再往上加，漂移是第二步的事。
     r["lateral_bias"] = RewardTermCfg(
         func=X.lateral_bias, weight=-20.0, params={"tau": 1.8, "deadzone": 0.03},
