@@ -220,6 +220,24 @@ def _rebuild_rewards(cfg) -> None:
         func=X.ref_probe, weight=1e-9, params={"action_name": "joint_pos"},
     )
 
+    # A/B 开关：ELF3_REWARD_OFF=lateral_bias,swing_clearance,yaw_drift
+    #
+    # 为什么要有它：现在有 13 个奖励项，每次调权重都是「一起变」，
+    # 出了问题分不清是哪一项。实测 2026-11-03：从 7047 续训 413 轮后，
+    # eval 口径反而是退步（摔倒 3/16 -> 20/16、跟踪比 1.70 -> 0.81），
+    # 但训练指标（ep_len 48 -> 512）一路向好 —— 典型的「某项奖励在悄悄改目标」。
+    # 用它就能一次关掉一批，跑 100 轮 + eval 对比，把责任定位到单项。
+    _off = os.environ.get("ELF3_REWARD_OFF", "").strip()
+    if _off:
+        names = [s.strip() for s in _off.replace(";", ",").split(",") if s.strip()]
+        for _n in names:
+            if _n in r:
+                r.pop(_n, None)
+                print(f"[reward] ELF3_REWARD_OFF：已关闭 {_n}")
+            else:
+                print(f"[reward][warn] ELF3_REWARD_OFF 里的 {_n!r} 不在奖励表里"
+                      f"（现有：{sorted(r)}）")
+
 
 def _retune_commands(cfg, play: bool) -> None:
     twist = cfg.commands["twist"]
@@ -429,6 +447,34 @@ def _retune_safety(cfg) -> None:
                 "pitch": (-0.15, 0.15),
                 "yaw": (-0.1, 0.1),
             }
+
+        # ⚠️ 2026-11-03：push 可以按比例缩放（ELF3_PUSH_SCALE，默认 1.0 不变）。
+        #
+        # 上面这组参数是**每 3~6 秒**推一次 ±0.2 m/s，而步态速度只有 0.17 m/s ——
+        # 每次推挤都相当于"速度翻倍"级的冲击，一个 20 s 回合要挨 3~6 次。
+        #
+        # 实测后果（从 7047 续训 413 轮）：
+        #     训练 ep_len 48 -> 512 步（一路向好，+968%）
+        #     无扰动的 eval 反而退步：摔倒 3/16 -> 20/16、跟踪比 1.70 -> 0.81、
+        #     前进速度 0.305 -> 0.138 m/s
+        # 也就是说策略被优化成"抗推专家"，而不是"走得好"。训练分布比测试分布
+        # 暴力一个数量级时，这不是 bug，是必然。
+        #
+        # 若目的是"走稳、爬上去"，先把这一项压到 0.5 甚至 0 跑一轮，确认策略能回到
+        # 7047 的水平，再逐步加回来（和 ELF3_REWARD_OFF 配合做单项 A/B）。
+        _scale = 1.0
+        try:
+            _scale = max(0.0, float(os.environ.get("ELF3_PUSH_SCALE", "1") or 1.0))
+        except Exception:
+            pass
+        if _scale != 1.0:
+            push.params["velocity_range"] = {
+                k: (lo * _scale, hi * _scale)
+                for k, (lo, hi) in push.params["velocity_range"].items()
+            }
+            print(f"[safety] push 力度 ×{_scale}（ELF3_PUSH_SCALE）；"
+                  f"现在是 {push.interval_range_s} 一次、"
+                  f"y 向 {push.params['velocity_range']['y']}")
 
 
 def _alpha_fixed(play: bool) -> float:
