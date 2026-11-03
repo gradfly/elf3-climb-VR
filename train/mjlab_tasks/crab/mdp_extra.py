@@ -167,7 +167,7 @@ def ref_tracking(env, action_name: str = "joint_pos",
     return torch.exp(-err / (2.0 * sigma * sigma))
 
 
-def yaw_drift(env) -> torch.Tensor:
+def yaw_drift(env, deadzone: float = 0.0) -> torch.Tensor:
     """帧间偏航角速度的平方 (rad/s)²：转圈要走不动。
 
     ⚠️ 2026-10-30 换实现。原来是 `sin(yaw)**2`，它对 yaw 和 yaw+2π 取值相同 ——
@@ -177,6 +177,15 @@ def yaw_drift(env) -> torch.Tensor:
     现在看「每步的 yaw 变化」：先用 atan2(sinΔ, cosΔ) 把帧间差 wrap 到 [-π, π]
     （否则 ±π 处会跳变），再除 dt 得 rad/s，最后取平方 —— 平方让小抖动几乎不罚、
     大转动重罚，比绝对值更不容易把正常步态的轻微摆动也一起压死。
+
+    ⚠️ 2026-11-03：纯平方在 0.1 rad/s 处**梯度塌缩**，等于没罚。实测
+    （run 2026-10-30_11-05-08，weight -1.5）Episode_Reward/yaw_drift 末值
+    -0.156/回合，反推训练期 wz_rms ≈ 0.09 rad/s —— 离设计标定（0.7 rad/s
+    才 -8.8/回合）差 60 倍，而 eval 实测偏航 0.2~0.3 rad/s 一直没被拦住，
+    「首→末 降 296%」= 训练后期偏航还在单调变差。
+    加 deadzone 后变成 (relu(|wz|-dz))²：0.08 以下完全不罚（正常摆动），
+    0.25 处（weight -25）-0.015/步 ≈ 推进项的 17%，0.40 处 -0.05/步 重锤。
+    deadzone=0 时保持旧行为（旧 run 可复现）。
     """
     try:
         q = _root_quat(env)
@@ -195,7 +204,10 @@ def yaw_drift(env) -> torch.Tensor:
     if hasattr(env, "episode_length_buf"):
         d = torch.where(env.episode_length_buf <= 1, torch.zeros_like(d), d)
     dt = float(getattr(env, "step_dt", 0.02))
-    return (d / max(dt, 1e-6)) ** 2
+    wz = (d / max(dt, 1e-6)).abs()
+    if deadzone > 0.0:
+        wz = (wz - deadzone).clamp_min(0.0)
+    return wz ** 2
 
 
 def lateral_drift(env) -> torch.Tensor:

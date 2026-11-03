@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import os
 
 import torch
 
@@ -79,6 +80,12 @@ class ResidualGaitActionCfg(JointPositionActionCfg):
     # 参考步态被打回站姿，而策略是按 70% 幅度长出来的，两者错位当场崩。
     # alpha_fixed>=0 时本字段被忽略。
     alpha_start: float = 0.0
+    # 残差总开关：0 = 纯参考步态开环走（PD 只追参考表，策略输出被乘 0）。
+    # 诊断用：把「参考步态自带 X 向偏置」和「残差学出偏置」拆开——
+    # 开环 v_lon≈0 而闭环 +0.12 -> 残差的锅（罚它/重训）；
+    # 开环也 +0.1 -> 表或仿真的锅（修表/相位，调奖励是白费轮数）。
+    # 可用 ELF3_RESIDUAL_SCALE 覆盖（评测/诊断，不用改 cfg）。
+    residual_scale: float = 1.0
     debug: bool = False
 
     def build(self, env) -> "ResidualGaitAction":
@@ -155,6 +162,20 @@ class ResidualGaitAction(JointPositionAction):
         if not torch.is_tensor(scale):
             scale = torch.full((self._B, self._D), float(scale), device=dev)
         self._clip_action = clip_rad.unsqueeze(0) / scale.clamp_min(1e-6)
+
+        # ---- 残差总开关（ELF3_RESIDUAL_SCALE）----
+        self._res_scale = max(0.0, float(cfg.residual_scale))
+        _rs = os.environ.get("ELF3_RESIDUAL_SCALE")
+        if _rs is not None and _rs.strip() != "":
+            try:
+                self._res_scale = max(0.0, float(_rs))
+                print(f"[residual] 残差缩放 ELF3_RESIDUAL_SCALE："
+                      f"{cfg.residual_scale} -> {self._res_scale}")
+            except ValueError:
+                print(f"[residual][warn] ELF3_RESIDUAL_SCALE={_rs!r} 不是数字，忽略")
+        if self._res_scale == 0.0:
+            print("[residual] 残差已关闭：纯参考步态开环走（诊断模式，摔倒率会升高，"
+                  "指标只看存活步）")
 
         # ---- per-env 状态 ----
         self._phase = torch.zeros(self._B, device=dev)
@@ -342,8 +363,8 @@ class ResidualGaitAction(JointPositionAction):
             hold = torch.zeros(self._B, dtype=torch.bool, device=dev)
         rate = torch.where(hold, torch.zeros_like(rate), rate)
 
-        # ④ 残差限幅 + 时变 offset
-        raw = actions.clamp(-self._clip_action, self._clip_action)
+        # ④ 残差限幅 + 残差总开关 + 时变 offset
+        raw = actions.clamp(-self._clip_action, self._clip_action) * self._res_scale
         self._offset.copy_(self._ref_q)
         super().process_actions(raw)
 

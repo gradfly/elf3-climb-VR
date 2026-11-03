@@ -187,7 +187,14 @@ def _rebuild_rewards(cfg) -> None:
     # 现在看每步的 (Δyaw/dt)²，绕圈会持续累计。
     # 标定：0.7 rad/s -> 0.49 -> 每步 -0.735（×dt×600 ≈ -8.8/回合），
     # 相对单回合回报 ~75 分够痛但不主导；0.1 rad/s 只 -0.015/步，不干扰正常步态。
-    r["yaw_drift"] = RewardTermCfg(func=X.yaw_drift, weight=-1.5, params={})
+    # 标定（2026-11-03 按 Episode_Reward 实测重标）：weight -1.5 + 纯平方时
+    # 训练期只攒到 -0.156/回合（wz_rms≈0.09 rad/s），是设计痛感的 1/60 ——
+    # 平方在 0.1 rad/s 处梯度塌缩，0.2~0.3 rad/s 的偏航全程没人管。
+    # 改成死区二次型：dz=0.08 以下不罚；wz=0.25 时 -0.015/步（推进项的 17%），
+    # wz=0.40 时 -0.05/步 重锤。旧 run 复现用 deadzone=0 / weight=-1.5。
+    r["yaw_drift"] = RewardTermCfg(
+        func=X.yaw_drift, weight=-25.0, params={"deadzone": 0.08},
+    )
     r["lateral_drift"] = RewardTermCfg(func=X.lateral_drift, weight=-0.2, params={})
     # 2026-10-31：X 向漂移实测判定为 **B（步态不对称）**。证据：三档（L3/L5/L7）机身系
     # 纵向速度的整周期均值都是 +0.10~0.13 m/s，是侧向指令(0.17)的 60%，且与难度无关；
