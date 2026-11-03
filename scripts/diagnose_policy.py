@@ -713,20 +713,25 @@ def main(argv=None) -> int:
     try:
         _obj = getattr(getattr(runner, "alg", None), "actor", None)
         _hit = False
+        _ATTRS = ("running_mean", "running_var", "mean", "var", "std", "count")
         for _name, _mod in getattr(_obj, "named_modules", lambda: [])():
-            _parts = []
-            for _attr in ("running_mean", "running_var"):
+            _cls = type(_mod).__name__
+            _parts = [f"class={_cls}"]
+            for _attr in _ATTRS:
                 _v = getattr(_mod, _attr, None)
                 if torch.is_tensor(_v) and _v.numel() > 1:
                     _parts.append(f"{_attr}: |v|均值={float(_v.abs().mean()):.4f} "
                                   f"[{float(_v.min()):+.3f}, {float(_v.max()):+.3f}]")
-            if _parts:
+                elif torch.is_tensor(_v) and _v.numel() == 1:
+                    _parts.append(f"{_attr}={float(_v):.4g}")
+                elif isinstance(_v, float):
+                    _parts.append(f"{_attr}={_v:.4g}")
+            # 只关心归一化类模块，避免把每层 Linear 都打出来
+            if len(_parts) > 1 and ("Norm" in _cls or "Normal" in _cls):
                 print(f"[norm] {_name or 'actor'}  " + "  ".join(_parts))
                 _hit = True
-                break
         if not _hit:
-            print("[norm] 没找到 running_mean/running_var（这个版本可能用别的名字，"
-                  "或归一化在别处实现）")
+            print("[norm] 没找到归一化模块的统计量（class 名里既没有 Norm 也没有 Normal）")
     except Exception as _e:
         print(f"[norm] 体检失败：{_e!r}")
 
