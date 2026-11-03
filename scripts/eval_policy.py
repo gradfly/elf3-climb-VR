@@ -381,6 +381,8 @@ def _episode_summary(acc: dict, *, dt: float, cmd: float, level: int,
         ref_rms=_avg("ref_rms"),
         act_abs=_avg("act_abs"),
         sat_frac=_avg("sat"),
+        sat_leg_frac=_avg("sat_leg"),
+        sat_oth_frac=_avg("sat_oth"),
         rise_est=_avg("rise"),
     )
 
@@ -412,6 +414,26 @@ def evaluate_conditions(env, base, policy, *, levels, cmds, episodes, seconds,
         print("[warn] 足底传感器不可用，clearance / slip / support 会缺失")
 
     clip_action = getattr(term, "_clip_action", None) if term is not None else None
+
+    # 腿 12 维的下标：饱和率要按「腿 / 非腿」拆开看。
+    # 为什么：29 维里 14 维是手臂，clip 只有 0.20 rad，而动作 scale ≈0.21 -> action 空间
+    # 上限约 0.65~0.97，策略 std 常年 0.87，于是手臂维度天然大面积饱和。
+    # 合成一个 sat_frac 会让「腿顶死」（严重）和「手臂顶死」（基本无害）分不开。
+    leg_ids = None
+    if term is not None:
+        # ⚠️ 必须用 leg_pos（12 条腿在 **target/动作** 顺序里的下标），
+        # 不能用 leg_joint_ids（那是关节名顺序的下标）。两者不一定一致，
+        # 用错了会把「手臂的饱和」算到腿头上。
+        for _attr in ("leg_pos", "leg_joint_ids"):
+            try:
+                _ids = getattr(term, _attr, None)
+                _ids = list(_ids() if callable(_ids) else (_ids or []))
+                if _ids:
+                    leg_ids = torch.tensor([int(i) for i in _ids],
+                                           dtype=torch.long, device=base.device)
+                    break
+            except Exception:
+                continue
     ref_ok = False
     records: list[dict] = []
     cond_idx = 0
@@ -440,7 +462,7 @@ def evaluate_conditions(env, base, policy, *, levels, cmds, episodes, seconds,
                              "vy", "vx", "vlon", "support", "upz",
                              "clearance", "clearance_cnt", "peak", "swing", "foot_cnt",
                              "slip", "contact_cnt", "ref_track", "ref_rms",
-                             "act_abs", "sat", "rise")}
+                             "act_abs", "sat", "sat_leg", "sat_oth", "rise")}
             ep_steps = torch.zeros(B, dtype=torch.long, device=base.device)
 
             p = _root_pos(base)
@@ -554,9 +576,18 @@ def evaluate_conditions(env, base, policy, *, levels, cmds, episodes, seconds,
                         pass
                 act_abs = actions.float().abs().mean(dim=-1)
                 sat = torch.zeros(B, device=base.device)
+                sat_leg = torch.zeros(B, device=base.device)
+                sat_oth = torch.zeros(B, device=base.device)
                 if clip_action is not None:
                     try:
-                        sat = (actions.float().abs() > clip_action.float()).float().mean(dim=-1)
+                        over = (actions.float().abs() > clip_action.float()).float()
+                        sat = over.mean(dim=-1)
+                        if leg_ids is not None:
+                            sat_leg = over[:, leg_ids].mean(dim=-1)
+                            mask = torch.ones(over.shape[1], dtype=torch.bool, device=base.device)
+                            mask[leg_ids] = False
+                            if bool(mask.any()):
+                                sat_oth = over[:, mask].mean(dim=-1)
                     except Exception:
                         pass
                 rise = torch.zeros(B, device=base.device)
@@ -591,6 +622,8 @@ def evaluate_conditions(env, base, policy, *, levels, cmds, episodes, seconds,
                 acc["ref_rms"] += ref_rms * w
                 acc["act_abs"] += act_abs * w
                 acc["sat"] += sat * w
+                acc["sat_leg"] += sat_leg * w
+                acc["sat_oth"] += sat_oth * w
                 acc["rise"] += rise * w
 
                 # 优先用环境自己给的 time_outs；没有就按"跑满本回合步数"推断。
@@ -674,6 +707,8 @@ def summarize(records: list[dict], *, seconds: float) -> dict:
         ref_rms=_nan([r["ref_rms"] for r in records]),
         act_abs=_nan([r["act_abs"] for r in records]),
         sat_frac=_nan([r["sat_frac"] for r in records]),
+        sat_leg_frac=_nan([r["sat_leg_frac"] for r in records]),
+        sat_oth_frac=_nan([r["sat_oth_frac"] for r in records]),
         rise_est=_nan([r["rise_est"] for r in records]),
     )
 
@@ -692,7 +727,14 @@ def grade(s: dict, level: int, *, success_level: int) -> tuple[str, list[str]]:
     if abs(s["vlon_bias"]) > 0.05:
         fails.append(f"v_lon {s['vlon_bias']:+.2f}>0.05")
     if s["sat_frac"] > 0.60:
-        fails.append(f"sat {s['sat_frac']:.0%}>60%")
+        # 括号里给拆分：腿顶死是真问题（步态调不动），手臂顶死基本无害
+        # （14 个手臂维度 clip 只有 0.20 rad，action 空间上限 ~0.65~0.97，天然容易饱和）。
+        leg = s.get("sat_leg_frac", float("nan"))
+        oth = s.get("sat_oth_frac", float("nan"))
+        extra = ""
+        if leg == leg and oth == oth:
+            extra = f" (腿 {leg:.0%} / 非腿 {oth:.0%})"
+        fails.append(f"sat {s['sat_frac']:.0%}>60%{extra}")
     if level >= success_level and s["climb_rate"] < 0.80:
         fails.append(f"climb {s['climb_rate']:.0%}<80%")
     return ("PASS" if not fails else "FAIL"), fails
@@ -702,7 +744,7 @@ def print_table(cond: list[dict]) -> None:
     print("-" * 132)
     print(f"{'ckpt':<14} {'L':>2} {'cmd':>5} {'fall':>6} {'tmout':>6} {'reach':>6} "
           f"{'climb':>6} {'ep_s':>5} {'dy':>6} {'track':>6} {'yaw':>5} {'vlon':>6} "
-          f"{'clr':>5} {'slip':>5} {'sat':>5} {'ref':>5} {'sup':>5}  grade")
+          f"{'clr':>5} {'slip':>5} {'sat':>5} {'sL':>4} {'sO':>4} {'ref':>5} {'sup':>5}  grade")
     for c in cond:
         s = c["summary"]
         g, fails = c["grade"], c["fails"]
@@ -711,6 +753,8 @@ def print_table(cond: list[dict]) -> None:
               f"{s['climb_rate']:>6.0%} {s['ep_sec_median']:>5.1f} {s['dy_mean']:>6.2f} "
               f"{s['track_ratio']:>6.2f} {s['yaw_rate']:>5.2f} {s['vlon_bias']:>+6.3f} "
               f"{s['clearance_mean']:>5.3f} {s['slip']:>5.3f} {s['sat_frac']:>5.0%} "
+              f"{s.get('sat_leg_frac', float('nan')):>4.0%} "
+              f"{s.get('sat_oth_frac', float('nan')):>4.0%} "
               f"{s['ref_track']:>5.2f} {s['support_proxy']:>5.0%}  {g}"
               + (f"  ({'; '.join(fails)})" if fails else ""))
     print("-" * 132)
