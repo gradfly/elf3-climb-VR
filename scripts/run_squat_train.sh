@@ -31,11 +31,14 @@
 #   SMOKE_ITERS=5        冒烟轮数
 #   VENV=.venv           虚拟环境目录（相对仓库根）
 #   CKPT=...             play / video 模式下显式指定 checkpoint（不给就自动找最新）
+#   VIDEO_BACKEND=direct 导出后端：direct（默认，无 viewer 自己渲染）/ play（框架 VideoRecorder）
 #   VIDEO_STEPS=1000     mp4 录多少步（控制 50 Hz，1000 步 = 20 s；hold 默认 6000 = 120 s）
+#   VIDEO_EVERY=1        每 N 步取一帧（2 = 半速采样，渲染快一倍）
 #   VIDEO_W=1280         mp4 宽（框架默认只有 320，必须放大）
 #   VIDEO_H=720          mp4 高
-#   VIDEO_TIMEOUT=900    等 mp4 写完的最长秒数
-#   VIDEO_BOOL=0         设 1 把 --video 写成 "--video True"（新版 tyro 要求显式布尔值）
+#   VIDEO_OUT=...        指定输出 mp4 路径（默认 ~/squat_<任务>_<迭代>.mp4）
+#   VIDEO_TIMEOUT=900    play 后端等 mp4 写完的最长秒数
+#   VIDEO_BOOL=0         play 后端专用：设 1 把 --video 写成 "--video True"
 #   CR_FIX=0             设 1 把 \r 原地覆盖式进度条转成换行（旧版 rsl_rl / tqdm 用 \r 打印时）
 #
 # 日志：~/train_squat_<mode>.log（如 ~/train_squat_hold_squat.log）
@@ -63,6 +66,7 @@ cd "$REPO"
 
 BIN_TRAIN="$REPO/$VENV/bin/train"
 BIN_PLAY="$REPO/$VENV/bin/play"
+BIN_PY="$REPO/$VENV/bin/python"
 if [ ! -x "$BIN_TRAIN" ]; then
   echo "[ERR] 找不到 $BIN_TRAIN"
   echo "      先激活/安装环境：bash scripts/deploy_gpu.sh"
@@ -208,38 +212,62 @@ play_one() {
   "$BIN_PLAY" "$task-Play" --checkpoint-file "$pt"
 }
 
-# 回放导出 mp4：走 mjlab play 自带的 VideoRecorder（不用自己一帧帧渲染）。
+# 回放导出 mp4。
 #
-# 几个必须处理的坑：
-#   * 必须带 --checkpoint-file：agent=zero/random 时 play.py 会直接禁用录像；
-#   * --num-envs 1：离屏相机跟着 asset body，多 env 时容易录到一片空地；
-#   * --video-length 是「步数」不是秒，控制 50 Hz，步数 / 50 = 秒；
-#   * 框架默认只录 200 步（4 s）、320x240，两个都得显式放大；
-#   * 产物固定叫 rl-video-step-0.mp4，重录会覆盖，所以先挪走旧的、再复制成带任务名的文件；
-#   * 录满 video_length 后 viewer 不会自己退出，所以后台跑 + 轮询文件，写完就收掉进程。
+# VIDEO_BACKEND=direct（默认）：走 scripts/export_squat_video.py，
+#   自己建 render_mode="rgb_array" 环境、逐帧渲染、流式写 mp4。
+#   不开 viewer、不解析 play 的 --video 参数、不需要 DISPLAY —— 服务器上最稳。
+# VIDEO_BACKEND=play：走 mjlab 自带 VideoRecorder（产物落在 run 目录），
+#   依赖 --video 的写法与 viewer 能自己前进；失败时把 play 的完整日志打出来。
 video_one() {
-  local which="$1" task pt outdir tmp dest steps def_steps pid sz last stable n run_tag
+  local which="$1" task pt steps def_steps
   task="$(task_of "$which")" || exit 1
   pt="$(latest_ckpt "$which")" || exit 1
   if [[ "$which" == hold* ]]; then def_steps=6000; else def_steps=1000; fi
   steps="${VIDEO_STEPS:-$def_steps}"
 
+  case "${VIDEO_BACKEND:-direct}" in
+    direct)
+      step "导出 mp4（direct）：$task-Play，ckpt=$pt，${steps} 步"
+      # 不给 --out，让 Python 脚本自己生成带 run 目录名的文件名（不同 run 不会撞）
+      local direct_args=(
+        --mode "${which//_/-}" --checkpoint "$pt"
+        --steps "$steps" --every "${VIDEO_EVERY:-1}"
+        --width "$VIDEO_W" --height "$VIDEO_H" --num-envs 1
+      )
+      if [ -n "${VIDEO_OUT:-}" ]; then direct_args+=(--out "$VIDEO_OUT"); fi
+      "$BIN_PY" "$REPO/scripts/export_squat_video.py" "${direct_args[@]}"
+      ;;
+    play)
+      _video_play "$which" "$task" "$pt" "$steps"
+      ;;
+    *)
+      echo "[ERR] VIDEO_BACKEND 只能是 direct（默认）或 play"; exit 2 ;;
+  esac
+}
+
+# 备用后端：mjlab play --video。把 stdout/stderr 完整留到日志，失败时回显，
+# 否则屏幕一滚就再也看不到真正的报错了。
+_video_play() {
+  local which="$1" task="$2" pt="$3" steps="$4"
+  local outdir tmp dest pid sz last stable n run_tag rc log
+  local video_args
+
   outdir="$(dirname "$pt")/videos/play"
   tmp="$outdir/rl-video-step-0.mp4"
+  log="$HOME/squat_${which}_video_play.log"
   mkdir -p "$outdir"
   [ -f "$tmp" ] && mv -f "$tmp" "$outdir/rl-video-step-0.prev.mp4" || true
+  if [ "${VIDEO_BOOL:-0}" = "1" ]; then video_args=(--video True); else video_args=(--video); fi
 
-  local video_args
-  if [ "$VIDEO_BOOL" = "1" ]; then video_args=(--video True); else video_args=(--video); fi
-
-  step "导出 mp4：$task-Play，ckpt=$pt"
+  step "导出 mp4（play 后端）：$task-Play，ckpt=$pt"
   echo "    ${steps} 步 = $((steps / 50)) s @50 fps，${VIDEO_W}x${VIDEO_H}"
+  echo "    play 日志：$log（另开终端 tail -F \"$log\"）"
   "$BIN_PLAY" "$task-Play" --checkpoint-file "$pt" --num-envs 1 \
     "${video_args[@]}" --video-length "$steps" \
-    --video-width "$VIDEO_W" --video-height "$VIDEO_H" &
+    --video-width "$VIDEO_W" --video-height "$VIDEO_H" > "$log" 2>&1 &
   pid=$!
 
-  # 等 mp4 写完：文件出现且大小连续 3 次不变，或 play 自己退出。
   last=-1; stable=0; n=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ -s "$tmp" ]; then
@@ -250,22 +278,27 @@ video_one() {
     fi
     sleep 1
     n=$((n + 1))
-    if [ "$n" -ge "$VIDEO_TIMEOUT" ]; then echo "[warn] 等了 ${n}s 还没写完，先收尾"; break; fi
+    if [ "$n" -ge "${VIDEO_TIMEOUT:-900}" ]; then echo "[warn] 等了 ${n}s 还没写完（超时）"; break; fi
   done
+  rc=0
   kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  wait "$pid" || rc=$?
 
   if [ ! -s "$tmp" ]; then
-    echo "[ERR] 没生成 $tmp。常见原因："
-    echo "      --video 写法不对（试 VIDEO_BOOL=1）、viewer 起不来（VNC 里要有 DISPLAY）、"
-    echo "      或显存被同时跑的训练占满。上面 play 的输出里有具体报错。"
-    exit 1
+    echo "[ERR] 没生成 $tmp；play 退出码=$rc，等了 ${n}s"
+    echo "----- play 输出（$log 最后 60 行）-----"
+    tail -60 "$log"
+    echo "----------------------------------------"
+    echo "最常见三种："
+    echo "  1) --video 写法不对 → VIDEO_BOOL=1 再试（或直接 VIDEO_BACKEND=direct）"
+    echo "  2) 无 DISPLAY 时 viser 停在等连接、一步都不走 → VIDEO_BACKEND=direct"
+    echo "  3) 显存被同时跑的训练占满 → 停训练或换卡"
+    return 1
   fi
   run_tag="$(basename "$(dirname "$pt")" | tr -cd 'A-Za-z0-9._-')"
   dest="$HOME/squat_${which}_${run_tag}_$(basename "$pt" .pt).mp4"
   cp -f "$tmp" "$dest"
   echo "[OK] mp4 已导出：$dest"
-  echo "     框架原始产物：$tmp（固定文件名，下次录会被挪走）"
 }
 
 case "$MODE" in
@@ -303,7 +336,7 @@ case "$MODE" in
 esac
 
 echo
-echo "==> 完成。回放导出 mp4：bash scripts/run_squat_train.sh video down"
+echo "==> 完成。回放导出 mp4（默认 direct 后端，不需要 DISPLAY）：bash scripts/run_squat_train.sh video down"
 echo "    （保持任务默认录 120 s：VIDEO_STEPS=6000 bash scripts/run_squat_train.sh video hold-squat）"
 echo
 echo "    完整日志：~/train_squat_<mode>.log（训练过程中一直实时写入）"

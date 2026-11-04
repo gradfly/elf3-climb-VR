@@ -315,18 +315,28 @@ MUJOCO_GL=egl .venv/bin/play Elf3-Squat-Down-Play --agent zero
 对比着看：`--agent zero` 也难看 → 参考轨迹/物理参数问题（改 `squat_extreme.py`）；
 只有策略难看 → 训练/奖励问题（加长训练、调权重、放松残差限幅）。
 想留档或发给别人看，就把回放导出成 mp4，见 §2.6。
-注意 `--video` 默认只录 200 步（4 s）/ 320×240；play 已经去掉 `traj_finished`、
-回放是「下蹲 → 一直保持末帧」，4 s 连 5 s 保持段都录不完，必须显式放大。
+**默认用 `direct` 后端**（自己离屏渲染，不依赖 `play --video` / viewer / DISPLAY）；
+`play --video` 只作为备选，它默认只录 200 步（4 s）/ 320×240，
+而回放是「下蹲 → 一直保持末帧」，4 s 连 5 s 保持段都录不完。
 
 
 ---
 
 ### 2.6 回放导出 mp4
 
-底层用的是 mjlab `play` 自带的 `VideoRecorder`：**不用自己写渲染循环**，
-也不需要交互式窗口。两种用法——脚本一条命令（推荐），或等价的裸 `play --video`。
+**默认 `direct` 后端**：`scripts/export_squat_video.py` 自己建
+`render_mode="rgb_array"` 环境、跑 `env.step(policy(obs))`、逐帧 `base.render()`，
+用流式 writer 写 mp4。不开 viewer、不解析 `play` 的 `--video` 参数、不需要
+`DISPLAY`、帧边渲染边写（攒 1000 帧 1280×720 要 2.7 GB，会 OOM）。
 
-#### 2.6.1 一条命令
+`play --video` 保留为 `VIDEO_BACKEND=play` 备选。它要三件事同时成立：
+tyro 的 bool flag 写法随 mjlab 版本变（`--video` 或 `--video True`）、
+viewer 得能自己往前跑（无 DISPLAY 时 viser 停在等待连接，一步都不 step）、
+`VideoRecorder` 的 `step_trigger` 得被 wrapper 触发。任何一环不对都是
+「mp4 没生成」，而真正的报错藏在 play 的输出里 —— 2026-11-09 实踩。
+**服务器上默认别用它。**
+
+#### 2.6.1 一条命令（推荐）
 
 ```bash
 cd ~/elf3
@@ -335,17 +345,55 @@ bash scripts/run_squat_train.sh video up            # 起立
 bash scripts/run_squat_train.sh video hold-squat   # 保持任务默认 6000 步 = 120 s
 bash scripts/run_squat_train.sh video hold-stand
 
-# 指定 checkpoint / 改分辨率 / 改时长
+# 指定 checkpoint / 改分辨率 / 改时长 / 半速采样（渲染快一倍）
 CKPT=logs/rsl_rl/elf3_squat_down/<run>/model_4000.pt \
-VIDEO_STEPS=2000 VIDEO_W=1920 VIDEO_H=1080 \
+VIDEO_STEPS=2000 VIDEO_W=1920 VIDEO_H=1080 VIDEO_EVERY=2 \
   bash scripts/run_squat_train.sh video down
 ```
 
-脚本依次做：自动找该实验目录下最新的 `model_*.pt` → 起 `play --video` →
-轮询 mp4 是否写完 → **收掉不会自己退出的 viewer** → 把固定文件名的产物复制成
-`~/squat_<任务>_<run>_<迭代>.mp4`（重录不会互相覆盖）。
+自动找最新完好的 `model_*.pt`（跳过 < 4 KB 的截断文件）→ 导出到
+`~/squat_<任务>_<run>_<迭代>.mp4`。每 100 步打印一次进度。
 
-#### 2.6.2 等价的裸命令（具体代码）
+#### 2.6.2 等价的 Python 调用（具体代码）
+
+```bash
+cd ~/elf3
+MUJOCO_GL=egl PYTHONUNBUFFERED=1 .venv/bin/python \
+  scripts/export_squat_video.py \
+    --mode down \
+    --steps 1000 --every 1 \
+    --width 1280 --height 720 \
+    --out ~/squat_down.mp4
+
+# 指定 checkpoint / 纯参考开环对照 / 改机位
+MUJOCO_GL=egl .venv/bin/python scripts/export_squat_video.py \
+  --mode hold-squat --steps 6000 \
+  --checkpoint logs/rsl_rl/elf3_squat_hold_squat/<run>/model_3000.pt \
+  --dist 3.0 --elev -45 --azim 200 --every 2
+
+MUJOCO_GL=egl .venv/bin/python scripts/export_squat_video.py --mode down --zero
+```
+
+四个 `--mode` 自动带出任务 ID、实验目录、默认步数（步数 / 50 = 秒）：
+
+| mode | 任务 ID | 实验目录 | 默认步数 |
+|---|---|---|---|
+| `down` | `Elf3-Squat-Down-Play` | `elf3_squat_down` | 1000（20 s） |
+| `up` | `Elf3-Squat-Up-Play` | `elf3_squat_up` | 1000（20 s） |
+| `hold-squat` | `Elf3-Squat-Hold-Play` | `elf3_squat_hold_squat` | 6000（120 s） |
+| `hold-stand` | `Elf3-Stand-Hold-Play` | `elf3_squat_hold_stand` | 6000（120 s） |
+
+常用参数：`--checkpoint`、`--out`、`--steps`、`--every`、`--fps`、`--width/--height`、
+`--dist/--elev/--azim`、`--device`、`--zero`、`--task`（完全自定义任务 ID）。
+`--every N` 时输出帧率自动取 `控制频率 / N`，视频时长仍等于真实仿真时长。
+
+#### 2.6.3 备选后端 `VIDEO_BACKEND=play`
+
+```bash
+VIDEO_BACKEND=play bash scripts/run_squat_train.sh video down
+```
+
+等价裸命令：
 
 ```bash
 cd ~/elf3
@@ -358,51 +406,35 @@ MUJOCO_GL=egl PYTHONUNBUFFERED=1 .venv/bin/play Elf3-Squat-Down-Play \
   --video-width 1280 --video-height 720
 ```
 
-四个任务只换任务 ID 和 checkpoint 目录：
-
-```text
-down        Elf3-Squat-Down-Play     logs/rsl_rl/elf3_squat_down/
-up          Elf3-Squat-Up-Play       logs/rsl_rl/elf3_squat_up/
-hold-squat  Elf3-Squat-Hold-Play     logs/rsl_rl/elf3_squat_hold_squat/
-hold-stand  Elf3-Stand-Hold-Play     logs/rsl_rl/elf3_squat_hold_stand/
-```
-
-录满 `--video-length` 步后 mp4 已经落盘，但 **viewer 不会自动退出**，此时 `Ctrl-C`
-即可（脚本模式自动做了这步）。原始产物：
-
-```text
-logs/rsl_rl/elf3_squat_down/<run>/videos/play/rl-video-step-0.mp4
-```
-
-文件名是框架写死的，重录会覆盖，建议立刻改名留档：
-
-```bash
-cp logs/rsl_rl/elf3_squat_down/<run>/videos/play/rl-video-step-0.mp4 \
-   ~/squat_down_model_4000.mp4
-```
-
-#### 2.6.3 参数与坑
+产物固定为 `logs/rsl_rl/<exp>/<run>/videos/play/rl-video-step-0.mp4`，
+录满后 viewer 不会自动退出（裸命令需 `Ctrl-C`）。**脚本会把 play 的完整输出
+写到 `~/squat_<任务>_video_play.log`，失败时自动回显最后 60 行并给出退出码**，
+不再需要翻屏幕找报错。
 
 | 参数 | 框架默认 | 这里给 | 为什么 |
 |---|---|---|---|
-| `--video-length` | **200 步** | 1000（down/up）/ 6000（hold） | 单位是**步数**不是秒；控制 50 Hz，步数 / 50 = 秒。200 步只有 4 s |
-| `--video-width` / `--video-height` | **320×240** | 1280×720 | 默认分辨率看不清脚和手臂-腿干涉 |
-| `--num-envs` | 配置里的值 | **1** | `VideoRecorder` 只录 env 0；给 1 最省心，也省显存 |
-| `--checkpoint-file` | 无 | **必须给** | 不是 `--checkpoint`；`--agent zero/random` 时 `play.py` 会直接禁用录像 |
-| `MUJOCO_GL=egl` | — | 必须 | 无 DISPLAY 也能离屏渲染 |
+| `--video-length` | **200 步** | 1000（down/up）/ 6000（hold） | 单位是**步数**不是秒；控制 50 Hz，步数 / 50 = 秒 |
+| `--video-width/height` | **320×240** | 1280×720 | 默认分辨率看不清脚和手臂-腿干涉 |
+| `--num-envs` | 配置里的值 | **1** | `VideoRecorder` 只录 env 0 |
+| `--checkpoint-file` | 无 | **必须给** | 不是 `--checkpoint`；`--agent zero/random` 时框架禁用录像 |
+| `VIDEO_BOOL` | 0 | 报解析错时设 1 | 把 `--video` 写成 `--video True`（新版 tyro） |
 
-- play 配置里 `traj_finished` 已移除、`episode_length_s=1e6`，回放是「下蹲 → 一直保持」，
-  所以视频长度**完全由 `--video-length` 决定**，跟回合长度无关。
-- 保持任务要判断「久站会不会倒」，§3.3 要求看 60~120 s，对应 `--video-length 3000~6000`。
-- 录制时别同时跑训练：play 会多占一份显存，OOM 会直接挂。
-- 若报 `--video` 相关解析错（GitHub main 版 `play.py` 带 `tyro.conf.FlagConversionOff`，
-  要求显式布尔值），用 `VIDEO_BOOL=1 bash scripts/run_squat_train.sh video down`，
-  或把裸命令里的 `--video` 改成 `--video True`。
-- 爬楼任务另有 `scripts/diagnose_policy.py --record`（`train/README.md` §10.2.1，跟拍机位、
-  可自定义俯仰角），但那个脚本要传 `--terrain-level` / `ELF3_ALPHA`，是爬楼专用的，
-  **squat 任务别用**。
+#### 2.6.4 「没生成 mp4」怎么排查
 
-#### 2.6.4 后处理 / 取回本地
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| direct 逐帧 `[warn] 渲染失败` | `MUJOCO_GL` 没设 / EGL 不可用 / 显存被训练占满 | `export MUJOCO_GL=egl`，停掉同时跑的训练 |
+| direct 报「mp4 写不出，已存 .npz」 | 环境里没有 ffmpeg | `.venv/bin/pip install imageio-ffmpeg`，或用 opencv（脚本自动兜底） |
+| direct 一帧都没录到 | `render_mode` 没生效 / 上面两种 | 看脚本开头的 `[info] mp4 writer = ...` 有没有打出来 |
+| play 后端退出码非 0、日志里有 `Error parsing --video` | bool flag 写法不对 | `VIDEO_BOOL=1`，或换回默认 direct |
+| play 后端等满 900 s 超时、日志停在 viser 地址 | 无 DISPLAY / 没人连 viser，viewer 不 step | 换默认 direct |
+| 两种都 OOM | 训练占着显存 | 停训练再录 |
+
+play 配置里 `traj_finished` 已移除、`episode_length_s=1e6`，回放是「下蹲 → 一直保持」，
+所以视频长度**完全由 `--steps` / `--video-length` 决定**，跟回合长度无关。
+保持任务要判断「久站会不会倒」，§3.3 要求看 60~120 s，对应 3000~6000 步。
+
+#### 2.6.5 后处理 / 取回本地
 
 ```bash
 # 核对时长、帧数、分辨率（确认「步数 / 50 = 秒」在你的版本里成立）
@@ -471,7 +503,7 @@ HOLD_EPISODE=40 bash scripts/run_squat_train.sh hold-stand    # 回合拉到 40 
 bash scripts/run_squat_train.sh play hold-squat
 bash scripts/run_squat_train.sh play hold-stand
 
-# 导出 mp4（hold 默认录 6000 步 = 120 s，够判断「久站会不会倒」）
+# 导出 mp4（direct 后端，hold 默认 6000 步 = 120 s，够判断「久站会不会倒」）
 bash scripts/run_squat_train.sh video hold-squat
 bash scripts/run_squat_train.sh video hold-stand
 ```
@@ -541,6 +573,7 @@ logs/rsl_rl/elf3_squat_hold_stand/    保持：站姿
 | `train/mjlab_tasks/crab/__init__.py` | 注册 8 个任务（4 任务 × 训练/回放） |
 | `train/install_task.sh` | 自检清单加到 8 个任务 |
 | `scripts/run_squat_train.sh` | 冒烟 + 训练 + 回放 + 导出 mp4（`smoke` / `all` / `down` / `up` / `hold` / `hold-squat` / `hold-stand` / `play` / `video`） |
+| `scripts/export_squat_video.py` | mp4 导出主实现：离屏 rgb_array + 逐帧渲染 + 流式写 mp4，不依赖 viewer / DISPLAY / `play --video` |
 
 参考轨迹的来源见 `docs/squat_extreme.md`（`launch/split_traj.py` 从循环轨迹切出
 down / up 两段，接缝帧一致）。
