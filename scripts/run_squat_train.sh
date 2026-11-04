@@ -12,7 +12,9 @@
 #
 # 可调环境变量：
 #   NUM_ENVS=1024     并行环境数
-#   ITERS=4000        训练轮数（--agent.max-iterations，是"本次再跑多少轮"）
+#   ITERS=6000        训练轮数（--agent.max-iterations，是"本次再跑多少轮"）
+#   HOLD=5.0          参考播完后还必须站住几秒（训练段；0 = 旧行为，播完即结束）
+#   ARM_GUARD=1       手臂-腿接触检测开关（本版 mjlab 不支持自碰撞传感器时设 0）
 #   SMOKE_ITERS=5     冒烟轮数
 #   VENV=.venv        虚拟环境目录（相对仓库根）
 #   CKPT=...          play 模式下显式指定 checkpoint（不给就自动找最新）
@@ -24,7 +26,7 @@ set -euo pipefail
 
 MODE="${1:-all}"
 NUM_ENVS="${NUM_ENVS:-1024}"
-ITERS="${ITERS:-4000}"
+ITERS="${ITERS:-6000}"
 SMOKE_ITERS="${SMOKE_ITERS:-5}"
 VENV="${VENV:-.venv}"
 
@@ -41,6 +43,9 @@ fi
 
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYTHONUNBUFFERED=1
+# 这两个在任务包 import 时就生效（配置是 import 时 build 的），必须先 export
+export ELF3_SQUAT_HOLD="${HOLD:-5.0}"
+export ELF3_SQUAT_ARM_GUARD="${ARM_GUARD:-1}"
 
 step() { echo; echo "==> $*"; }
 
@@ -64,7 +69,7 @@ PY
 
 smoke() {
   check_tasks
-  step "冒烟 ① zero 动作（残差=0，纯参考开环，看 2.5 s 内会不会自己塌）"
+  step "冒烟 ① zero 动作（残差=0，纯参考开环；播完会一直保持蹲姿，Ctrl-C 退出）"
   timeout 180 "$BIN_PLAY" Elf3-Squat-Down-Play --agent zero || {
     echo "[warn] zero 冒烟退出码非 0（交互式 viewer 被 timeout 杀掉是正常的）"
   }
@@ -77,6 +82,9 @@ smoke() {
   done
   echo
   echo "[OK] 冒烟跑完。真实训练：bash scripts/run_squat_train.sh all"
+  echo "     先确认上面有这两行（没有就是配置没生效，别开训）："
+  echo "       [squat] down: 参考 2.46 s + 保持 5.0 s = 7.96 s/回合"
+  echo "       [squat] 已加手臂-腿接触传感器 arm_leg_contact"
 }
 
 train_one() {
@@ -146,6 +154,9 @@ esac
 
 echo
 echo "==> 完成。看指标："
-echo "    grep -o 'Metrics/traj_progress: [0-9.]*' ~/train_squat_down.log | tail -5"
 echo "    grep -o 'Metrics/traj_err_rms_leg: [0-9.]*' ~/train_squat_down.log | tail -5"
+echo "    grep -o 'Metrics/sym_err_rad: [0-9.]*'     ~/train_squat_down.log | tail -5"
+echo "    grep -o 'Metrics/base_xy: [0-9.]*'         ~/train_squat_down.log | tail -5"
+echo "    grep -o 'Metrics/base_yaw_deg: [0-9.]*'    ~/train_squat_down.log | tail -5"
+echo "    grep -o 'Metrics/arm_leg_touch: [0-9.]*'   ~/train_squat_down.log | tail -5"
 echo "    tensorboard --logdir logs/rsl_rl/elf3_squat_down --port 6006"

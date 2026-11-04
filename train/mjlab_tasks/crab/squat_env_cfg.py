@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import os
 
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
@@ -30,6 +31,7 @@ from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.tasks.velocity import mdp
+from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
@@ -52,6 +54,38 @@ TASKS = {
 
 # 极限蹲的躯干高度是 0.523 m；塌到这个高度以下判定为摔倒
 MIN_Z = {"down": 0.28, "up": 0.30}
+
+# 参考播完后再保持多久（秒）。训练时必须 > 0，否则策略从没学过「长时间站住」，
+# 回放里保持十几秒就会慢慢飘倒 —— 这正是第一版 model_4000 的实测表现。
+# 想改：ELF3_SQUAT_HOLD=8 bash scripts/run_squat_train.sh down
+HOLD_S = float(os.environ.get("ELF3_SQUAT_HOLD", "5.0") or 5.0)
+
+# 手臂-腿接触惩罚的开关。传感器建不起来（本版 mjlab 不支持自碰撞接触检测）时
+# 设 ELF3_SQUAT_ARM_GUARD=0 重跑，其余奖励照旧。
+ARM_GUARD = os.environ.get("ELF3_SQUAT_ARM_GUARD", "1").strip() not in ("0", "false", "False", "")
+
+
+def _arm_leg_sensor() -> ContactSensorCfg:
+    """手臂（shoulder/elbow/wrist）与腿（hip/knee/ankle）之间的接触。
+
+    参考蹲姿的肘-膝间隙是 18.6 cm，正常不该碰；碰上就是残差把肢体怼过去了。
+    """
+    return ContactSensorCfg(
+        name="arm_leg_contact",
+        primary=ContactMatch(
+            mode="body",
+            pattern=r"^(l|r)_(shoulder|elbow|wrist)_.*_link$",
+            entity="robot",
+        ),
+        secondary=ContactMatch(
+            mode="body",
+            pattern=r"^(l|r)_(hip|knee|ankle)_.*_link$",
+            entity="robot",
+        ),
+        fields=("found", "force"),
+        reduce="netforce",
+        num_slots=1,
+    )
 
 
 def _flat_terrain() -> TerrainGeneratorCfg:
@@ -136,7 +170,7 @@ def _build_observations(cfg, which: str) -> None:
     cfg.observations["critic"].terms = critic
 
 
-def _build_rewards(cfg) -> None:
+def _build_rewards(cfg, arm_guard: bool = True) -> None:
     r = cfg.rewards
     r.clear()
 
@@ -156,14 +190,31 @@ def _build_rewards(cfg) -> None:
     r["up_track"] = RewardTermCfg(
         func=S.up_track, weight=1.0, params={"sigma": 0.25},
     )
+    # 左右对称：参考严格对称，跟踪项按维度平均允许「左外撇右内收」的等价解，
+    # 实测第一版就收敛到骨盆扭转 + 单臂压腿的不对称站姿。
+    # σ 0.08 rad（4.6°）：单个关节偏 0.2 rad -> 奖励 0.79（罚 0.21/步），
+    # 全身平均偏 0.1 rad -> 0.46（罚 0.54/步），足够压住不对称解。
+    r["symmetry"] = RewardTermCfg(
+        func=S.symmetry, weight=1.0, params={"sigma": 0.08},
+    )
+    # 水平别跑：参考全程 x=y=0。这是「慢慢飘倒」的唯一绝对参考，
+    # 权重按量级定：偏 2 cm -> 0.016/步，偏 5 cm -> 0.1/步（跟踪项约 0.94/步）。
+    r["base_anchor"] = RewardTermCfg(func=S.base_anchor, weight=-40.0)
+    # 别扭：偏 10° -> 0.028 rad² -> -0.14/步
+    r["yaw_anchor"] = RewardTermCfg(func=S.yaw_anchor, weight=-5.0)
 
     r["joint_pos_limits"] = RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0)
-    # -0.01：与爬楼任务同量级（那版实测 -0.006 足够抑制抖动，又不至于奖励「别动」）
-    r["action_rate_l2"] = RewardTermCfg(func=mdp.action_rate_l2, weight=-0.01)
+    # -0.02：比爬楼版略强一点，蹲姿保持阶段的抖动会直接传到脚底
+    r["action_rate_l2"] = RewardTermCfg(func=mdp.action_rate_l2, weight=-0.02)
     # 活着就给分，抵消「早点摔掉少挨罚」的退化解
     r["alive"] = RewardTermCfg(func=S.alive, weight=0.5)
     # 摔倒一次性重罚（按 dt 缩放后 ≈ -2/次；单回合满分约 60）
     r["is_terminated"] = RewardTermCfg(func=X.is_terminated, weight=-100.0, params={})
+    # 手臂-腿接触：碰一下就 -0.6/步（持续接触约等于把一个跟踪项的收益抹平）
+    if arm_guard:
+        r["arm_leg_contact"] = RewardTermCfg(
+            func=S.arm_leg_contact, weight=-0.6, params={},
+        )
     # 探针：Metrics/traj_*
     r["squat_probe"] = RewardTermCfg(func=S.squat_probe, weight=1e-9, params={})
 
@@ -245,6 +296,19 @@ def squat_env_cfg(which: str = "down", play: bool = False):
     if not cfg.scene.sensors:
         raise RuntimeError("没找到 torso_ground_contact 传感器，终止项会失效")
 
+    # 手臂-腿接触传感器（自碰撞）。建不起来就跳过，其余奖励照旧。
+    arm_guard = bool(ARM_GUARD)
+    if arm_guard:
+        try:
+            cfg.scene.sensors = tuple(cfg.scene.sensors) + (_arm_leg_sensor(),)
+            print("[squat] 已加手臂-腿接触传感器 arm_leg_contact（碰到罚 -0.6/步）")
+        except Exception as e:                    # noqa: BLE001
+            arm_guard = False
+            print(f"[squat][warn] 手臂-腿接触传感器建不起来（{e!r}），跳过接触惩罚；"
+                  f"\n            需要的话设 ELF3_SQUAT_ARM_GUARD=0 直接关掉")
+    else:
+        print("[squat] ELF3_SQUAT_ARM_GUARD=0：不检测手臂-腿接触")
+
     # ---- 无速度指令 ----
     cfg.commands = {}
 
@@ -258,13 +322,16 @@ def squat_env_cfg(which: str = "down", play: bool = False):
         clip=None,
         traj_path=REF_TABLE,
         traj_key=TASKS[which][0],
+        # 腿 0.35 是保住平衡的必需品；腰 0.15 只做微调；手臂收到 0.12（7°）——
+        # 手臂的唯一作用是在极限蹲里配重，参考姿势已经把肘-膝间隙留到 18.6 cm，
+        # 给 0.25 rad 的余量只会让策略把手臂压到大腿上（第一版实测就是这样）。
         leg_clip_rad=0.35,
         waist_clip_rad=0.15,
-        arm_clip_rad=0.25,
+        arm_clip_rad=0.12,
     )
 
     _build_observations(cfg, which)
-    _build_rewards(cfg)
+    _build_rewards(cfg, arm_guard=arm_guard)
     _build_terminations(cfg, which)
     _retune_events(cfg, which, play)
     _set_init_pose(cfg, which)
@@ -272,9 +339,20 @@ def squat_env_cfg(which: str = "down", play: bool = False):
     # ---- 课程：无 ----
     cfg.curriculum = {}
 
-    # ---- 回合长度：参考时长 + 0.5 s 余量（正常会在 traj_finished 提前结束）----
+    # ---- 回合长度：参考时长 + 保持段 ----
+    # 保持段是这次改动的核心：参考播完后帧号 clamp 在末帧，机器人必须**原地站住**
+    # HOLD_S 秒。没有这一段，策略只学过「2.46 s 内别摔」，回放里保持十几秒必飘倒。
     traj = load_traj(REF_TABLE, TASKS[which][0])
-    cfg.episode_length_s = float(traj.duration + 0.5)
+    hold = max(0.0, float(HOLD_S))
+    cfg.episode_length_s = float(traj.duration + hold + 0.5)
+    if hold > 0.0:
+        # 有了保持段就用 episode_length_s 自然结束（time_out），
+        # 不能在参考播完就终止 —— 那等于保持段白加。
+        cfg.terminations.pop("traj_finished", None)
+        print(f"[squat] {which}: 参考 {traj.duration:.2f} s + 保持 {hold:.1f} s "
+              f"= {cfg.episode_length_s:.2f} s/回合")
+    else:
+        print(f"[squat] {which}: 无保持段（ELF3_SQUAT_HOLD=0），参考播完即结束")
 
     cfg.viewer = ViewerConfig(
         origin_type=ViewerConfig.OriginType.ASSET_BODY,

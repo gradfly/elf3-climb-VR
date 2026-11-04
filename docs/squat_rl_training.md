@@ -32,7 +32,7 @@ q_target(t) = q_ref(t) + scale · clip(Δq, ±0.35 rad 腿 / ±0.15 腰 / ±0.25
 | 参考推进 | 1 帧 / env step | `TrajTrackActionCfg.advance`，所以不会「演快/演慢」 |
 | 观测（actor） | 128 维 | 见下表 |
 | 动作 | 29 维残差 | 与 crab 任务同一套 `ACTION_SCALE_MAP` |
-| 回合长度 | 参考时长 + 0.5 s | 正常在参考播完时以 `traj_finished` 结束（记为 time_out，不算摔） |
+| 回合长度 | 参考时长 + **保持 5 s** + 0.5 s | 参考播完后帧号 clamp 在末帧，必须原地站住 5 s；由 `time_out` 结束 |
 
 actor 观测：`base_lin_vel(3) + base_ang_vel(3) + projected_gravity(3) +
 joint_pos(29) + joint_vel(29) + actions(29) + traj_joint_err(29) +
@@ -46,16 +46,49 @@ traj_height_err(1) + traj_progress_sincos(2)`。
 | `leg_track` | +2.0 | 只算 12 腿，σ 0.30 rad（站不站得住由腿决定） |
 | `height_track` | +2.0 | 基座高度 vs 参考，σ 5 cm（**蹲多深 = 任务目标本身**） |
 | `up_track` | +1.0 | 躯干朝向 vs 参考，σ 0.25（极限蹲是 18.5° 前倾，**不能用 upright**） |
+| `symmetry` | +1.0 | **左右镜像差额** exp 核，σ 0.08 rad；参考严格对称，这条杀掉不对称解 |
 | `alive` | +0.5 | 抵消「早摔早结束少挨罚」 |
+| `base_anchor` | −40 | 基座水平位移平方（参考全程 x=y=0）；偏 5 cm ≈ −0.1/步 |
+| `yaw_anchor` | −5 | 基座偏航角平方；偏 10° ≈ −0.15/步 |
+| `arm_leg_contact` | −0.6 | 手臂-腿接触（传感器 `arm_leg_contact`）；`ARM_GUARD=0` 可关 |
 | `joint_pos_limits` | −1.0 | 关节限位 |
-| `action_rate_l2` | −0.01 | 抖动 |
+| `action_rate_l2` | −0.02 | 抖动 |
 | `is_terminated` | −100 | 摔一次约 −2 分（单回合满分约 60） |
-| `squat_probe` | 1e-9 | 只写 `Metrics/traj_*`，不参与学习 |
+| `squat_probe` | 1e-9 | 只写 `Metrics/*`，不参与学习 |
 
-终止：`time_out` / `fell_over`(55°) / `torso_contact`(20 N) / `base_too_low`
-（down 0.28 m、up 0.30 m）/ `drifted`(水平 1.2 m) / `traj_finished`。
+终止：`time_out` / `fell_over`(55°) / `base_too_low`（down 0.28 m、up 0.30 m）/
+`drifted`(水平 1.2 m) / `torso_contact`(20 N)，以及 `traj_finished`——**只在
+`HOLD=0` 时保留**；有保持段时它必须去掉，否则回合在参考播完就结束，保持段白加。
 
 > ⚠️ 观测与动作语义都和 `Elf3-Crab-*` 不同，**不能加载爬楼的 checkpoint**。
+
+### 1.1 v2：不对称 / 手臂压腿 / 站久了会倒——三个病灶与对策
+
+第一版 `Elf3-Squat-Down` 训 4000 轮（1.31 亿步）后回放看到的三个问题，根因不是一个：
+
+| 现象 | 根因 | 对策 |
+|---|---|---|
+| 蹲下后身体不对称（骨盆扭转、单臂外撇） | 跟踪奖励按 29 维**平均**，左右互换的等价解拿一样的分；不对称还能借力 | 新增 `symmetry`（左右镜像差额 exp 核，σ 0.08 rad） |
+| 手臂压在大腿上 | 接触在奖励里是**免费**的（除了躯干触地没有任何接触惩罚），策略就把手臂搁腿上省力 | 新增手臂-腿接触传感器 + `arm_leg_contact` 惩罚；臂残差限幅 0.25 → **0.12 rad** |
+| 保持久了慢慢歪、最后倒 | **回合只有 2.46 s**，参考播完就结束；策略从没学过长时间站住，慢漂在奖励里还是中性的 | 回合加 **5 s 保持段**（参考 clamp 在末帧）；新增 `base_anchor` / `yaw_anchor` 压漂移 |
+
+三条改动互相独立，缺一条都会复发：只加保持段 → 策略用不对称姿势硬撑；只加对称 →
+没有长时间保持的经验，照样会漂。所以这一版要**从头训**（别 resume 旧的
+`model_4000.pt`，它已经收敛到不对称解上了）。
+
+新指标（都在 `Metrics/*`）：
+
+| 指标 | 期望 | 含义 |
+|---|---|---|
+| `sym_err_rad` | < 0.05 | 左右关节差额 RMS；> 0.1 就是还在不对称 |
+| `base_xy` | < 0.03 m | 基座水平漂移；涨到 0.1 以上说明在慢慢挪 |
+| `base_yaw_deg` | < 3° | 身体扭转 |
+| `arm_leg_touch` | ≈ 0 | 手臂-腿接触比例；恒为 0 且画面还压腿 → 传感器没生效（见下） |
+
+`arm_leg_touch` 恒为 0 有两种可能：真的没碰，或者**传感器读不到**。后者会在启动时
+打印 `[squat][warn] 读不到接触传感器 ...`；如果连环境都建不起来（本版 mjlab 不支持
+自碰撞接触检测），用 `ARM_GUARD=0 bash scripts/run_squat_train.sh down` 关掉这一项再训，
+其余改动照旧生效。
 
 ---
 
@@ -69,8 +102,13 @@ traj_height_err(1) + traj_progress_sincos(2)`。
 cd ~/elf3 && git pull
 bash scripts/run_squat_train.sh smoke     # 先冒烟，别急着开 1024
 bash scripts/run_squat_train.sh all       # 冒烟通过后顺序训 down、up
-# 可调：NUM_ENVS=768 ITERS=6000 bash scripts/run_squat_train.sh all
+# 可调：NUM_ENVS=768 ITERS=8000 HOLD=8 bash scripts/run_squat_train.sh all
+#   HOLD   = 参考播完后还要站住几秒（默认 5，0 = 回到「播完即结束」的旧行为）
+#   ARM_GUARD = 0 关掉手臂-腿接触检测（本版 mjlab 不支持自碰撞传感器时用）
 ```
+
+v2 的改动（保持段 / 对称 / 接触）与上一版**不兼容**，是**从头训**，不要 resume
+旧的 `model_4000.pt`：它已经收敛到不对称解上，续训只会接着走。
 
 下面是把脚本拆开的手工版，出问题时逐条排查用。
 
@@ -158,8 +196,10 @@ grep -o "Metrics/traj_progress: [0-9.]*" ~/train_squat_down.log | tail -5
 # 跟踪误差（弧度，腿）：< 0.25 rad 算跟上，> 0.6 基本没在跟
 grep -o "Metrics/traj_err_rms_leg: [0-9.]*" ~/train_squat_down.log | tail -5
 
-# 回合长度 / 完成率
-grep -o "Metrics/traj_done_frac: [0-9.]*" ~/train_squat_down.log | tail -5
+# 保持段能不能站住（v2 新增）：sym_err_rad / base_xy / base_yaw_deg / arm_leg_touch
+grep -o "Metrics/sym_err_rad: [0-9.]*"  ~/train_squat_down.log | tail -5
+grep -o "Metrics/base_xy: [0-9.]*"      ~/train_squat_down.log | tail -5
+grep -o "Metrics/base_yaw_deg: [0-9.]*" ~/train_squat_down.log | tail -5
 ```
 
 判据（前 300 轮之内应该出现）：
@@ -168,7 +208,13 @@ grep -o "Metrics/traj_done_frac: [0-9.]*" ~/train_squat_down.log | tail -5
 |---|---|---|
 | `traj_progress` 均值 | → 0.9 以上 | 停在 0.3~0.4（中途塌了） |
 | `traj_err_rms_leg` | < 0.25 rad | 恒 0.6 以上（没在跟，只在保命） |
-| `traj_done_frac` | > 0.7 | < 0.2 |
+| `sym_err_rad` | < 0.05 | > 0.1（还是不对称） |
+| `base_xy` | < 0.03 m | > 0.1（在慢慢挪，会倒） |
+| `base_yaw_deg` | < 3° | > 8°（身体在扭） |
+| `arm_leg_touch` | ≈ 0 | 恒 0.3+（手臂压腿） |
+
+> `traj_done_frac` 在 v2 里不再适合当判据：参考播完后还有 5 s 保持段，
+> 这段时间它恒为 1，均值被稀释成 ~0.6，看不出好坏。
 
 ### 2.5 回放（训练完）
 
