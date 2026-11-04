@@ -575,6 +575,7 @@ logs/rsl_rl/elf3_squat_hold_stand/    保持：站姿
 | `scripts/run_squat_train.sh` | 冒烟 + 训练 + 回放 + 导出 mp4（`smoke` / `all` / `down` / `up` / `hold` / `hold-squat` / `hold-stand` / `play` / `video`） |
 | `scripts/export_squat_video.py` | mp4 导出主实现：离屏 rgb_array + 逐帧渲染 + 流式写 mp4，不依赖 viewer / DISPLAY / `play --video` |
 | `train/export_onnx.py` | 导出 ONNX + 观测契约 JSON；`--squat <mode>` 自动找 ckpt，含 load 签名兼容、torch 直出兜底、数值对拍 |
+| `scripts/export_squat_npz.py` | 导出下蹲/起立各自独立的参考 npz（29 关节 `q` + 38 维 `qpos` + 部署契约），与 ONNX 一一配对 |
 
 参考轨迹的来源见 `docs/squat_extreme.md`（`launch/split_traj.py` 从循环轨迹切出
 down / up 两段，接缝帧一致）。
@@ -745,6 +746,9 @@ JSON 里对部署有用的字段：
 hold 任务的 actor 观测**少 `traj_progress` 两项**（`with_progress=False`），
 所以维度比跟踪任务少 2 —— 导出脚本会从 `env.reset()` 实测，不需要手改。
 
+契约里的 `reference.table` 指向合并表 `squat_ref_v1.npz`；若控制器按模式
+各加载一份，用 §8 导出的 `squat_down.npz` / `squat_up.npz`（内容逐位相同）。
+
 ### 7.3 自动验证
 
 导出后会用 `onnxruntime` 载入，检查输入维度是否等于 `obs_dim`，再用同一个随机观测
@@ -818,4 +822,112 @@ def control(robot_state):
 `build_blocks_in_order` 里 `traj_joint_err = q_meas - q_ref[frame]`、
 `traj_height_err = z_meas - z_ref[frame]`、`traj_progress_sincos = [sin(πp), cos(πp)]`，
 `p = frame / (T-1)`。hold 任务把 `frame` 固定成 `freeze_frame`，且**不拼 progress 块**。
+
+---
+
+## 8. 导出下蹲 / 起立参考 npz
+
+> 只想要 **MuJoCo 回放用的 38 维 qpos 轨迹**？仓库里本来就有两份，直接用即可，
+> 不用跑本节的脚本：
+> `sim/vendor/bxi_controller_ros2/src/bxi_example_py_elf3/data/mujoco_simulation/`
+> 下的 `squat_extreme_down_traj.npz`（124 帧 / 2.46 s）与
+> `squat_extreme_up_traj.npz`（102 帧 / 2.02 s），由 `launch/split_traj.py` 切出，
+> 可直接喂 `python squat_replay.py --traj squat_extreme_down_traj.npz`。
+
+### 8.1 为什么要再导一份
+
+**真机部署要的不是上面那两份。** 策略的 actor 观测里有
+`traj_joint_err` / `traj_height_err` / `traj_progress_sincos`（§6.3、§7.4），
+它们读的是 29 关节参考角 `q[frame]` 和基座高度 `z[frame]`，而原始轨迹里只有 38 维
+`qpos`。训练侧把这些烘焙进了 `train/assets/ref_tables/squat_ref_v1.npz`，但那份是
+**down / up 合并在一个文件里**（键名带 `down/` `up/` 前缀），且不含 `qpos`。
+
+`scripts/export_squat_npz.py` 把两者合成**每个模式一份、自包含**的 npz，
+默认输出到 `logs/export/`，正好与 `train/export_onnx.py` 的产物一一配对：
+
+```
+logs/export/squat_down.onnx  +  logs/export/squat_down.npz
+logs/export/squat_up.onnx    +  logs/export/squat_up.npz
+logs/export/squat_ref_manifest.json    ← 帧数、时长、sha256 校验和
+```
+
+### 8.2 一条命令
+
+```bash
+cd ~/elf3
+python scripts/export_squat_npz.py                       # 两份都导（纯 numpy，不用 venv/GPU）
+
+python scripts/export_squat_npz.py --mode down           # 只导下蹲
+python scripts/export_squat_npz.py --outdir sim/vendor/onnx   # 和 ONNX 放一起
+python scripts/export_squat_npz.py --prefix squat_v2    # 换文件名前缀
+```
+
+脚本只依赖 numpy，**不 import mjlab / mujoco，不需要 GPU 或 DISPLAY**，本机也能跑。
+输入是三份已入库的文件（两份原始轨迹 + 合并参考表），所以产物可随时重建。
+`logs/` 被 gitignore，交付时记得把这两份 npz 一起带上。
+
+### 8.3 每份 npz 的键
+
+| 键 | 形状 / 类型 | 用途 |
+|---|---|---|
+| `q` | `[T,29]` float32 | **29 个可控关节参考角**，`traj_joint_err = q_meas - q[frame]`；动作后处理也用它 |
+| `qpos` | `[T,38]` float64 | MuJoCo 全量 qpos，可直接喂 `squat_replay.py` 回放验证姿态 |
+| `z` | `[T]` float32 | 基座高度，`traj_height_err = z_meas - z[frame]` |
+| `up` / `pitch` | `[T,3]` / `[T]` | 躯干 up 向量与前倾角（度），验收/可视化用 |
+| `time` / `dt` | `[T]` / 标量 | `dt=0.02`（50 Hz）；`time = arange(T)*dt` |
+| `names` | `[29]` | 与 `q` 的列一一对应（`JOINT_NAMES` 顺序） |
+| `joint_names` | `[29]` | 同上，别名，兼容 `squat_replay.py` |
+| `meta` | dict | 部署契约，见下 |
+
+`meta` 里对控制器有用的字段：`mode`、`task`、`frames`、`duration_s`、
+`control_hz=50`、`z_start` / `z_end`、`freeze_at_end=True`、
+`qpos_layout`（`0:3` 位置 / `3:7` 四元数 wxyz / `7:36` 29 关节 / `36:38` 两个被动头关节）、
+`action_formula`、`clip_rad`（腿 0.35 / 腰 0.15 / 臂 0.12 rad）、
+`progress_formula`、`obs_from_ref`、`source`、`ref_table`。
+
+### 8.4 导出时自动做的交叉校验
+
+21 项断言，任一不过就**退出码 1、不落盘**（别用 `--no-verify` 蒙混过去）：
+
+* `q` 与原始 `qpos[:,7:36]`、`z` 与 `qpos[:,2]`、`time` 与 `arange(T)*dt` 一致；
+* 关节名与 `JOINT_NAMES` 逐项一致（防 XML 关节顺序变了导致静默错位）；
+* 帧数、`dt=0.02` 一致；`down` 高度单调下降、`up` 单调上升；
+* 单帧关节跳变 < 0.30 rad（实测 down 0.0762 / up 0.0455）；
+* **接缝**：`down` 末帧的 38 维 `qpos` 与 `up` 首帧完全相同（实测差 0.00），
+  蹲姿高度一致 —— 这保证 `DOWN → UP` 切换时关节目标不跳变。
+
+`q` / `z` 是**逐位复制**训练参考表（float32），不是重算，所以部署侧算出来的
+`traj_joint_err` 与训练时完全相同，不会因为浮点差异产生分布外输入。
+
+### 8.5 部署侧最小读取
+
+```python
+import numpy as np, onnxruntime as ort
+
+d = np.load("squat_down.npz", allow_pickle=True)
+q_ref, z_ref, T = d["q"], d["z"], int(d["meta"].item()["frames"])
+frame = 0
+
+def control(robot_state, action):          # 20 ms 调一次
+    global frame
+    obs = build_obs(robot_state, q_ref[frame], z_ref[frame], frame / (T - 1))
+    a = sess.run(None, {inp.name: obs[None].astype(np.float32)})[0][0]
+    q_target = q_ref[frame] + scale * np.clip(a, -clip/scale, clip/scale)
+    frame = min(frame + 1, T - 1)         # 到末帧停住 = §6 的无限保持态
+    return q_target
+```
+
+切到 `up` 模式时重新 `np.load("squat_up.npz")` 并把 `frame` 清零；因为接缝帧相同，
+切换瞬间 `q_ref[0]` 与上一模式的末帧一致，不会跳目标。
+
+### 8.6 三个坑
+
+1. **hold 任务没有独立 npz。** `Elf3-Squat-Hold` / `Elf3-Stand-Hold` 复用 down 表并把帧号
+   冻结在 123 / 0（§3），所以 `squat_down.npz` 就是它们的参考表，控制器把 `frame`
+   固定住、不推进即可，不需要第五个文件。
+2. **`q` 是 29 维、`qpos` 是 38 维**，别混。ONNX 观测和动作后处理用 `q`；
+   MuJoCo 仿真回放才用 `qpos`。`qpos[7:36]` 才等于 `q`，`36:38` 是被动头关节。
+3. **`dt` 必须对齐 20 ms。** 帧计数器跑快/跑慢会让 `q_ref` 与机器人实际状态
+   错位，表现为「蹲到一半开始抖」。§6.5 的超时保护（down 超过 3.5 s 仍未到末帧就停机）
+   也依赖这个时间基准。
 
