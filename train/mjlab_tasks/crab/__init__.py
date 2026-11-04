@@ -58,7 +58,7 @@ try:
         _tag = _which.capitalize()
         _cfg_train = squat_env_cfg(which=_which, play=False)
         _cfg_play = squat_env_cfg(which=_which, play=True)
-        _rl = elf3_squat_ppo_runner_cfg()
+        _rl = elf3_squat_ppo_runner_cfg(_which)
         for _suffix in ("", "-Play"):
             register_mjlab_task(
                 task_id=f"Elf3-Squat-{_tag}{_suffix}",

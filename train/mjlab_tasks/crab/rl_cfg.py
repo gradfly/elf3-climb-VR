@@ -90,7 +90,7 @@ def elf3_crab_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         pass
     return cfg
 
-def elf3_squat_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+def elf3_squat_ppo_runner_cfg(which: str = "squat") -> RslRlOnPolicyRunnerCfg:
     """蹲下/起立跟踪用的 PPO 配置。
 
     与爬楼版（elf3_crab_ppo_runner_cfg）的差别及理由：
@@ -109,5 +109,7 @@ def elf3_squat_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     cfg.num_steps_per_env = 32
     cfg.max_iterations = 4000
     cfg.save_interval = 100
-    cfg.experiment_name = "elf3_squat"
+    # down / up 分开命名：日志目录 logs/rsl_rl/elf3_squat_{down,up}/<时间戳>/
+    # 两边共用一个 experiment_name 的话，找 checkpoint 和看曲线都分不开。
+    cfg.experiment_name = f"elf3_squat_{which}"
     return cfg

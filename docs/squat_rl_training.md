@@ -143,8 +143,9 @@ MUJOCO_GL=egl PYTHONUNBUFFERED=1 .venv/bin/train Elf3-Squat-Up \
 - 日志别放 `/tmp`（重启会清空），放家目录。
 - 必须带 `PYTHONUNBUFFERED=1` + `tee`，否则管道模式下日志滞后几分钟，
   且 traceback 看不到。
-- 曲线与 checkpoint 落在 `logs/rsl_rl/elf3_squat/<时间戳>/`，
-  看曲线：`tensorboard --logdir logs/rsl_rl/elf3_squat --port 6006`。
+- 曲线与 checkpoint 落在 `logs/rsl_rl/elf3_squat_down/` 和 `logs/rsl_rl/elf3_squat_up/`
+  （两边实验名分开，别混），
+  看曲线：`tensorboard --logdir logs/rsl_rl --port 6006`。
 
 ### 2.4 看训练有没有真的在学
 
@@ -171,9 +172,21 @@ grep -o "Metrics/traj_done_frac: [0-9.]*" ~/train_squat_down.log | tail -5
 
 ### 2.5 回放（训练完）
 
+一条命令，自动找该任务目录下**最新的 checkpoint**：
+
+```bash
+bash scripts/run_squat_train.sh play down    # = play Elf3-Squat-Down-Play + 最新 model_*.pt
+bash scripts/run_squat_train.sh play up
+# 想指定某一份：
+CKPT=logs/rsl_rl/elf3_squat_down/<run>/model_1000.pt \
+  bash scripts/run_squat_train.sh play down
+```
+
+它等价于（down / up 的实验名是分开的，找文件不会混）：
+
 ```bash
 MUJOCO_GL=egl .venv/bin/play Elf3-Squat-Down-Play \
-  --checkpoint-file logs/rsl_rl/elf3_squat/<run>/model_4000.pt
+  --checkpoint-file logs/rsl_rl/elf3_squat_down/<run>/model_4000.pt
 ```
 
 启动后终端会打印 viser 地址，本地端口转发后打开即可（见 `train/README.md` §10.2）。
@@ -204,7 +217,7 @@ MUJOCO_GL=egl .venv/bin/play Elf3-Squat-Down-Play \
 | `train/mjlab_tasks/crab/traj_action.py` | `TrajTrackAction`：时间轴 + 残差动作项 |
 | `train/mjlab_tasks/crab/squat_mdp.py` | 观测/奖励/终止项 |
 | `train/mjlab_tasks/crab/squat_env_cfg.py` | 两个任务的环境配置（平地、无速度指令） |
-| `train/mjlab_tasks/crab/rl_cfg.py` | `elf3_squat_ppo_runner_cfg()` |
+| `train/mjlab_tasks/crab/rl_cfg.py` | `elf3_squat_ppo_runner_cfg(which)`，down/up 实验名分开 |
 | `train/mjlab_tasks/crab/__init__.py` | 注册 4 个任务 |
 | `train/install_task.sh` | 自检清单加到 8 个任务 |
 | `scripts/run_squat_train.sh` | 冒烟 + 训练一条命令（`smoke` / `all` / `down` / `up`） |

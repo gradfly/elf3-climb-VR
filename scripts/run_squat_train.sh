@@ -7,14 +7,18 @@
 #   bash scripts/run_squat_train.sh all        # 冒烟通过后顺序训 down、up（默认）
 #   bash scripts/run_squat_train.sh down       # 只训下蹲
 #   bash scripts/run_squat_train.sh up         # 只训起立
+#   bash scripts/run_squat_train.sh play down  # 回放：自动找 elf3_squat_down 下最新的 model_*.pt
+#   bash scripts/run_squat_train.sh play up    #   指定某个 ckpt：CKPT=logs/rsl_rl/elf3_squat_down/<run>/model_1000.pt ...
 #
 # 可调环境变量：
 #   NUM_ENVS=1024     并行环境数
 #   ITERS=4000        训练轮数（--agent.max-iterations，是"本次再跑多少轮"）
 #   SMOKE_ITERS=5     冒烟轮数
 #   VENV=.venv        虚拟环境目录（相对仓库根）
+#   CKPT=...          play 模式下显式指定 checkpoint（不给就自动找最新）
 #
-# 日志：~/train_squat_{down,up}.log，曲线/checkpoint 在 logs/rsl_rl/elf3_squat/<时间戳>/
+# 日志：~/train_squat_{down,up}.log，曲线/checkpoint 在
+#   logs/rsl_rl/elf3_squat_{down,up}/<时间戳>/（两边实验名分开，别混）
 # =============================================================================
 set -euo pipefail
 
@@ -84,16 +88,64 @@ train_one() {
     2>&1 | tee "$HOME/train_squat_${which}.log" | tail -40
 }
 
+# 回放：默认自动找该实验目录下修改时间最新的 model_*.pt
+latest_ckpt() {
+  local exp="logs/rsl_rl/elf3_squat_$1"
+  local ck=""
+  if [ -n "${CKPT:-}" ]; then
+    echo "$CKPT"; return 0
+  fi
+  # run 目录按时间戳命名，同目录里 model_<iter>.pt 按字母序 == 按迭代数序
+  ck="$(ls -1dt "$exp"/*/ 2>/dev/null | head -1 || true)"   # 最新 run 目录
+  if [ -z "$ck" ]; then
+    ck="$(ls -1dt "$exp"*/ 2>/dev/null | head -1 || true)"  # 没有 run 子目录的兜底
+  fi
+  if [ -z "$ck" ]; then
+    echo "[ERR] 没找到任何 checkpoint（$exp/*/model_*.pt）" >&2
+    echo "      先训练：bash scripts/run_squat_train.sh $1" >&2
+    return 1
+  fi
+  local pt
+  pt="$(ls -1 "$ck"model_*.pt 2>/dev/null | sort -V | tail -1 || true)"
+  if [ -z "$pt" ]; then
+    # 最新 run 里还没有 model（刚开训没到 save_interval），往前找其它 run
+    pt="$(find logs/rsl_rl/elf3_squat_$1 -name 'model_*.pt' -printf '%T@ %p\n' 2>/dev/null \
+          | sort -rn | head -1 | cut -d' ' -f2- || true)"
+  fi
+  if [ -z "$pt" ]; then
+    echo "[ERR] 最新 run 目录 $ck 里没有 model_*.pt，全目录也没找到" >&2
+    return 1
+  fi
+  echo "$pt"
+}
+
+play_one() {
+  local which="$1" tag pt
+  tag="$(python -c "print('$which'.capitalize())")"
+  pt="$(latest_ckpt "$which")" || exit 1
+  step "回放 Elf3-Squat-$tag-Play，checkpoint = $pt"
+  echo "    （想换别的：CKPT=<路径> bash scripts/run_squat_train.sh play $which）"
+  "$BIN_PLAY" "Elf3-Squat-$tag-Play" --checkpoint-file "$pt"
+}
+
 case "$MODE" in
   smoke) smoke ;;
   down)  check_tasks; train_one down ;;
   up)    check_tasks; train_one up ;;
+  play)
+    check_tasks
+    case "${2:-}" in
+      down) play_one down ;;
+      up)   play_one up ;;
+      *)    echo "用法：play down | play up（想同时看两个就开两个终端）"; exit 2 ;;
+    esac
+    ;;
   all)   check_tasks; train_one down; train_one up ;;
-  *) echo "未知参数：$MODE（可用 smoke / down / up / all）"; exit 2 ;;
+  *) echo "未知参数：$MODE（可用 smoke / down / up / play / all）"; exit 2 ;;
 esac
 
 echo
 echo "==> 完成。看指标："
 echo "    grep -o 'Metrics/traj_progress: [0-9.]*' ~/train_squat_down.log | tail -5"
 echo "    grep -o 'Metrics/traj_err_rms_leg: [0-9.]*' ~/train_squat_down.log | tail -5"
-echo "    tensorboard --logdir logs/rsl_rl/elf3_squat --port 6006"
+echo "    tensorboard --logdir logs/rsl_rl/elf3_squat_down --port 6006"
