@@ -4,8 +4,12 @@
 任务即出现在 `mjl list_envs` / `train` 的可选列表里。
 
 任务 ID：
-  - Elf3-Crab-Stairs        训练
-  - Elf3-Crab-Stairs-Play   回放/评测
+  - Elf3-Crab-Stairs           训练
+  - Elf3-Crab-Stairs-Play      回放/评测
+  - Elf3-Crab-Residual         残差（步态表 + 相位）
+  - Elf3-Squat-Down / -Up      蹲下 / 起立（时间轴跟踪 + 残差）
+  - Elf3-Squat-Hold            极限蹲保持（参考帧冻结，20 s 全程保持）
+  - Elf3-Stand-Hold            站姿保持
 """
 from __future__ import annotations
 
@@ -73,3 +77,26 @@ except Exception as _e:                                   # noqa: BLE001
     print("[squat][ERR] 最常见原因：train/assets/ref_tables/squat_ref_v1.npz 缺失，"
           "\n            补救：python train/assets/build_squat_ref.py")
     # 不抛：抛了会把上面的爬楼任务一起带崩，install_task.sh 的自检会明确指出来
+
+# ---- 蹲姿 / 站姿「保持」独立任务（参考帧冻结，全程保持一个位形）----
+# 与上面的蹲起任务共用同一张参考表，但回合里没有跟踪段 —— 单独训一个网络，
+# 专门优化「长时间站住不动」。见 squat_hold_cfg.py。
+try:
+    from .squat_hold_cfg import squat_hold_env_cfg
+
+    for _kind, _prefix in (("squat", "Squat-Hold"), ("stand", "Stand-Hold")):
+        _hf_cfg = squat_hold_env_cfg(kind=_kind, play=False)
+        _hf_play = squat_hold_env_cfg(kind=_kind, play=True)
+        _hf_rl = elf3_squat_ppo_runner_cfg(f"hold_{_kind}")
+        for _suffix in ("", "-Play"):
+            register_mjlab_task(
+                task_id=f"Elf3-{_prefix}{_suffix}",
+                env_cfg=_hf_cfg,
+                play_env_cfg=_hf_play,
+                rl_cfg=_hf_rl,
+                runner_cls=VelocityOnPolicyRunner,
+            )
+        print(f"[hold] 已注册 Elf3-{_prefix} / Elf3-{_prefix}-Play")
+except Exception as _e:                                   # noqa: BLE001
+    print(f"[hold][ERR] 保持任务注册失败，本次不注册 Elf3-*-Hold：{_e!r}")
+    print("[hold][ERR] 同样依赖 train/assets/ref_tables/squat_ref_v1.npz")

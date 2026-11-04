@@ -92,8 +92,12 @@ want = [
     "Elf3-Squat-Down-Play",
     "Elf3-Squat-Up",
     "Elf3-Squat-Up-Play",
+    "Elf3-Squat-Hold",
+    "Elf3-Squat-Hold-Play",
+    "Elf3-Stand-Hold",
+    "Elf3-Stand-Hold-Play",
 ]
-have = [t for t in list_tasks() if "Crab" in t or "Squat" in t]
+have = [t for t in list_tasks() if "Crab" in t or "Squat" in t or "Stand" in t]
 print("已注册:", have)
 missing = [w for w in want if w not in have]
 if missing:

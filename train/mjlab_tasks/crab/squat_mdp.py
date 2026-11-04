@@ -127,6 +127,34 @@ def alive(env) -> torch.Tensor:
     return 1.0 - is_terminated(env)
 
 
+# ---------------------------------------------------------------- 「别动」（保持任务）
+def joint_speed(env, action_name: str = "joint_pos") -> torch.Tensor:
+    """29 个关节速度的 RMS（rad/s）[B]。
+
+    跟踪任务里关节速度天然在变（参考本身在动），罚它没有意义；
+    但**保持任务**的目标就是「不动」，抖动会通过脚底传到地面、再反作用回机身，
+    是长时保持最主要的失稳源。所以这一项只在 hold 任务里用。
+    """
+    t = _term(env, action_name)
+    try:
+        v = _data(env).joint_vel[:, t.target_joint_ids]
+    except Exception:
+        return _zeros(env)
+    return (v * v).mean(-1).sqrt()
+
+
+def quiet(env, action_name: str = "joint_pos", sigma: float = 0.8) -> torch.Tensor:
+    """静止奖励 exp(-mean(v²)/2σ²)，σ 单位 rad/s。
+
+    为什么用 exp 核而不是 -L2：早期策略全身都在抖（v_rms 常到 2~3 rad/s），
+    纯 L2 会给一个很大的常数负偏置，把「活着」的收益淹掉；exp 核在 2.4 rad/s
+    （3σ）之后基本饱和，梯度只落在「已经很安静、还能更安静」的区间。
+    标定（σ=0.8）：0.2 -> 0.97、0.5 -> 0.82、0.8 -> 0.61、1.5 -> 0.17。
+    """
+    s = joint_speed(env, action_name)
+    return torch.exp(-(s * s) / (2.0 * sigma * sigma))
+
+
 # ---------------------------------------------------------------- 左右对称
 # 参考轨迹是**严格左右对称**的（用 down/q 逐列验证过：同号关节 |l-r| 最大 0.0000，
 # 反号关节 |l+r| 最大 0.0000）。跟踪奖励按维度平均，天然允许「左腿外撇 20°、
@@ -293,6 +321,8 @@ def squat_probe(env, action_name: str = "joint_pos") -> torch.Tensor:
         _put("Metrics/base_xy", base_anchor(env).sqrt())
         _put("Metrics/base_yaw_deg", torch.rad2deg(yaw_anchor(env).sqrt()))
         _put("Metrics/arm_leg_touch", arm_leg_contact(env))
+        # 保持任务的主指标：关节速度 RMS。跟踪任务里它只作参考
+        _put("Metrics/joint_speed", joint_speed(env, action_name))
     except Exception:
         pass
     return _zeros(env)

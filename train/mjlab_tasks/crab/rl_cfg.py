@@ -91,7 +91,7 @@ def elf3_crab_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     return cfg
 
 def elf3_squat_ppo_runner_cfg(which: str = "squat") -> RslRlOnPolicyRunnerCfg:
-    """蹲下/起立跟踪用的 PPO 配置。
+    """蹲下/起立跟踪 + 蹲姿保持用的 PPO 配置。
 
     与爬楼版（elf3_crab_ppo_runner_cfg）的差别及理由：
 
@@ -103,13 +103,23 @@ def elf3_squat_ppo_runner_cfg(which: str = "squat") -> RslRlOnPolicyRunnerCfg:
       熵项 0.0074/步 ≈ 7%，只做防早熟；
     * `max_iterations` 4000：单回合短、状态空间也只是「一条时间轴」，
       不需要爬楼那种上万轮。
+
+    保持任务（`which` 以 `hold` 开头）另作两处调整：
+    * `num_steps_per_env` 32 -> **64**：回合 20 s = 1000 步，32 步只覆盖 3%，
+      而保持任务的优势几乎全部来自「被推之后的那几秒」，rollout 太短采不到完整恢复；
+    * `max_iterations` 4000 -> **3000**：状态空间比跟踪更小（一个静态位形 + 扰动），
+      但要覆盖的扰动分布更宽。
     """
     cfg = elf3_crab_ppo_runner_cfg()
     cfg.actor.distribution_cfg["init_std"] = 0.8
-    cfg.num_steps_per_env = 32
-    cfg.max_iterations = 4000
     cfg.save_interval = 100
-    # down / up 分开命名：日志目录 logs/rsl_rl/elf3_squat_{down,up}/<时间戳>/
-    # 两边共用一个 experiment_name 的话，找 checkpoint 和看曲线都分不开。
+    if which.startswith("hold"):
+        cfg.num_steps_per_env = 64
+        cfg.max_iterations = 3000
+    else:
+        cfg.num_steps_per_env = 32
+        cfg.max_iterations = 4000
+    # 每个实验分目录：logs/rsl_rl/elf3_squat_{down,up,hold_squat,hold_stand}/<时间戳>/
+    # 共用一个 experiment_name 的话，找 checkpoint 和看曲线都分不开。
     cfg.experiment_name = f"elf3_squat_{which}"
     return cfg

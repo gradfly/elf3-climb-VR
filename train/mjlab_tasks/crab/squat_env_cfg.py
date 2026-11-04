@@ -128,7 +128,7 @@ def _flat_terrain() -> TerrainGeneratorCfg:
     )
 
 
-def _build_observations(cfg, which: str) -> None:
+def _build_observations(cfg, which: str, with_progress: bool = True) -> None:
     a = cfg.observations["actor"].terms
     actor = {
         "base_lin_vel": ObservationTermCfg(
@@ -157,8 +157,10 @@ def _build_observations(cfg, which: str) -> None:
         "traj_height_err": ObservationTermCfg(
             func=S.traj_height_err, noise=Unoise(n_min=-0.005, n_max=0.005),
         ),
-        "traj_progress": ObservationTermCfg(func=S.traj_progress_sincos),
     }
+    if with_progress:
+        # 保持任务（参考帧冻结）里进度恒为常数，塞给策略只是噪声，直接不给
+        actor["traj_progress"] = ObservationTermCfg(func=S.traj_progress_sincos)
     cfg.observations["actor"].terms = actor
 
     critic = dict(actor)
@@ -263,15 +265,19 @@ def _retune_events(cfg, which: str, play: bool) -> None:
         cfg.events.pop("push_robot", None)
 
 
-def _set_init_pose(cfg, which: str) -> None:
-    """出生姿态取参考第 0 帧（down = 站姿，up = 极限蹲）。"""
+def _set_init_pose(cfg, which: str, frame: int = 0) -> None:
+    """出生姿态取参考第 `frame` 帧（down = 站姿，up = 极限蹲）。
+
+    保持任务传 frame=-1 或 0，把出生点钉在参考的两端；跟踪任务用默认的 0。
+    """
     traj = load_traj(REF_TABLE, TASKS[which][0])
-    q0 = traj.q[0].cpu().numpy()
-    z0 = float(traj.z[0].cpu())
+    f = int(frame) % traj.T
+    q0 = traj.q[f].cpu().numpy()
+    z0 = float(traj.z[f].cpu())
     ent = cfg.scene.entities["robot"]
     ent.init_state.pos = (0.0, 0.0, z0)
     ent.init_state.joint_pos = {n: float(v) for n, v in zip(JOINT_NAMES, q0)}
-    print(f"[squat] {which}: 出生 z={z0:.4f} m，"
+    print(f"[squat] {which}: 出生 z={z0:.4f} m（第 {f}/{traj.T - 1} 帧），"
           f"膝={math.degrees(float(q0[JOINT_NAMES.index('l_knee_y_joint')])):.1f}°")
 
 

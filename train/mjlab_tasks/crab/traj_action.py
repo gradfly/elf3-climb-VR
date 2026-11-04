@@ -74,6 +74,11 @@ class TrajTrackActionCfg(JointPositionActionCfg):
     # 参考起始淡入：前 N 步把参考从「机器人出生姿态」渐变到 q_ref[0]。
     # 默认 0（出生姿态本来就取自 q_ref[0]，不需要）。
     fade_in_steps: int = 0
+    # 冻结在第几帧（负值 = 从末帧数，-1 就是最后一帧）。非 None 时帧号不推进、
+    # `finished` 恒 False —— 参考寄存器变成一个**静态位形**，于是所有以
+    # `ref_joint_pos / ref_base_z / ref_up` 为基础的奖励项自动退化成「保持这个位形」。
+    # 「蹲姿保持」独立任务就是这么复用跟踪代码的，不需要额外的参考表。
+    freeze_frame: int | None = None
     debug: bool = False
 
     def build(self, env) -> "TrajTrackAction":
@@ -151,7 +156,20 @@ class TrajTrackAction(JointPositionAction):
             print("[traj] 残差已关闭：纯参考开环（诊断模式）")
 
         # ---- per-env 状态 ----
+        self._freeze: int | None = None
+        if cfg.freeze_frame is not None:
+            f = int(cfg.freeze_frame)
+            if f < 0:
+                f += T
+            if not (0 <= f < T):
+                raise ValueError(
+                    f"freeze_frame={cfg.freeze_frame} 越界（轨迹 {cfg.traj_key} 只有 {T} 帧）"
+                )
+            self._freeze = f
+
         self._idx = torch.zeros(self._B, dtype=torch.long, device=dev)
+        if self._freeze is not None:
+            self._idx.fill_(self._freeze)
         self._ref_q = torch.zeros(self._B, self._D, device=dev)
         self._start_q = torch.zeros(self._B, self._D, device=dev)   # fade_in 用
         self._fade = max(0, int(cfg.fade_in_steps))
@@ -161,11 +179,15 @@ class TrajTrackAction(JointPositionAction):
         self._start_q.copy_(self._ref_q)
         self._offset.copy_(self._ref_q)
 
-        if cfg.debug:
+        if cfg.debug or self._freeze is not None:
+            extra = ""
+            if self._freeze is not None:
+                extra = (f" | 冻结在第 {self._freeze} 帧（不推进，参考=静态位形，"
+                         f"z={float(self._traj.z[self._freeze]):.3f} m）")
             print(f"[traj] {cfg.traj_key}: T={T} 帧 / {self._traj.duration:.2f} s，"
                   f"z {float(self._traj.z[0]):.3f} -> {float(self._traj.z[-1]):.3f} m，"
                   f"限幅(leg/waist/arm)="
-                  f"{cfg.leg_clip_rad}/{cfg.waist_clip_rad}/{cfg.arm_clip_rad} rad")
+                  f"{cfg.leg_clip_rad}/{cfg.waist_clip_rad}/{cfg.arm_clip_rad} rad{extra}")
 
     # ------------------------------------------------------------ 辅助
     def _target_joint_names(self):
@@ -191,7 +213,7 @@ class TrajTrackAction(JointPositionAction):
         if env_ids is None:
             env_ids = torch.arange(self._B, device=self._raw_actions.device)
         env_ids = torch.as_tensor(env_ids, device=self._raw_actions.device).long()
-        self._idx[env_ids] = 0
+        self._idx[env_ids] = self._freeze if self._freeze is not None else 0
         r = getattr(super(), "reset", None)
         if callable(r):
             r(env_ids)
@@ -211,7 +233,8 @@ class TrajTrackAction(JointPositionAction):
         self._offset.copy_(self._ref_q)
         super().process_actions(raw)
 
-        self._idx.add_(max(1, int(self.cfg.advance))).clamp_(max=self._traj.T - 1)
+        if self._freeze is None:
+            self._idx.add_(max(1, int(self.cfg.advance))).clamp_(max=self._traj.T - 1)
 
     # ------------------------------------------------------------ 只读属性
     @property
@@ -249,6 +272,9 @@ class TrajTrackAction(JointPositionAction):
 
     @property
     def finished(self) -> torch.Tensor:
+        if self._freeze is not None:
+            # 冻结模式永不算「播完」：保持任务的回合该由时长/摔倒决定，不是参考走完
+            return torch.zeros_like(self._idx, dtype=torch.bool)
         return self._idx >= (self._traj.T - 1)
 
     @property

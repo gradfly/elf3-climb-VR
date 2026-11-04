@@ -276,7 +276,91 @@ MUJOCO_GL=egl .venv/bin/play Elf3-Squat-Down-Play --video   --checkpoint-file lo
 
 ---
 
-## 3. 常见报错 → 处理
+---
+
+## 3. 蹲姿 / 站姿「保持」独立任务（hold）
+
+§1.1 的 5 s 保持段只是「顺便学一下」：跟踪段占 62% 的步数，一个网络要兼顾两件事。
+想让「长时间保持不动」成为第一目标，就得让**整个回合都是保持段** —— 于是拆成两个
+独立任务，各自训一个网络：
+
+| 任务 | 出生姿态 | 回合 | 参考 | 目标 |
+|---|---|---|---|---|
+| `Elf3-Squat-Hold` | 极限蹲（z 0.523 m，膝 149°） | 20 s | down 表**末帧冻结** | 蹲住不动 |
+| `Elf3-Stand-Hold` | 站姿（z 1.034 m） | 20 s | down 表**首帧冻结** | 站住不动 |
+
+**不新增参考表**：直接复用 `squat_ref_v1.npz` 的 down 表，把帧号冻结
+（`TrajTrackActionCfg.freeze_frame=-1` / `0`）。冻结后 `traj_track / height_track /
+up_track / symmetry` 全部自动退化成「保持这个位形」——奖励代码一行没改，
+也就不存在两份奖励实现慢慢漂移的问题。
+
+### 3.1 与跟踪任务的差异
+
+| 维度 | 跟踪（down / up） | 保持（hold） | 为什么 |
+|---|---|---|---|
+| 回合 | 2.46 s 跟踪 + 5 s 保持 | **20 s 全程保持** | 保持占比 100% 才能成为第一目标 |
+| 扰动 | 1.0~2.5 s / ±0.15 m/s | **0.8~2.0 s / ±0.25 m/s** | 不推的话参考位形本身准静态稳定，什么都不做也能满分 |
+| 初始状态 | 基座 ±1 cm，关节不扰动 | 基座 ±2 cm / ±4.6°，**关节 ±0.05 rad** | 否则策略只记住「初始就是这个」，一推就崩 |
+| 额外奖励 | — | `quiet`（关节速度 RMS，σ 0.8 rad/s，w 0.7）；`action_rate_l2` -0.02 → **-0.05** | 保持的敌人不是姿势错，是抖 |
+| 漂移终止 | 1.2 m | **0.5 m** | 保持任务里挪半米就是错的 |
+| 塌陷终止 | z < 0.28 | 蹲 **0.35** / 站 **0.90** | 站姿塌 13 cm 就是跪了 |
+| PPO | 32 步 / 4000 轮 | **64 步 / 3000 轮** | 回合 1000 步，32 步只覆盖 3%，采不到完整恢复 |
+
+### 3.2 跑
+
+```bash
+# 先冒烟（会额外跑两个 hold 任务的 5 轮）
+bash scripts/run_squat_train.sh smoke
+
+# 只训两个保持任务（先 squat 后 stand）
+bash scripts/run_squat_train.sh hold
+
+# 单独一个
+bash scripts/run_squat_train.sh hold-squat
+HOLD_EPISODE=40 bash scripts/run_squat_train.sh hold-stand    # 回合拉到 40 s
+
+# 回放（自动找该实验目录下迭代数最大的 model_*.pt）
+bash scripts/run_squat_train.sh play hold-squat
+bash scripts/run_squat_train.sh play hold-stand
+```
+
+四个任务四份实验目录，互不覆盖：
+
+```
+logs/rsl_rl/elf3_squat_down/          跟踪：站 -> 蹲
+logs/rsl_rl/elf3_squat_up/            跟踪：蹲 -> 站
+logs/rsl_rl/elf3_squat_hold_squat/    保持：极限蹲
+logs/rsl_rl/elf3_squat_hold_stand/    保持：站姿
+```
+
+启动日志里要能看到这两行，否则配置没生效（`ELF3_HOLD_EPISODE` 是 import 时读的）：
+
+```
+[hold] squat（极限蹲保持）：20.0 s/回合，参考冻结在 down 第 123/123 帧，...
+[traj] down: T=124 帧 ... | 冻结在第 123 帧（不推进，参考=静态位形，z=0.523 m）
+```
+
+### 3.3 判断「真的稳」还是「看着稳」
+
+保持任务唯一的产出就是稳定性，所以判据看**趋势**，不看某一轮的值：
+
+| 指标 | 稳 | 不稳 |
+|---|---|---|
+| `Metrics/base_xy` | 收敛到常数（< 0.03 m） | **单调上升** —— 慢漂 |
+| `Metrics/base_yaw_deg` | 收敛（< 3°） | 单调涨 —— 身体在拧 |
+| `Metrics/joint_speed` | < 0.5 rad/s | 长时间 > 1.5 —— 一直在抖 |
+| `Metrics/traj_z` | 稳在参考 ±2 cm | 缓慢下沉 —— 腿在软 |
+| `Mean episode length` | ≈ 1000 步（跑满 20 s） | 卡在 300~600 步 —— 5~12 s 就倒 |
+
+`Mean episode length` 是最省事的一条：跑满 1000 步 = 整回合没摔。
+
+回放时**别只看 10 s**。`Elf3-Squat-Hold-Play` 的回合是 1e6 s 且没有扰动，
+让它自己跑 60~120 s 再判断：收敛就是稳，单向下滑就是没学透 —— 那时候该做的是
+加大 `quiet` / `base_anchor` 权重或拉长 `HOLD_EPISODE` 重训，不是继续加迭代。
+
+---
+
+## 4. 常见报错 → 处理
 
 | 报错 | 原因 | 处理 |
 |---|---|---|
@@ -290,7 +374,7 @@ MUJOCO_GL=egl .venv/bin/play Elf3-Squat-Down-Play --video   --checkpoint-file lo
 
 ---
 
-## 4. 文件清单
+## 5. 文件清单
 
 | 文件 | 作用 |
 |---|---|
@@ -298,12 +382,13 @@ MUJOCO_GL=egl .venv/bin/play Elf3-Squat-Down-Play --video   --checkpoint-file lo
 | `train/assets/ref_tables/squat_ref_v1.npz` | 成品参考表（14 KB，入库） |
 | `train/mjlab_tasks/crab/traj_ref.py` | 参考表加载 + 进程内缓存 |
 | `train/mjlab_tasks/crab/traj_action.py` | `TrajTrackAction`：时间轴 + 残差动作项 |
-| `train/mjlab_tasks/crab/squat_mdp.py` | 观测/奖励/终止项 |
-| `train/mjlab_tasks/crab/squat_env_cfg.py` | 两个任务的环境配置（平地、无速度指令） |
-| `train/mjlab_tasks/crab/rl_cfg.py` | `elf3_squat_ppo_runner_cfg(which)`，down/up 实验名分开 |
-| `train/mjlab_tasks/crab/__init__.py` | 注册 4 个任务 |
+| `train/mjlab_tasks/crab/squat_mdp.py` | 观测/奖励/终止项（含 hold 用的 `quiet` / `joint_speed`） |
+| `train/mjlab_tasks/crab/squat_env_cfg.py` | 两个**跟踪**任务的环境配置（平地、无速度指令） |
+| `train/mjlab_tasks/crab/squat_hold_cfg.py` | 两个**保持**任务的环境配置（参考帧冻结、20 s 回合、强扰动） |
+| `train/mjlab_tasks/crab/rl_cfg.py` | `elf3_squat_ppo_runner_cfg(which)`，四个实验名分开 |
+| `train/mjlab_tasks/crab/__init__.py` | 注册 8 个任务（4 任务 × 训练/回放） |
 | `train/install_task.sh` | 自检清单加到 8 个任务 |
-| `scripts/run_squat_train.sh` | 冒烟 + 训练一条命令（`smoke` / `all` / `down` / `up`） |
+| `scripts/run_squat_train.sh` | 冒烟 + 训练一条命令（`smoke` / `all` / `down` / `up` / `hold` / `hold-squat` / `hold-stand` / `play`） |
 
 参考轨迹的来源见 `docs/squat_extreme.md`（`launch/split_traj.py` 从循环轨迹切出
 down / up 两段，接缝帧一致）。
