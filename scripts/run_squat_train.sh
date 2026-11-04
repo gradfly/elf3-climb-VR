@@ -12,7 +12,9 @@
 #   bash scripts/run_squat_train.sh hold-stand   # 只训站姿保持
 #   bash scripts/run_squat_train.sh play down        # 回放：自动找 logs/rsl_rl/elf3_squat_down 下最新 pt
 #   bash scripts/run_squat_train.sh play hold-squat  #   同上，保持任务
+#   bash scripts/run_squat_train.sh video down       # 回放导出 mp4（自动找最新 pt、无需窗口）
 #   CKPT=logs/rsl_rl/.../model_1000.pt bash scripts/run_squat_train.sh play hold-squat
+#   CKPT=logs/rsl_rl/.../model_1000.pt bash scripts/run_squat_train.sh video hold-squat
 #
 # 四个任务、四份实验目录（别混，回放/续训都按目录找）：
 #   down        Elf3-Squat-Down     -> logs/rsl_rl/elf3_squat_down
@@ -28,7 +30,12 @@
 #   ARM_GUARD=1          手臂-腿接触检测开关（本版 mjlab 不支持自碰撞传感器时设 0）
 #   SMOKE_ITERS=5        冒烟轮数
 #   VENV=.venv           虚拟环境目录（相对仓库根）
-#   CKPT=...             play 模式下显式指定 checkpoint（不给就自动找最新）
+#   CKPT=...             play / video 模式下显式指定 checkpoint（不给就自动找最新）
+#   VIDEO_STEPS=1000     mp4 录多少步（控制 50 Hz，1000 步 = 20 s；hold 默认 6000 = 120 s）
+#   VIDEO_W=1280         mp4 宽（框架默认只有 320，必须放大）
+#   VIDEO_H=720          mp4 高
+#   VIDEO_TIMEOUT=900    等 mp4 写完的最长秒数
+#   VIDEO_BOOL=0         设 1 把 --video 写成 "--video True"（新版 tyro 要求显式布尔值）
 #   CR_FIX=0             设 1 把 \r 原地覆盖式进度条转成换行（旧版 rsl_rl / tqdm 用 \r 打印时）
 #
 # 日志：~/train_squat_<mode>.log（如 ~/train_squat_hold_squat.log）
@@ -46,6 +53,10 @@ ITERS="${ITERS:-6000}"
 SMOKE_ITERS="${SMOKE_ITERS:-5}"
 VENV="${VENV:-.venv}"
 CR_FIX="${CR_FIX:-0}"
+VIDEO_W="${VIDEO_W:-1280}"
+VIDEO_H="${VIDEO_H:-720}"
+VIDEO_TIMEOUT="${VIDEO_TIMEOUT:-900}"
+VIDEO_BOOL="${VIDEO_BOOL:-0}"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
@@ -197,6 +208,66 @@ play_one() {
   "$BIN_PLAY" "$task-Play" --checkpoint-file "$pt"
 }
 
+# 回放导出 mp4：走 mjlab play 自带的 VideoRecorder（不用自己一帧帧渲染）。
+#
+# 几个必须处理的坑：
+#   * 必须带 --checkpoint-file：agent=zero/random 时 play.py 会直接禁用录像；
+#   * --num-envs 1：离屏相机跟着 asset body，多 env 时容易录到一片空地；
+#   * --video-length 是「步数」不是秒，控制 50 Hz，步数 / 50 = 秒；
+#   * 框架默认只录 200 步（4 s）、320x240，两个都得显式放大；
+#   * 产物固定叫 rl-video-step-0.mp4，重录会覆盖，所以先挪走旧的、再复制成带任务名的文件；
+#   * 录满 video_length 后 viewer 不会自己退出，所以后台跑 + 轮询文件，写完就收掉进程。
+video_one() {
+  local which="$1" task pt outdir tmp dest steps def_steps pid sz last stable n run_tag
+  task="$(task_of "$which")" || exit 1
+  pt="$(latest_ckpt "$which")" || exit 1
+  if [[ "$which" == hold* ]]; then def_steps=6000; else def_steps=1000; fi
+  steps="${VIDEO_STEPS:-$def_steps}"
+
+  outdir="$(dirname "$pt")/videos/play"
+  tmp="$outdir/rl-video-step-0.mp4"
+  mkdir -p "$outdir"
+  [ -f "$tmp" ] && mv -f "$tmp" "$outdir/rl-video-step-0.prev.mp4" || true
+
+  local video_args
+  if [ "$VIDEO_BOOL" = "1" ]; then video_args=(--video True); else video_args=(--video); fi
+
+  step "导出 mp4：$task-Play，ckpt=$pt"
+  echo "    ${steps} 步 = $((steps / 50)) s @50 fps，${VIDEO_W}x${VIDEO_H}"
+  "$BIN_PLAY" "$task-Play" --checkpoint-file "$pt" --num-envs 1 \
+    "${video_args[@]}" --video-length "$steps" \
+    --video-width "$VIDEO_W" --video-height "$VIDEO_H" &
+  pid=$!
+
+  # 等 mp4 写完：文件出现且大小连续 3 次不变，或 play 自己退出。
+  last=-1; stable=0; n=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ -s "$tmp" ]; then
+      sz="$(stat -c %s "$tmp" 2>/dev/null || echo 0)"
+      if [ "$sz" = "$last" ]; then stable=$((stable + 1)); else stable=0; fi
+      last="$sz"
+      [ "$stable" -ge 3 ] && { echo "    mp4 写完：$tmp ($sz B)"; break; }
+    fi
+    sleep 1
+    n=$((n + 1))
+    if [ "$n" -ge "$VIDEO_TIMEOUT" ]; then echo "[warn] 等了 ${n}s 还没写完，先收尾"; break; fi
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  if [ ! -s "$tmp" ]; then
+    echo "[ERR] 没生成 $tmp。常见原因："
+    echo "      --video 写法不对（试 VIDEO_BOOL=1）、viewer 起不来（VNC 里要有 DISPLAY）、"
+    echo "      或显存被同时跑的训练占满。上面 play 的输出里有具体报错。"
+    exit 1
+  fi
+  run_tag="$(basename "$(dirname "$pt")" | tr -cd 'A-Za-z0-9._-')"
+  dest="$HOME/squat_${which}_${run_tag}_$(basename "$pt" .pt).mp4"
+  cp -f "$tmp" "$dest"
+  echo "[OK] mp4 已导出：$dest"
+  echo "     框架原始产物：$tmp（固定文件名，下次录会被挪走）"
+}
+
 case "$MODE" in
   smoke) smoke ;;
   down)  check_tasks; train_one down ;;
@@ -212,6 +283,14 @@ case "$MODE" in
       *) echo "用法：play down | play up | play hold-squat | play hold-stand"; exit 2 ;;
     esac
     ;;
+  video)
+    check_tasks
+    case "${2:-}" in
+      down|up|hold-squat|hold-stand)
+        video_one "${2//-/_}" ;;
+      *) echo "用法：video down | video up | video hold-squat | video hold-stand"; exit 2 ;;
+    esac
+    ;;
   all)
     check_tasks
     train_one down
@@ -219,12 +298,15 @@ case "$MODE" in
     train_one hold_squat
     train_one hold_stand
     ;;
-  *) echo "未知参数：$MODE（可用 smoke / down / up / hold / hold-squat / hold-stand / play / all）"
+  *) echo "未知参数：$MODE（可用 smoke / down / up / hold / hold-squat / hold-stand / play / video / all）"
      exit 2 ;;
 esac
 
 echo
-echo "==> 完成。完整日志：~/train_squat_<mode>.log（训练过程中一直实时写入）"
+echo "==> 完成。回放导出 mp4：bash scripts/run_squat_train.sh video down"
+echo "    （保持任务默认录 120 s：VIDEO_STEPS=6000 bash scripts/run_squat_train.sh video hold-squat）"
+echo
+echo "    完整日志：~/train_squat_<mode>.log（训练过程中一直实时写入）"
 echo "    训练中另开终端实时看逐轮指标（grep 必须带 --line-buffered，否则又会被缓冲）："
 echo "    tail -F ~/train_squat_down.log | grep --line-buffered -E 'Learning iteration|Mean reward|Mean episode length|Metrics/'"
 echo
