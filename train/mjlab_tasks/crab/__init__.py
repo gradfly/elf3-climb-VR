@@ -51,19 +51,25 @@ register_mjlab_task(
 )
 
 # ---- 蹲下 / 起立跟踪任务（参考轨迹 + 残差，见 squat_env_cfg.py）----
-for _which in ("down", "up"):
-    _tag = _which.capitalize()
-    register_mjlab_task(
-        task_id=f"Elf3-Squat-{_tag}",
-        env_cfg=squat_env_cfg(which=_which, play=False),
-        play_env_cfg=squat_env_cfg(which=_which, play=True),
-        rl_cfg=elf3_squat_ppo_runner_cfg(),
-        runner_cls=VelocityOnPolicyRunner,
-    )
-    register_mjlab_task(
-        task_id=f"Elf3-Squat-{_tag}-Play",
-        env_cfg=squat_env_cfg(which=_which, play=False),
-        play_env_cfg=squat_env_cfg(which=_which, play=True),
-        rl_cfg=elf3_squat_ppo_runner_cfg(),
-        runner_cls=VelocityOnPolicyRunner,
-    )
+# 每个 which 只 build 一次 cfg，四个任务复用同一份对象；
+# build 失败（例如参考表没进仓库）只跳过蹲起任务，不影响上面的爬楼任务。
+try:
+    for _which in ("down", "up"):
+        _tag = _which.capitalize()
+        _cfg_train = squat_env_cfg(which=_which, play=False)
+        _cfg_play = squat_env_cfg(which=_which, play=True)
+        _rl = elf3_squat_ppo_runner_cfg()
+        for _suffix in ("", "-Play"):
+            register_mjlab_task(
+                task_id=f"Elf3-Squat-{_tag}{_suffix}",
+                env_cfg=_cfg_train,
+                play_env_cfg=_cfg_play,
+                rl_cfg=_rl,
+                runner_cls=VelocityOnPolicyRunner,
+            )
+        print(f"[squat] 已注册 Elf3-Squat-{_tag} / Elf3-Squat-{_tag}-Play")
+except Exception as _e:                                   # noqa: BLE001
+    print(f"[squat][ERR] 蹲起任务注册失败，本次不注册 Elf3-Squat-*：{_e!r}")
+    print("[squat][ERR] 最常见原因：train/assets/ref_tables/squat_ref_v1.npz 缺失，"
+          "\n            补救：python train/assets/build_squat_ref.py")
+    # 不抛：抛了会把上面的爬楼任务一起带崩，install_task.sh 的自检会明确指出来

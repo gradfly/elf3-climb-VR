@@ -63,6 +63,17 @@ traj_height_err(1) + traj_progress_sincos(2)`。
 
 以下假设仓库在 `~/elf3`、venv 在 `~/elf3/.venv`（与 `train/README.md` 一致）。
 
+**懒人版**（一条命令走完：自检注册 → zero 冒烟 → 5 轮小规模 → 正式训练）：
+
+```bash
+cd ~/elf3 && git pull
+bash scripts/run_squat_train.sh smoke     # 先冒烟，别急着开 1024
+bash scripts/run_squat_train.sh all       # 冒烟通过后顺序训 down、up
+# 可调：NUM_ENVS=768 ITERS=6000 bash scripts/run_squat_train.sh all
+```
+
+下面是把脚本拆开的手工版，出问题时逐条排查用。
+
 ### 2.1 拉代码 + 装任务
 
 ```bash
@@ -196,6 +207,7 @@ MUJOCO_GL=egl .venv/bin/play Elf3-Squat-Down-Play \
 | `train/mjlab_tasks/crab/rl_cfg.py` | `elf3_squat_ppo_runner_cfg()` |
 | `train/mjlab_tasks/crab/__init__.py` | 注册 4 个任务 |
 | `train/install_task.sh` | 自检清单加到 8 个任务 |
+| `scripts/run_squat_train.sh` | 冒烟 + 训练一条命令（`smoke` / `all` / `down` / `up`） |
 
 参考轨迹的来源见 `docs/squat_extreme.md`（`launch/split_traj.py` 从循环轨迹切出
 down / up 两段，接缝帧一致）。

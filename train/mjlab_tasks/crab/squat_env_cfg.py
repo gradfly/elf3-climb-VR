@@ -22,10 +22,7 @@
 from __future__ import annotations
 
 import importlib
-
 import math
-
-import numpy as np
 
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
@@ -194,7 +191,6 @@ def _build_terminations(cfg, which: str) -> None:
 
 
 def _retune_events(cfg, which: str, play: bool) -> None:
-    z0 = float(load_traj(REF_TABLE, TASKS[which][0]).z[0].cpu())
     if "reset_base" in cfg.events:
         cfg.events["reset_base"].params["pose_range"] = {
             "x": (-0.01, 0.01),
@@ -214,7 +210,6 @@ def _retune_events(cfg, which: str, play: bool) -> None:
             }
     if play:
         cfg.events.pop("push_robot", None)
-    _ = z0
 
 
 def _set_init_pose(cfg, which: str) -> None:
