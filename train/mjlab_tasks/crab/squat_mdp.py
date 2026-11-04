@@ -30,7 +30,9 @@ def _term(env, action_name: str = "joint_pos"):
 
 
 def _zeros(env, n: int = 1) -> torch.Tensor:
-    return torch.zeros(env.num_envs, n, device=env.device)
+    # ⚠️ RewardManager 要求奖励项返回一维 [B]，返回 [B,1] 会直接
+    #    `_check_term_shape` 报错 —— 观测项可以带特征维，奖励项不行。
+    return torch.zeros(env.num_envs, device=env.device)
 
 
 def _up_body(env) -> torch.Tensor:
