@@ -88,15 +88,19 @@ want = [
     "Elf3-Crab-Stairs-Play",
     "Elf3-Crab-Residual",
     "Elf3-Crab-Residual-Play",
+    "Elf3-Squat-Down",
+    "Elf3-Squat-Down-Play",
+    "Elf3-Squat-Up",
+    "Elf3-Squat-Up-Play",
 ]
-have = [t for t in list_tasks() if "Crab" in t]
+have = [t for t in list_tasks() if "Crab" in t or "Squat" in t]
 print("已注册:", have)
 missing = [w for w in want if w not in have]
 if missing:
     print(f"[ERR] 缺任务: {missing}")
     print("      说明装进去的包里没有这些任务 —— 检查 train/mjlab_tasks/crab/__init__.py")
     sys.exit(1)
-print("四个任务齐全 ✔")
+print(f"{len(want)} 个任务齐全 ✔")
 PY
 
 echo "==> 自检机器人资产（height_scan 会不会打到机器人自己）"

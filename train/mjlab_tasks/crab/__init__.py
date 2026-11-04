@@ -14,7 +14,8 @@ from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
 from .env_cfg import crab_env_cfg
 from .env_cfg_residual import crab_residual_env_cfg
-from .rl_cfg import elf3_crab_ppo_runner_cfg
+from .rl_cfg import elf3_crab_ppo_runner_cfg, elf3_squat_ppo_runner_cfg
+from .squat_env_cfg import squat_env_cfg
 
 register_mjlab_task(
     task_id="Elf3-Crab-Stairs",
@@ -48,3 +49,21 @@ register_mjlab_task(
     rl_cfg=elf3_crab_ppo_runner_cfg(),
     runner_cls=VelocityOnPolicyRunner,
 )
+
+# ---- 蹲下 / 起立跟踪任务（参考轨迹 + 残差，见 squat_env_cfg.py）----
+for _which in ("down", "up"):
+    _tag = _which.capitalize()
+    register_mjlab_task(
+        task_id=f"Elf3-Squat-{_tag}",
+        env_cfg=squat_env_cfg(which=_which, play=False),
+        play_env_cfg=squat_env_cfg(which=_which, play=True),
+        rl_cfg=elf3_squat_ppo_runner_cfg(),
+        runner_cls=VelocityOnPolicyRunner,
+    )
+    register_mjlab_task(
+        task_id=f"Elf3-Squat-{_tag}-Play",
+        env_cfg=squat_env_cfg(which=_which, play=False),
+        play_env_cfg=squat_env_cfg(which=_which, play=True),
+        rl_cfg=elf3_squat_ppo_runner_cfg(),
+        runner_cls=VelocityOnPolicyRunner,
+    )

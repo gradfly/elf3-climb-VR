@@ -89,3 +89,25 @@ def elf3_crab_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     except Exception:
         pass
     return cfg
+
+def elf3_squat_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+    """蹲下/起立跟踪用的 PPO 配置。
+
+    与爬楼版（elf3_crab_ppo_runner_cfg）的差别及理由：
+
+    * `num_steps_per_env` 24 -> **32**：回合只有 2.5 s（125 步），
+      24 步一个 iteration 只覆盖 19% 的回合，优势估计的方差偏大；
+    * `init_std` 1.0 -> **0.8**：动作是「±0.35 rad 的残差」，输出尺度本来就小，
+      σ=1 时约 9% 的维度一出生就顶死在限幅上；
+    * `entropy_coef` 仍是 0.0002：本任务每步任务奖励约 0.10（比爬楼高 2.5 倍），
+      熵项 0.0074/步 ≈ 7%，只做防早熟；
+    * `max_iterations` 4000：单回合短、状态空间也只是「一条时间轴」，
+      不需要爬楼那种上万轮。
+    """
+    cfg = elf3_crab_ppo_runner_cfg()
+    cfg.actor.distribution_cfg["init_std"] = 0.8
+    cfg.num_steps_per_env = 32
+    cfg.max_iterations = 4000
+    cfg.save_interval = 100
+    cfg.experiment_name = "elf3_squat"
+    return cfg
