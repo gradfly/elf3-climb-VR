@@ -570,6 +570,30 @@ def _clip_rad(tag: str, default: float) -> float:
     return val
 
 
+def _reset_ramp_steps() -> int:
+    """每回合开局把参考从站姿渐变到 q_ref 的步数（0 = 关闭，默认）。
+
+    ⚠️ 别和 `_ramp_steps`（α 课程，1500 iter 全局）混：这个是**每回合**的软启动。
+    reset 后参考落在表帧 33，与出生站姿差 0.6~1.2 rad（FK 实测），开环 1.2 s 必摔；
+    闭环能活全靠残差头几帧吃掉差额。开启后前 N 步参考贴住站姿，再线性放开。
+
+    `ELF3_RESET_RAMP=25` 可临时打开做 A/B（等于 hold_steps，0.5 s 内相位本来就冻结）。
+    默认 0：行为与既有 run 完全一致，分数卡可横比。
+    """
+    raw = os.environ.get("ELF3_RESET_RAMP")
+    if raw is None or raw.strip() == "":
+        return 0
+    try:
+        val = int(float(raw))
+    except ValueError:
+        print(f"[cfg][warn] ELF3_RESET_RAMP={raw!r} 不是数字，按 0 处理")
+        return 0
+    if val < 0:
+        print(f"[cfg][warn] ELF3_RESET_RAMP={val} < 0，按 0 处理")
+        return 0
+    return val
+
+
 def _ramp_steps(play: bool) -> int:
     """α 课程总步数。可用 `ELF3_RAMP_ITERS`（单位 iteration，内部 ×24）覆盖。"""
     default = 1500 * 24
@@ -627,6 +651,8 @@ def crab_residual_env_cfg(play: bool = False):
         # 训练和 play 都可被 ELF3_ALPHA 覆盖（-1 以外的值 = 固定 α），
         # 续训 α 已满幅的 checkpoint 时必须 `ELF3_ALPHA=1.0`，理由见 _alpha_fixed。
         alpha_fixed=_alpha_fixed(play),
+        # 开局软启动（默认 0 = 关）；量纲与用途见 _reset_ramp_steps() 的 docstring。
+        reset_ramp_steps=_reset_ramp_steps(),
     )
 
     _rebuild_observations(cfg)

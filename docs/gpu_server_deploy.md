@@ -220,7 +220,7 @@ clone 下来即可用。确认一下它在：
 ls -l train/assets/ref_tables/crab_ref_v1.npz   # 期望约 241 KB
 ```
 
-只有在「改了几何参数域、要按新范围重建」或「文件缺失」时才需要重算（纯 CPU，约 100 s）：
+只有在「改了几何参数域、要按新范围重建」或「文件缺失」时才需要重算（纯 CPU，约 90 s）：
 
 ```bash
 python train/assets/build_ref_tables.py
@@ -328,7 +328,7 @@ WANDB_MODE=disabled PYTHONUNBUFFERED=1 train Elf3-Crab-Residual \
 2. [ ] `bash scripts/bootstrap_gpu.sh` 末尾两行校验全绿（EGL + CUDA）
 3. [ ] `make_robot_xml.py` 输出 `nq=38 nv=37 nu=0`
 4. [ ] `install_task.sh` 输出 4 个任务
-5. [ ] `train/assets/ref_tables/crab_ref_v1.npz` 存在（仓库自带，207 KB）
+5. [ ] `train/assets/ref_tables/crab_ref_v1.npz` 存在（仓库自带，241 KB）
 6. [ ] 三层冒烟全过
 7. [ ] **`uv pip freeze > requirements.lock.txt` 并提交**——否则下次换机版本又会漂
 8. [ ] `logs/` 指向数据盘；`sync_back.sh` 定时回传配好

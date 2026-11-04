@@ -80,6 +80,16 @@ class ResidualGaitActionCfg(JointPositionActionCfg):
     # 参考步态被打回站姿，而策略是按 70% 幅度长出来的，两者错位当场崩。
     # alpha_fixed>=0 时本字段被忽略。
     alpha_start: float = 0.0
+    # ---- 每回合开局的软启动（与上面的 α 课程**不是一回事**）----
+    # reset 后参考表落在 phase=0（= 表帧 33，双支撑），而机器人出生在 DEFAULT_JOINT_POS，
+    # 两者差 0.6~1.2 rad（FK 实测，worst: l_knee_y；rise 越大差越多）。开环跑这份
+    # 参考 1.2 s 内 100% 摔倒，说明这一跳在物理上很暴力 —— 闭环能活是因为残差在
+    # 头几帧就把差额吃掉。
+    # N>0 时前 N 步把参考从 ref_stand 线性渐变到 q_ref：reset 当步 w=0，零跳变。
+    # 默认 0 = 关闭，保证与既有 run（含 model_7047）的分布完全一致、可横比。
+    # 取 25 时与 hold_steps 窗口重合（0.5 s 内相位本来就冻结），ramp 结束即开始迈步。
+    # 注意：本字段只改"参考的软启动"，不动 α 课程（ramp_steps，全局 1500 iter）。
+    reset_ramp_steps: int = 0
     # 残差总开关：0 = 纯参考步态开环走（PD 只追参考表，策略输出被乘 0）。
     # 诊断用：把「参考步态自带 X 向偏置」和「残差学出偏置」拆开——
     # 开环 v_lon≈0 而闭环 +0.12 -> 残差的锅（罚它/重训）；
@@ -176,6 +186,20 @@ class ResidualGaitAction(JointPositionAction):
         if self._res_scale == 0.0:
             print("[residual] 残差已关闭：纯参考步态开环走（诊断模式，摔倒率会升高，"
                   "指标只看存活步）")
+
+        # ---- 开局软启动（站姿 -> 参考）----
+        self._reset_ramp = max(0, int(getattr(cfg, "reset_ramp_steps", 0)))
+        _ramp_env = os.environ.get("ELF3_RESET_RAMP")
+        if _ramp_env is not None and _ramp_env.strip() != "":
+            try:
+                self._reset_ramp = max(0, int(float(_ramp_env)))
+                print(f"[residual] ELF3_RESET_RAMP={_ramp_env} -> reset ramp "
+                      f"{self._reset_ramp} 步（cfg 默认 {cfg.reset_ramp_steps}）")
+            except ValueError:
+                print(f"[residual][warn] ELF3_RESET_RAMP={_ramp_env!r} 不是数字，忽略")
+        if self._reset_ramp > 0:
+            print(f"[residual] reset ramp 启用：{self._reset_ramp} 步内参考从站姿渐变到 q_ref"
+                  f"（hold_steps={int(cfg.hold_steps)}；两者相等时相位刚好在 ramp 结束时开始推进）")
 
         # ---- per-env 状态 ----
         self._phase = torch.zeros(self._B, device=dev)
@@ -436,6 +460,14 @@ class ResidualGaitAction(JointPositionAction):
         q_ref = q_ref[:, self._perm]
         if self._stand is not None:
             q_ref = self._stand + alpha * (q_ref - self._stand)
+            # 开局软启动：按**本 env 自己的** episode 计数（不能用全局 _step_i，
+            # 那是 α 课程的时钟）。必须作用在 q_ref 上：_ref_q 同时驱动 offset、
+            # 观测 joint_pos_ref_err、奖励 ref_tracking，三者口径要一致；
+            # 只改 _offset 会让前 N 步白扣 ref_tracking。
+            if self._reset_ramp > 0:
+                _s = self._env.episode_length_buf.to(q_ref.device).float().unsqueeze(-1)
+                _w = (_s / float(self._reset_ramp)).clamp(0.0, 1.0)
+                q_ref = self._stand + _w * (q_ref - self._stand)
         self._ref_q.copy_(q_ref)
         self._ref_v.copy_(v_ref)
 
