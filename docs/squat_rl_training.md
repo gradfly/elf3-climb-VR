@@ -577,3 +577,99 @@ logs/rsl_rl/elf3_squat_hold_stand/    保持：站姿
 
 参考轨迹的来源见 `docs/squat_extreme.md`（`launch/split_traj.py` 从循环轨迹切出
 down / up 两段，接缝帧一致）。
+
+---
+
+## 6. 模式时长与结束状态（部署语义）
+
+> **先说清楚边界**：仓库里目前**没有真机部署 / 模式切换的实现**。
+> 只有 mjlab 仿真训练与回放；`train/export_onnx.py` 能按 `--task` 导出任意注册任务的
+> actor 网络，但没有状态机把蹲起策略接进 `sim/vendor/bxi_controller_ros2` 那套 ROS2 框架。
+> 下面是从仿真配置里读出来的**模式契约**，真机接入必须由上层状态机显式落地。
+
+### 6.1 三个场景，三种时长
+
+| 场景 | down | up | 到点之后 |
+|---|---|---|---|
+| **训练回合**（`squat_env_cfg(play=False)`） | 2.46 + 5 + 0.5 = **7.96 s** | 2.02 + 5 + 0.5 = **7.52 s** | `time_out` → **reset 回出生姿态**（down 回站姿、up 回极限蹲） |
+| **回放 / 部署态**（`play=True`） | 动作 **2.46 s**（124 帧 × 20 ms） | 动作 **2.02 s**（102 帧 × 20 ms） | **没有结束**：参考帧钳在末帧，无限期保持 |
+| **保持任务**（hold，play=True） | — | — | 出生即末帧/首帧，全程冻结，无限期保持 |
+
+动作段长度来自 `squat_ref_v1.npz`：`dt=0.02`、`duration=(T-1)*dt`，
+down 124 帧 → 2.46 s（z 1.0339 → 0.5232 m），up 102 帧 → 2.02 s（0.5232 → 1.0339 m）。
+训练回合的 `+5` 是 `ELF3_SQUAT_HOLD`，`+0.5` 是余量；两者都不是部署时长。
+
+### 6.2 回放态为什么没有「结束」
+
+三处代码共同决定，缺一不可（都在 `squat_env_cfg.py` / `traj_action.py`）：
+
+1. `play=True` 时 `cfg.episode_length_s = int(1e6)`（≈ 11.6 天），`time_out` 实际上永不触发；
+2. `play=True` 时 `terminations.pop("traj_finished")`，同时 `events.pop("push_robot")`、
+   `enable_corruption=False` —— 不再重置，也不再人为推它；
+3. `TrajTrackAction.process_actions()` 每步 `idx += 1` 后 `.clamp_(max=T-1)`，
+   **到末帧就永久停住**，参考寄存器变成静态位形。
+
+所以切换后的最终状态是：
+
+* **down**：2.46 s 走完 → 极限蹲（z≈0.523 m、膝 149°、躯干前倾 18.5°），
+  策略继续以 50 Hz 输出残差（腿 ±0.35 / 腰 ±0.15 / 臂 ±0.12 rad）稳住这个位形；
+  不会自己起身，不会自动退出模式。
+* **up**：2.02 s 走完 → 站姿（z≈1.034 m），之后无限保持站姿。
+
+**两个策略是分开训的，down 不会自动接 up**。要「蹲下去再站起来」的完整循环，
+必须由上层显式切模式（或用 §6.5 的状态机）。同理，也没有退出码、没有自动回到默认站立模式。
+
+### 6.3 「动作完成」信号从哪来
+
+`TrajTrackAction.finished` 在 `_idx >= T-1` 后恒为 `True`（冻结模式下恒 False）。
+play 里它没被接成终止项，但**真机可以拿它当 done**：帧号到 `T-1` 即动作完成。
+更稳的做法是自己维护一个 0..T-1 的帧计数器——因为观测本身依赖它：
+
+```
+actor 观测 = base_lin_vel(3) + base_ang_vel(3) + projected_gravity(3)
+           + joint_pos(29) + joint_vel(29) + actions(29)
+           + traj_joint_err(29) + traj_height_err(1) + traj_progress_sincos(2)
+```
+
+后三项（`traj_ref_err` / `traj_height_err` / `traj_progress`）都读的是
+`TrajTrackAction` 的参考寄存器。**真机上必须把 `squat_ref_v1.npz` 和帧计数器一起
+搬到控制器**，每 20 ms 推进一帧，否则策略拿不到这几路输入。
+控制周期必须是 20 ms（`0.002 × 10`），否则参考会被播快/播慢，`__init__` 里会打 warn。
+这是蹲起策略与爬楼策略部署时最大的区别：爬楼策略的观测只依赖机器人自身传感器，
+蹲起策略额外依赖一条外部时间轴。
+
+### 6.4 唯一会「结束」的情况：异常终止
+
+| 终止项 | 阈值 | play 里的后果 |
+|---|---|---|
+| `fell_over` | 倾角 > 55° | done → reset 回出生姿态 |
+| `torso_contact` | 躯干触地力 > 20 N | 同上 |
+| `base_too_low` | down z<0.28 / up z<0.30 m | 同上 |
+| `drifted` | 水平位移 > 1.2 m | 同上 |
+| `time_out` | 1e6 s | 实际不会触发 |
+
+`export_squat_video.py` 的逐帧循环**不主动处理 done**，所以录像里看不到 reset；
+但 mjlab `play` 的交互循环会在 done 时重置。历史上「蹲下去又站起来」的假象就是
+`traj_finished` 触发 reset，见 §2.5「回放里蹲下去又站起来」那段。
+
+> ⚠️ **真机上不能照搬 reset**：`init_state` 是另一个位形（down 的出生是站姿），
+> 重置等于让关节目标瞬间跳变几十度，比摔倒本身更危险。
+> 触发上述条件应改走软急停：冻结当前关节目标 + 阻尼下电，或切到预定义的安全过渡轨迹。
+
+### 6.5 真机接入要补的四件事
+
+1. **参考时间轴**：控制器加载 `squat_ref_v1.npz`，切模式时帧计数器清零，
+   20 ms 推进一帧，到 `T-1` 发出 `motion_done`；保持期间不再推进（等价 `freeze_frame`）。
+2. **状态迁移**（建议的四态机）：
+   `DOWN(2.46 s)` → `HOLD_SQUAT` → `UP(2.02 s)` → `HOLD_STAND`。
+   `motion_done` 后**切到对应的 hold 策略**（`Elf3-Squat-Hold` / `Elf3-Stand-Hold`），
+   而不是继续用 down/up 网络外推——后者的训练只覆盖到 7.96 / 7.52 s，
+   长时间保持是分布外；hold 策略整个 20 s 回合都在学「保持」，且观测不含 progress，
+   天然适合无限期运行。
+3. **安全兜底**：§6.4 的四条终止改造成软急停；再加超时保护
+   （例如 down 超过 3.5 s 仍未到末帧就报错停机），防止帧计数器卡住。
+4. **策略导出**：`train/export_onnx.py --task Elf3-Squat-Down-Play --checkpoint ...`
+   四个任务各导一份；导出后务必核对观测拼接顺序与 §6.3 的维度一致，
+   并确认真机能否提供 `base_lin_vel`（没有估计器就要改观测重训，见
+   `docs/crab_rl_training.md` 里爬楼版的处理）。
+
