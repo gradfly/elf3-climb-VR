@@ -191,6 +191,43 @@ MUJOCO_GL=egl .venv/bin/play Elf3-Squat-Down-Play \
 
 启动后终端会打印 viser 地址，本地端口转发后打开即可（见 `train/README.md` §10.2）。
 
+#### 回放里「蹲下去又站起来」是 `traj_finished` 触发的重置，不是策略在起身
+
+参考表里 `down` 只有 124 帧（1.034 → 0.523 m，单调下降），`up` 也只有 102 帧，
+两份 npz 都是单程的。所以回放里看到的「起身」只可能来自**回合结束后的 reset**：
+
+- 训练时 `traj_finished`（参考播完）是必要终止项，回合该在 2.46 s 结束；
+- 回放时它意味着每 2.46 s 重置一次，机器人瞬间回到初始站姿再蹲一遍 ——
+  看起来就是「蹲下 → 站起 → 蹲下」的无限循环。
+
+已在 `squat_env_cfg(play=True)` 里去掉这条（只影响回放配置），播完停在末帧、
+一直保持极限蹲。启动日志会打印：
+
+```
+[squat][play] 已移除 traj_finished 终止：播完保持末帧，不重置
+```
+
+如果看到这行却仍在循环，检查是不是跑成了 `Elf3-Squat-Down`（训练配置）而不是
+`Elf3-Squat-Down-Play`：`play` 读的是 `play_env_cfg`。兜底手段是 `--no-terminations`
+（mjlab 自带，直接清空所有终止项）。
+
+#### 判断「不好看」是参考的问题还是策略的问题
+
+```bash
+# 纯参考开环：残差乘 0，只让 PD 追轨迹。画面 = 轨迹本身能有多好看
+MUJOCO_GL=egl .venv/bin/play Elf3-Squat-Down-Play --agent zero
+```
+
+对比着看：`--agent zero` 也难看 → 参考轨迹/物理参数问题（改 `squat_extreme.py`）；
+只有策略难看 → 训练/奖励问题（加长训练、调权重、放松残差限幅）。
+录一段视频存到 run 目录（`--video` 默认 200 步 = 4 s，正好一整个回合）：
+
+```bash
+MUJOCO_GL=egl .venv/bin/play Elf3-Squat-Down-Play --video   --checkpoint-file logs/rsl_rl/elf3_squat_down/<run>/model_4000.pt
+# 产物：logs/rsl_rl/elf3_squat_down/<run>/videos/play/*.mp4
+```
+
+
 ---
 
 ## 3. 常见报错 → 处理

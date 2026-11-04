@@ -286,7 +286,13 @@ def squat_env_cfg(which: str = "down", play: bool = False):
     )
 
     if play:
-        cfg.episode_length_s = int(1e9)     # 回放：播完保持蹲姿/站姿，不自动重置
+        cfg.episode_length_s = int(1e6)     # 回放：播完保持蹲姿/站姿，不自动重置
+                                            # （1e6 s ≈ 5e7 步，仍在 int32 内）
+        # 「参考播完」这条终止在训练里是对的（回合该结束就结束），但回放里必须去掉：
+        # 否则 2.46 s 一到就 reset 回初始站姿，看起来就是「蹲下去又站起来」的无限循环
+        # —— 其实是重置，不是策略在起身。去掉后参考停在末帧（极限蹲），一直保持。
+        cfg.terminations.pop("traj_finished", None)
+        print("[squat][play] 已移除 traj_finished 终止：播完保持末帧，不重置")
         cfg.observations["actor"].enable_corruption = False
     return cfg
 
