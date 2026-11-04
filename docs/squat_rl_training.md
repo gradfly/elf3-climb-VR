@@ -574,6 +574,7 @@ logs/rsl_rl/elf3_squat_hold_stand/    保持：站姿
 | `train/install_task.sh` | 自检清单加到 8 个任务 |
 | `scripts/run_squat_train.sh` | 冒烟 + 训练 + 回放 + 导出 mp4（`smoke` / `all` / `down` / `up` / `hold` / `hold-squat` / `hold-stand` / `play` / `video`） |
 | `scripts/export_squat_video.py` | mp4 导出主实现：离屏 rgb_array + 逐帧渲染 + 流式写 mp4，不依赖 viewer / DISPLAY / `play --video` |
+| `train/export_onnx.py` | 导出 ONNX + 观测契约 JSON；`--squat <mode>` 自动找 ckpt，含 load 签名兼容、torch 直出兜底、数值对拍 |
 
 参考轨迹的来源见 `docs/squat_extreme.md`（`launch/split_traj.py` 从循环轨迹切出
 down / up 两段，接缝帧一致）。
@@ -672,4 +673,149 @@ actor 观测 = base_lin_vel(3) + base_ang_vel(3) + projected_gravity(3)
    四个任务各导一份；导出后务必核对观测拼接顺序与 §6.3 的维度一致，
    并确认真机能否提供 `base_lin_vel`（没有估计器就要改观测重训，见
    `docs/crab_rl_training.md` 里爬楼版的处理）。
+
+---
+
+## 7. 导出 ONNX
+
+`train/export_onnx.py` 现在**四个蹲起/保持任务开箱即用**：自动找最新完好的
+checkpoint、自动带出任务 ID 与实验目录、同时写一份观测契约 JSON。
+
+### 7.1 一条命令
+
+前提：在**仓库根目录**、用装了 mjlab 的 `.venv`、且已 `git pull` 拿到新脚本。
+
+```bash
+cd ~/elf3
+.venv/bin/pip install onnx onnxruntime          # 首次；导出/对拍要用
+
+.venv/bin/python train/export_onnx.py --squat down
+.venv/bin/python train/export_onnx.py --squat up
+.venv/bin/python train/export_onnx.py --squat hold-squat
+.venv/bin/python train/export_onnx.py --squat hold-stand
+
+# 指定 checkpoint / 自定义输出路径
+.venv/bin/python train/export_onnx.py --squat down \
+  --checkpoint logs/rsl_rl/elf3_squat_down/<run>/model_4000.pt \
+  --out train/checkpoints/squat_down.onnx
+```
+
+| mode | 任务 ID | 自动找 ckpt 的目录 | 默认产物 |
+|---|---|---|---|
+| `down` | `Elf3-Squat-Down-Play` | `logs/rsl_rl/elf3_squat_down/` | `logs/export/squat_down.onnx` |
+| `up` | `Elf3-Squat-Up-Play` | `logs/rsl_rl/elf3_squat_up/` | `logs/export/squat_up.onnx` |
+| `hold-squat` | `Elf3-Squat-Hold-Play` | `logs/rsl_rl/elf3_squat_hold_squat/` | `logs/export/squat_hold_squat.onnx` |
+| `hold-stand` | `Elf3-Stand-Hold-Play` | `logs/rsl_rl/elf3_squat_hold_stand/` | `logs/export/squat_hold_stand.onnx` |
+
+自动选的是「最新 run 里迭代数最大的 `model_*.pt`」，会跳过 < 4 KB 的截断文件
+（训练被 kill 时写坏的）。**爬楼任务的原用法不变**：
+
+```bash
+.venv/bin/python train/export_onnx.py \
+  --task Elf3-Crab-Residual \
+  --checkpoint logs/rsl_rl/elf3_crab/<run>/model_3000.pt \
+  --out train/checkpoints/elf3_crab_residual.onnx
+```
+
+非 `--squat` 模式必须显式给 `--checkpoint`；不给会直接报错，不会默默导一个默认爬楼模型。
+
+### 7.2 产物与契约
+
+每次导出两个文件（重录时旧 `.onnx` 先挪成 `.prev.onnx`，不会被误当新产物）：
+
+```
+logs/export/squat_down.onnx
+logs/export/squat_down.json     ← 真机侧照着它拼观测
+```
+
+JSON 里对部署有用的字段：
+
+| 字段 | 含义 |
+|---|---|
+| `obs_dim` | actor 观测总维度，**以这个为准，别手算** |
+| `obs_terms_order` | 观测项拼接顺序（严格按 `cfg.observations["actor"].terms` 字典顺序） |
+| `action_dim` | 29 |
+| `action_semantics` | 输出是残差、`q_target` 的完整后处理公式 |
+| `reference.table` / `traj_key` | 要搬到控制器上的参考表与键 |
+| `reference.frames` / `dt` / `duration_s` | 124 / 0.02 / 2.46（down），102 / 0.02 / 2.02（up） |
+| `reference.freeze_frame` | hold 任务冻结的帧；非 null 时全程不推进 |
+| `reference.z_frozen` | hold 任务真正要保持的高度（**不是 `z_end`**） |
+| `verify` | ONNX 与 PyTorch 策略的数值对拍结果 |
+
+hold 任务的 actor 观测**少 `traj_progress` 两项**（`with_progress=False`），
+所以维度比跟踪任务少 2 —— 导出脚本会从 `env.reset()` 实测，不需要手改。
+
+### 7.3 自动验证
+
+导出后会用 `onnxruntime` 载入，检查输入维度是否等于 `obs_dim`，再用同一个随机观测
+分别跑 `runner.get_inference_policy()` 与 ONNX，要求 `max|Δ| <= 1e-4`；不一致直接
+以退出码 5 报错。这一步是在防「导到了不含 obs 归一化的模块」——那类模型能加载、
+能出数，但输出全是错的，比没有模型更危险。确实是误报时加 `--skip-verify`。
+
+服务器版 mjlab 的归一化模块就包在 `runner.alg.actor` 里（`diagnose_policy.py` 的
+「归一化统计量体检」打印过它的 running mean/var），所以 runner 自带导出和 torch
+直出都不会丢统计量。别在部署侧再手工归一化一次。
+
+```bash
+# 手动再看一眼输入输出
+.venv/bin/python - <<'PY'
+import onnx
+m = onnx.load("logs/export/squat_down.onnx")
+print([(i.name, [d.dim_value for d in i.type.tensor_type.shape.dim]) for i in m.graph.input])
+print([(o.name, [d.dim_value for d in o.type.tensor_type.shape.dim]) for o in m.graph.output])
+PY
+```
+
+### 7.4 坑（按踩到的概率排序）
+
+1. **ONNX 输出是 29 维残差，不是关节目标。** 部署侧必须复现
+   `q_target = q_ref(frame) + ACTION_SCALE_MAP * (clip(a, ±clip_rad/scale) * residual_scale)`，
+   clip 是腿 0.35 / 腰 0.15 / 臂 0.12 rad。直接把输出当关节角下发，机器人会瞬间乱甩。
+   项目里 `crab_replay.py --policy onnx-residual` 就是同样的后处理范例。
+2. **观测顺序错了模型也会正常出数**，只是输出是错的。严格按 JSON 的
+   `obs_terms_order` 拼，别按自己觉得合理的顺序。
+3. **真机不存在 `traj_*` 这三路观测**：`traj_joint_err` / `traj_height_err` /
+   `traj_progress_sincos` 都读的是仿真里 `TrajTrackAction` 的参考寄存器。
+   控制器必须加载参考表并维护帧计数器（20 ms/帧、到 `frames-1` 停止推进），
+   否则策略缺输入。详见 §6.3 / §6.5。
+4. **`MUJOCO_GL=egl`**：脚本要建一个 `ManagerBasedRlEnv` 才能实测观测维度，
+   无 DISPLAY 的服务器要设这个环境变量；导出本身不吃 GPU，但别和训练抢显存。
+5. **版本兼容已内置**：`runner.load` 依次试 `load_cfg/strict` → `map_location` →
+   最简三签名；导出默认 `--engine auto` 先试 `runner.export_policy_to_onnx`，
+   没有该方法就用 `torch.onnx.export` 导 `runner.alg.actor`。想强制走哪条用
+   `--engine runner` / `--engine torch`；`env.reset()` 拿不到维度时用 `--obs-dim <N>`。
+6. **一个 ONNX 只对应一个任务**。down / up / hold 是分开训的四个网络，
+   四份 ONNX 都要导，按 §6.5 的四态机切换，不能拿一份复用。
+
+### 7.5 部署侧最小骨架（伪代码）
+
+```python
+import json, numpy as np, onnxruntime as ort
+
+c = json.load(open("logs/export/squat_down.json"))
+sess = ort.InferenceSession(c["onnx"])
+inp = sess.get_inputs()[0]
+ref = np.load(c["reference"]["table"])
+key = c["reference"]["traj_key"]
+q_ref = ref[f"{key}/q"]                      # [T, 29]
+z_ref = ref[f"{key}/z"]
+T, frame = c["reference"]["frames"], 0
+scale = np.asarray(ACTION_SCALE_MAP)        # 顺序与 q_ref 列一致
+clip = np.where(is_leg, 0.35, np.where(is_waist, 0.15, 0.12))
+
+def control(robot_state):
+    global frame
+    obs = np.concatenate(build_blocks_in_order(c["obs_terms_order"], robot_state,
+                                               q_ref[frame], z_ref[frame]))
+    assert obs.size == c["obs_dim"]
+    a = sess.run(None, {inp.name: obs[None].astype(np.float32)})[0][0]
+    raw = np.clip(a, -clip / scale, clip / scale)        # residual_scale 默认 1
+    q_target = q_ref[frame] + scale * raw
+    frame = min(frame + 1, T - 1)                       # 到末帧停住 = §6 的保持态
+    return q_target
+```
+
+`build_blocks_in_order` 里 `traj_joint_err = q_meas - q_ref[frame]`、
+`traj_height_err = z_meas - z_ref[frame]`、`traj_progress_sincos = [sin(πp), cos(πp)]`，
+`p = frame / (T-1)`。hold 任务把 `frame` 固定成 `freeze_frame`，且**不拼 progress 块**。
 
