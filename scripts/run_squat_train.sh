@@ -29,8 +29,14 @@
 #   SMOKE_ITERS=5        冒烟轮数
 #   VENV=.venv           虚拟环境目录（相对仓库根）
 #   CKPT=...             play 模式下显式指定 checkpoint（不给就自动找最新）
+#   CR_FIX=0             设 1 把 \r 原地覆盖式进度条转成换行（旧版 rsl_rl / tqdm 用 \r 打印时）
 #
 # 日志：~/train_squat_<mode>.log（如 ~/train_squat_hold_squat.log）
+#
+# ⚠️ 实时输出：训练 stdout 直接打到终端，同时 tee 同步写日志。
+#    不要在 tee 后面再接 `tail -N` —— tail 要读到 EOF 才能确定「最后 N 行」，
+#    训练不结束它就一行都不吐，看起来就是「每轮指标没有实时输出」。
+#    （2026-11-09 修：旧版 smoke/train_one 末尾接了 tail -25 / tail -40。）
 # =============================================================================
 set -euo pipefail
 
@@ -39,6 +45,7 @@ NUM_ENVS="${NUM_ENVS:-1024}"
 ITERS="${ITERS:-6000}"
 SMOKE_ITERS="${SMOKE_ITERS:-5}"
 VENV="${VENV:-.venv}"
+CR_FIX="${CR_FIX:-0}"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
@@ -59,6 +66,27 @@ export ELF3_SQUAT_ARM_GUARD="${ARM_GUARD:-1}"
 export ELF3_HOLD_EPISODE="${HOLD_EPISODE:-20.0}"
 
 step() { echo; echo "==> $*"; }
+
+# 训练进程的 stdout/stderr 同时打到终端 + tee 写日志，两边都是实时的。
+#
+# ⚠️ 管道末端绝不能接 `tail -N`：tail 必须等 stdin EOF 才知道最后 N 行是哪几行，
+#    所以在训练结束前它一行都不吐。旧版两处调用都接了 tail（smoke -25 / train -40），
+#    表现就是「训练中屏幕不动、结束时突然冒出几十行」。
+#    只想要末尾摘要的话，训练结束后自己去 tail 日志文件，别让它挡在管道里。
+#
+# CR_FIX=1：个别旧版 rsl_rl / tqdm 用 `\r` 原地覆盖打印进度，tee 写进日志会变成
+#    一整行（没有换行符），grep / tail -f 都抓不到逐轮数据。这时把 \r 转成 \n。
+#    sed -u 是无缓冲的，不会再引入一层延迟；CRLF 输出会多出空行，不影响内容。
+run_logged() {
+  local log="$1"; shift
+  echo "    实时日志：$log"
+  echo "    另开终端看逐轮指标：tail -F \"$log\" | grep --line-buffered -E 'Learning iteration|Mean reward|Mean episode length|Metrics/'"
+  if [ "$CR_FIX" = "1" ]; then
+    "$@" 2>&1 | sed -u 's/\r/\n/g' | tee "$log"
+  else
+    "$@" 2>&1 | tee "$log"
+  fi
+}
 
 # mode -> mjlab 任务 ID。四个任务共用一套训练流程，只有 ID 不同。
 task_of() {
@@ -107,9 +135,9 @@ smoke() {
   for t in down up hold_squat hold_stand; do
     task="$(task_of "$t")"
     step "冒烟 ③ $t（$task）：${SMOKE_ITERS} 轮 × 256 env"
-    "$BIN_TRAIN" "$task" \
-      --env.scene.num-envs 256 --agent.max-iterations "$SMOKE_ITERS" \
-      2>&1 | tee "$HOME/train_squat_${t}_smoke.log" | tail -25
+    run_logged "$HOME/train_squat_${t}_smoke.log" \
+      "$BIN_TRAIN" "$task" \
+        --env.scene.num-envs 256 --agent.max-iterations "$SMOKE_ITERS"
   done
   echo
   echo "[OK] 冒烟跑完。真实训练：bash scripts/run_squat_train.sh all"
@@ -124,9 +152,9 @@ train_one() {
   local which="$1" task
   task="$(task_of "$which")" || exit 1
   step "训练 $task（$which）：${NUM_ENVS} env × ${ITERS} iter"
-  "$BIN_TRAIN" "$task" \
-    --env.scene.num-envs "$NUM_ENVS" --agent.max-iterations "$ITERS" \
-    2>&1 | tee "$HOME/train_squat_${which}.log" | tail -40
+  run_logged "$HOME/train_squat_${which}.log" \
+    "$BIN_TRAIN" "$task" \
+      --env.scene.num-envs "$NUM_ENVS" --agent.max-iterations "$ITERS"
 }
 
 # 回放：默认自动找该实验目录下修改时间最新的 model_*.pt
@@ -196,7 +224,11 @@ case "$MODE" in
 esac
 
 echo
-echo "==> 完成。看指标（把 down 换成 up / hold_squat / hold_stand 即可）："
+echo "==> 完成。完整日志：~/train_squat_<mode>.log（训练过程中一直实时写入）"
+echo "    训练中另开终端实时看逐轮指标（grep 必须带 --line-buffered，否则又会被缓冲）："
+echo "    tail -F ~/train_squat_down.log | grep --line-buffered -E 'Learning iteration|Mean reward|Mean episode length|Metrics/'"
+echo
+echo "    训完看指标（把 down 换成 up / hold_squat / hold_stand 即可）："
 echo "    grep -o 'Metrics/traj_err_rms_leg: [0-9.]*' ~/train_squat_down.log | tail -5"
 echo "    grep -o 'Metrics/sym_err_rad: [0-9.]*'     ~/train_squat_down.log | tail -5"
 echo "    grep -o 'Metrics/base_xy: [0-9.]*'         ~/train_squat_down.log | tail -5"

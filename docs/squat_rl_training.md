@@ -180,10 +180,58 @@ MUJOCO_GL=egl PYTHONUNBUFFERED=1 .venv/bin/train Elf3-Squat-Up \
 
 - 日志别放 `/tmp`（重启会清空），放家目录。
 - 必须带 `PYTHONUNBUFFERED=1` + `tee`，否则管道模式下日志滞后几分钟，
-  且 traceback 看不到。
+  且 traceback 看不到。**`tee` 后面不要再接 `tail -N`**，见 §2.3.1。
 - 曲线与 checkpoint 落在 `logs/rsl_rl/elf3_squat_down/` 和 `logs/rsl_rl/elf3_squat_up/`
   （两边实验名分开，别混），
   看曲线：`tensorboard --logdir logs/rsl_rl --port 6006`。
+
+### 2.3.1 训练中「每轮指标」要实时可见
+
+**症状**：跑 `bash scripts/run_squat_train.sh down` 时屏幕长时间不动，
+几千轮训练结束后才「唰」地冒出几十行指标，中间完全看不到进度。
+
+**根因**：旧版脚本把训练输出接成了
+
+```bash
+.venv/bin/train ... 2>&1 | tee ~/train_squat_down.log | tail -40   # ❌
+```
+
+`tail -N` 必须等 stdin 到 EOF 才能确定「最后 N 行」是哪几行，所以训练不结束
+它一行都不吐。**`tee` 那一步其实一直在实时写日志**，只是终端被 tail 挡住了。
+同理，`grep` / `awk` 接在管道里也会各自带一层块缓冲。
+
+**修法**（2026-11-09）：管道末端只留 `tee`，想要末尾摘要就训完再 `tail` 日志文件：
+
+```bash
+.venv/bin/train ... 2>&1 | tee ~/train_squat_down.log               # ✔
+```
+
+脚本里 smoke 与正式训练统一走 `run_logged()`，两种模式都实时输出。
+
+**正在跑的那次不用等改代码**，另开一个终端直接看日志文件即可：
+
+```bash
+tail -F ~/train_squat_down.log
+# 只看每轮关键指标；grep 必须带 --line-buffered，否则又多一层缓冲
+tail -F ~/train_squat_down.log | grep --line-buffered -E \
+  'Learning iteration|Mean reward|Mean episode length|Metrics/'
+```
+
+**终端还是不动时，按这个顺序排查**：
+
+| 检查 | 命令 | 期望 |
+|---|---|---|
+| 日志文件在不在长 | 隔几秒看两次 `ls -l --time-style=+%T ~/train_squat_down.log` | mtime 持续更新 |
+| 日志里有没有逐轮行 | `grep -c -E 'iteration\|Iteration\|Metrics/' ~/train_squat_down.log` | 随轮数增长 |
+| Python 是否 unbuffered | 启动命令里有没有 `PYTHONUNBUFFERED=1` | 脚本已 export，裸命令要自己加 |
+| 管道里有没有缓冲环节 | `tail -N`（无 `-f`）、无 `--line-buffered` 的 `grep`、无 `fflush` 的 `awk` | 都不该有 |
+| 是不是 `\r` 覆盖式进度条 | `wc -l` 很小但文件很大 | 是 → `CR_FIX=1 bash scripts/run_squat_train.sh down` |
+
+`CR_FIX=1` 会在 `tee` 前用 `sed -u 's/\r/\n/g'` 把回车转成换行，让每轮变成
+独立一行（旧版 rsl_rl / tqdm 用 `\r` 原地覆盖打印进度时需要）。`sed -u` 是
+无缓冲的，不会引入新的延迟。
+
+---
 
 ### 2.4 看训练有没有真的在学
 
