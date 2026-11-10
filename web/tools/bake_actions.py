@@ -5,6 +5,8 @@
     data/mujoco_simulation/goose_step_traj.npz          前进正步（播完冻结）
     data/mujoco_simulation/goose_step_inplace_traj.npz  原地正步（无缝循环）
     data/mujoco_simulation/salute_traj.npz              敬礼（无缝循环）
+    data/mujoco_simulation/parade_sequence_traj.npz     正步 + 敬礼 连贯序列
+                                                        （scripts/build_parade_sequence.py）
 
 网页模型 ``web/assets/elf3.xml`` 是 nq=36（没有 head_z / head_y），按关节名
 重映射后逐帧算视觉网格最低点做落地自检，再写成 float32 行优先二进制：
@@ -12,6 +14,7 @@
     assets/motion_goose_walk.bin/.json
     assets/motion_goose_inplace.bin/.json
     assets/motion_salute.bin/.json
+    assets/motion_parade_seq.bin/.json   （连贯序列：播完冻结在立正）
 
 与 bake_squat.py 一样是**纯运动学回放**：网页端只做 mj_kinematics + 插值，
 不跑 mj_step、没有 onnxruntime，所以不会摔倒。
@@ -47,12 +50,16 @@ from bake_squat import build_qpos_remap, foot_min_z, visual_geoms  # noqa: E402
 # 机位用 parade：网页场景把机器人正面旋到了 three 的 −Z，所以站在 −Z 一侧
 # 才是正面。旧配置给敬礼用 squat（+X+Z）实际是从背面看，已改掉。
 ACTIONS = [
-    ("goose_step_traj.npz", "goose_walk", "脚本动作 · 走正步（前进）",
+    ("goose_step_traj.npz", "goose_walk", "参考动作 · 走正步（前进）",
      False, True, "parade"),
-    ("goose_step_inplace_traj.npz", "goose_inplace", "脚本动作 · 原地正步（循环）",
+    ("goose_step_inplace_traj.npz", "goose_inplace", "参考动作 · 原地正步（循环）",
      True, False, "parade"),
-    ("salute_traj.npz", "salute", "脚本动作 · 敬礼（右手军礼）",
+    ("salute_traj.npz", "salute", "参考动作 · 敬礼（右手军礼）",
      True, False, "parade"),
+    # 正步 + 敬礼 的连贯序列（scripts/build_parade_sequence.py 拼出）：
+    # 播完停在立正，所以不循环；stats 由 meta.parts_meta 里两段原始 meta 合并。
+    ("parade_sequence_traj.npz", "parade_seq", "参考动作 · 正步 + 敬礼（连贯）",
+     False, True, "parade"),
 ]
 
 
@@ -92,6 +99,39 @@ def load_traj(path: Path) -> dict:
     if errs:
         raise SystemExit(f"[错误] {path.name} 自检失败：\n  - " + "\n  - ".join(errs))
     return d
+
+
+def goose_stats(m: dict) -> dict:
+    """正步段的可读指标（源 npz 的 meta；缺失键一律给 None，不抛错）。"""
+    def num(key, scale, nd=2):
+        v = m.get(key)
+        return None if v is None else round(float(v) * scale, nd)
+    return dict(kickLiftCm=num("kick_lift", 100, 1),
+                baseSpeed=m.get("speed"),
+                leanDeg=m.get("lean_deg"),
+                balanceShiftCm=num("balance_shift", 100),
+                comResidualMm=num("com_hip_residual", 1000),
+                kneeSupportDeg=m.get("knee_support_deg"),
+                kneeSwingDeg=m.get("knee_swing_deg"),
+                hipRiseCm=m.get("hip_rise_cm"),
+                elbowFrontDeg=m.get("elbow_front_deg"),
+                stanceBackDeg=m.get("stance_back_deg"),
+                stanceBackCm=num("stance_back_m", 100, 1),
+                armFwdDeg=m.get("arm_fwd_deg"),
+                armMedial=m.get("arm_medial"))
+
+
+def salute_stats(m: dict) -> dict:
+    """敬礼段的可读指标（同 goose_stats：只取值，不算。）。"""
+    v = m.get("wrist_right_m")
+    return dict(wristToHeadMm=m.get("wrist_to_head_mm"),
+                wristErrMm=m.get("wrist_err_mm"),
+                wristRightCm=None if v is None else round(float(v) * 100, 1),
+                wristY_m=m.get("wrist_y_m"),
+                wristRollDeg=m.get("wrist_roll_deg"),
+                palmNormal=m.get("palm_normal"),
+                fingerDir=m.get("finger_dir"),
+                leftArmDown=m.get("left_forearm_down"))
 
 
 def main() -> int:
@@ -159,30 +199,27 @@ def main() -> int:
             maxJointJumpRad=round(j["d"]["jump"], 4),
             travelX=round(float(j["frames"][-1, 0] - j["frames"][0, 0]), 4),
         )
-        if j["name"].startswith("goose"):
-            stats.update(kickLiftCm=round(float(src_meta.get("kick_lift", 0)) * 100, 1),
-                         baseSpeed=src_meta.get("speed"),
-                         leanDeg=src_meta.get("lean_deg"),
-                         balanceShiftCm=round(
-                             float(src_meta.get("balance_shift", 0)) * 100, 2),
-                         comResidualMm=round(
-                             float(src_meta.get("com_hip_residual", 0)) * 1000, 2),
-                         kneeSupportDeg=src_meta.get("knee_support_deg"),
-                         kneeSwingDeg=src_meta.get("knee_swing_deg"),
-                         hipRiseCm=src_meta.get("hip_rise_cm"),
-                         elbowFrontDeg=src_meta.get("elbow_front_deg"),
-                         stanceBackDeg=src_meta.get("stance_back_deg"),
-                         stanceBackCm=round(
-                             float(src_meta.get("stance_back_m", 0)) * 100, 1),
-                         armFwdDeg=src_meta.get("arm_fwd_deg"),
-                         armMedial=src_meta.get("arm_medial"))
-        else:
-            stats.update(wristToHeadMm=src_meta.get("wrist_to_head_mm"),
-                         wristErrMm=src_meta.get("wrist_err_mm"),
-                         wristRightCm=round(
-                             float(src_meta.get("wrist_right_m", 0)) * 100, 1),
-                         wristY_m=src_meta.get("wrist_y_m"),
-                         leftArmDown=src_meta.get("left_forearm_down"))
+        pm = src_meta.get("parts_meta") or {}
+        # 单段数据自己就是源 meta；连贯序列的源 meta 是两段拼起来的，
+        # 各自的指标分别存在 parts_meta.goose / parts_meta.salute 里。
+        if j["name"].startswith("goose") or "goose" in pm:
+            stats.update(goose_stats(pm.get("goose", src_meta)))
+        if j["name"].startswith("salute") or "salute" in pm:
+            stats.update(salute_stats(pm.get("salute", src_meta)))
+        seq = src_meta.get("sequence")
+        if seq:
+            parts = {p["action"]: p for p in seq.get("parts", [])}
+            stats.update(
+                sequence=True,
+                gooseFrames=parts.get("goose_walk", {}).get("frames"),
+                blendFrames=parts.get("attention_blend", {}).get("frames"),
+                saluteFrames=parts.get("salute", {}).get("frames"),
+                holdFrames=parts.get("hold_attention", {}).get("frames"),
+                saluteXOffsetM=seq.get("salute_x_offset_m"),
+                seamMaxDiffRad=max((seq.get("seams") or {k: 0.0
+                                   for k in ("goose_to_blend", "blend_to_salute",
+                                             "salute_to_hold")}).values()),
+            )
         meta = dict(
             fps=fps, dt=j["d"]["dt"], model="elf3.xml",
             scene="平地（回放时自动隐藏两套台阶）", policy=None,
@@ -196,6 +233,8 @@ def main() -> int:
             refNpz=repo_rel(j["path"]),
             stats=stats,
         )
+        if seq:
+            meta["sequence"] = seq           # 网页端用它区分"连贯序列"文案
         save(j["name"], f, meta)
 
     print("\n=== 回归 ===")
@@ -221,7 +260,8 @@ def main() -> int:
         ok_all = ok_all and ok
 
     print(f"\n耗时 {time.time()-t0:.1f} s")
-    print("浏览器打开：http://localhost:8080/?motion=goose_walk")
+    print("浏览器打开：http://localhost:8080/?motion=parade_seq")
+    print("            http://localhost:8080/?motion=goose_walk")
     print("            http://localhost:8080/?motion=goose_inplace")
     print("            http://localhost:8080/?motion=salute")
     return 0 if ok_all else 1

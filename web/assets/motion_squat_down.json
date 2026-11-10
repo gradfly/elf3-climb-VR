@@ -58,7 +58,7 @@
     "durationS": 2.48
   },
   "name": "squat_down",
-  "label": "参考轨迹 · 下蹲（站姿 → 极限蹲）",
+  "label": "参考动作 · 下蹲（站姿 → 极限蹲）",
   "loop": false,
   "freezeAtEnd": true,
   "mode": "down",

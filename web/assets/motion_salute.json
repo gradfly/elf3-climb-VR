@@ -38,7 +38,7 @@
   ],
   "kind": "parade",
   "name": "salute",
-  "label": "脚本动作 · 敬礼（右手军礼）",
+  "label": "参考动作 · 敬礼（右手军礼）",
   "loop": true,
   "freezeAtEnd": false,
   "action": "salute",
@@ -57,11 +57,22 @@
     "wristErrMm": 0.0,
     "wristRightCm": 10.0,
     "wristY_m": -0.225,
+    "wristRollDeg": 90.0,
+    "palmNormal": [
+      -0.972,
+      -0.231,
+      -0.035
+    ],
+    "fingerDir": [
+      -0.224,
+      0.878,
+      0.424
+    ],
     "leftArmDown": 0.9968
   },
   "bin": "motion_salute.bin",
-  "generated": "2026-11-10T09:33:40",
-  "version": "2026-11-10T09:33:40-226",
+  "generated": "2026-11-10T18:04:52",
+  "version": "2026-11-10T18:04:52-226",
   "nframes": 226,
   "nq": 36,
   "duration": 4.52,

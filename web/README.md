@@ -6,7 +6,7 @@
 也可以在网页 / VR 里回放**策略跑出来的运动仿真**：`elf3_play.py` 那条
 MuJoCo + `policy.onnx` 闭环、跟踪 `fight.npz` 打拳动作的画面，以及
 `climb_stairs.py` 那条**深度视觉闭环爬楼梯**的画面（地形为 `universal_test`
-紧凑障碍），以及**蹲下 / 起立的 29 关节参考轨迹**（纯运动学回放，无需训练 / GPU）
+紧凑障碍），以及**蹲下 / 起立的 29 关节参考动作**（纯运动学回放，无需训练 / GPU）
 —— 见 §3、§7.8。
 
 ---
@@ -135,8 +135,12 @@ python view_mujoco.py --drop   # 落地对齐：消除脚底悬空
 （`localhost` 属于安全上下文，所以 WebXR 在 HTTP 下也可用。）
 
 - **左键拖动** = 旋转 · **滚轮** = 缩放 · **右键拖动** = 平移
-- 右侧面板：显示开关（机器人 / 楼梯 / 地面 / 阴影 / 碰撞体）、8 个视角预设
-  （含**螃蟹步**侧视与**蹲起 3/4**）、物理开关与复位按钮
+- 右侧面板：**场景**（单人 / 矩阵 10×20，默认矩阵）、显示开关（机器人 / 楼梯 / 地面 / 阴影 / 碰撞体）、
+  9 个视角预设（含**螃蟹步**侧视、**蹲起 3/4** 与**矩阵全景**）、物理开关与复位按钮
+- **矩阵场景**（默认）= 把机器人复制成 **10 行 × 20 列 = 200 份**，同一段动画同步播放。
+  实现用 `InstancedMesh`：几何 / 材质只有一份，绘制批次仍是 30 出头（不是 32×200），
+  每帧只改实例矩阵的平移列（实测 0.15 ms/帧）。地形与阴影不参与复制（只在单人里有）。
+  代价是三角形总量 ×200：约 **4100 万面/帧**，独立显卡流畅，集成显卡 / 一体机建议切回「单人」。
 - 底部并排两个 XR 入口按钮（在不支持 XR 的设备上会显示为灰色不可用）：
 
   | 按钮 | 模式 | 效果 |
@@ -156,8 +160,17 @@ python view_mujoco.py --drop   # 落地对齐：消除脚底悬空
 | 策略仿真 · 打拳 | `elf3_play.py` 链路：本机跑 **MuJoCo + policy.onnx** 闭环仿真录制的 qpos（含物理接触、关节跟踪） | 146.8 s |
 | 参考动作 · 打拳 | 直接取 `fight.npz` 里重定向后的运动（纯运动学，无物理） | 244.9 s |
 | 策略仿真 · 爬楼梯 | `climb_stairs.py` 链路：本机跑**深度视觉闭环**（MuJoCo 渲染深度图 → `normal_depth.onnx` → PD 力矩 → `mj_step`），在 `universal_test` 紧凑地形上从低楼梯爬过终点线 | 26.4 s |
-| 参考轨迹 · 蹲下起立循环 | `logs/export/squat_{down,up}.npz` 烘焙的 29 关节极限蹲：下蹲 → 蹲姿保持 1 s → 起立 → 站姿保持 1 s，首尾同姿态无缝循环 | 6.5 s |
-| 参考轨迹 · 下蹲 / 起立 | 同上拆成两段单放；**播完冻结在末帧**（蹲姿 / 站姿），与真机 `freeze_at_end` 一致 | 2.5 s / 2.0 s |
+| 参考动作 · 蹲下起立循环 | `logs/export/squat_{down,up}.npz` 烘焙的 29 关节极限蹲：下蹲 → 蹲姿保持 1 s → 起立 → 站姿保持 1 s，首尾同姿态无缝循环 | 6.5 s |
+| 参考动作 · 螃蟹步横移上楼 | `crab_climb.py` 四相位准静态控制器解出的关节轨迹（闭式 IK + DLS，无策略网络），沿 +Y 侧向横移上台阶 | 25.7 s |
+| 参考动作 · 走正步（前进） | `launch/goose_step.py` 逐帧解析两连杆 IK 生成的正步行进（腿绷直、脚不滑） | 6.8 s |
+| 参考动作 · 正步 + 敬礼（连贯） | `scripts/build_parade_sequence.py` 把正步（341 帧，走 3.15 m 收步立定）与敬礼（225 帧）拼成一条序列：中间 50 帧 smootherstep 收臂过渡（过渡段**只插值关节、基座沿用正步终点**，否则会倒着滑回原点），敬礼段整段平移 +3.15 m，末尾 25 帧立正定格。播完冻结 | 12.8 s |
+| 参考动作 · 贴地爬行 | `scripts/build_prone_crawl_sequence.py` 把动作 1（站立→蹲下→**双手撑地**→双脚后伸→趴姿，250 帧）与动作 2（俯卧爬行 4 循环，399 帧）拼成一条 38 维序列，再按关节名烘焙成 36 维；接缝 qpos 差 1.3e-4 rad，播完冻结 | 13.0 s |
+
+> 「参考动作」是**统一叫法**：面板里只区分「参考动作」（本机烘焙好的轨迹：打拳参考动作 /
+> 蹲起 / 螃蟹步 / 正步）与「策略仿真」（`policy.onnx`、`normal_depth.onnx` 闭环录制）。
+> 单段的「下蹲」「起立」、「原地正步」「敬礼」四段数据仍在 `assets/` 里，
+> 但**已从下拉菜单移除**（`?motion=squat_down` / `goose_inplace` / `salute` 仍可直达）。
+> 正步与敬礼的「连贯版」已经加进下拉（`?motion=parade_seq`），就是下面那张表的最后一行。
 
 浏览器里的 MuJoCo WASM 没有策略网络（没有 onnxruntime），所以网页端**不现算策略**：
 先在本地把仿真跑一遍，把每个控制步（50 Hz）的 `qpos` 录成 float32 二进制
@@ -165,7 +178,7 @@ python view_mujoco.py --drop   # 落地对齐：消除脚底悬空
 四元数最短路径 slerp），再用 `mj_kinematics` 刷新几何位姿 —— 50 Hz 数据 + 插值，
 VR 里动作平滑不抖。
 
-**蹲下 / 起立这三段是「参考轨迹」，不是策略仿真**：数据直接来自
+**蹲下 / 起立这几段是「参考动作」，不是策略仿真**：数据直接来自
 `scripts/export_squat_npz.py` 导出的 `squat_down.npz` / `squat_up.npz`（29 关节
 极限蹲动作），`bake_squat.py` 只做 38→36 维关节对账和 bin 编码，**不跑 `mj_step`、
 不需要 ONNX、不需要 GPU**。所以回放里机器人永远保持设计好的姿态，不会像
@@ -188,17 +201,31 @@ python web/tools/bake_climb.py --duration 20          # 只录前 20 s
 python web/tools/bake_climb.py --cmd-vx 0.4           # 走慢一点
 python web/tools/bake_climb.py --spawn-x 0            # 从世界原点出发（先走 4.6 m 平地）
 
-# —— 螃蟹步横移上楼（crab_climb.py 脚本步态，无策略网络）——
+# —— 螃蟹步横移上楼（crab_climb.py 脚本烘焙的参考动作，无策略网络）——
 python web/tools/bake_crab.py                         # 全链：生成随机台阶 → 规划轨迹 → 烘焙
 python web/tools/bake_crab.py --seed 7 --rise-max 0.18        # 换一套台阶重录
 python web/tools/bake_crab.py --step-time 1.2                 # 走慢一点（更容易站住）
 python web/tools/bake_crab.py --skip-gen --skip-plan          # 只重烘焙已有轨迹
 
-# —— 蹲下 / 起立（29 关节参考轨迹，纯运动学，无需 GPU）——
+# —— 蹲下 / 起立（29 关节参考动作，纯运动学，无需 GPU）——
 python scripts/export_squat_npz.py                 # 先有 squat_down/up.npz（若还没有）
 python web/tools/bake_squat.py                    # 生成 down / up / cycle 三段回放
 python web/tools/bake_squat.py --hold-frames 75   # 循环版蹲姿 / 站姿各停 1.5 s
 python web/tools/bake_squat.py --no-cycle         # 只要两个单段
+
+# —— 贴地爬行（动作 1 + 动作 2 合并序列，纯运动学）——
+python scripts/build_prone_crawl_sequence.py      # 先拼成 prone_crawl_sequence_traj.npz
+python web/tools/bake_crawl.py                     # 再烘焙成 assets/motion_crawl.bin/.json
+node web/tools/make-manifest.mjs                   # 改完 assets 顺手刷新清单
+# python web/tools/bake_crawl.py --preset fast --name crawl_fast   # 快档（单帧跳变大，默认不下发）
+
+# —— 正步 + 敬礼（连贯序列，纯运动学）——
+python sim/vendor/bxi_controller_ros2/src/bxi_example_py_elf3/launch/goose_step.py
+python sim/vendor/bxi_controller_ros2/src/bxi_example_py_elf3/launch/salute.py
+python scripts/build_parade_sequence.py           # 拼成 parade_sequence_traj.npz（641 帧）
+python web/tools/bake_actions.py                  # 同时重烘 goose_walk / goose_inplace / salute / parade_seq
+python scripts/check_parade_actions.py            # 验收（含拆段复检 + 接缝/位移专项）
+# python scripts/build_parade_sequence.py --salute-cycles 2 --blend-frames 75
 ```
 
 > `bake_crab.py` 除了写 `motion_crab.*`，还会把台阶几何同步成
@@ -209,7 +236,7 @@ python web/tools/bake_squat.py --no-cycle         # 只要两个单段
 
 | 控件 | 说明 |
 | --- | --- |
-| 回放 | 关闭（静止站立）/ 策略仿真 · 打拳 / 参考动作 · 打拳 / 策略仿真 · 爬楼梯 / **脚本步态 · 螃蟹步横移上楼** / **参考轨迹 · 蹲下起立循环** / **参考轨迹 · 下蹲** / **参考轨迹 · 起立** |
+| 回放 | 关闭（静止站立）/ 策略仿真 · 打拳 / 参考动作 · 打拳 / 策略仿真 · 爬楼梯 / **参考动作 · 螃蟹步横移上楼** / 策略仿真 · 螃蟹步横移上楼 / **参考动作 · 蹲下起立循环** / **参考动作 · 走正步（前进）** / **参考动作 · 正步 + 敬礼（连贯）** |
 | 倍速 | 0.25× / 0.5× / 1× / 1.5× |
 | 视角跟随机器人 | 机器人会满场走动（世界坐标约 ±5 m），打开后镜头自动跟住它 |
 | 从头播放 / 暂停 | 控制回放进度（「复位姿态」在回放中也等价于从头播放）。**单段蹲起**播完会冻结在末帧、按钮变「继续」，此时点它等于从头播放 |
@@ -230,6 +257,9 @@ python web/tools/bake_squat.py --no-cycle         # 只要两个单段
   所以也可以手动两个都勾上看全景。
 - 爬楼梯回放的机器人**从 x≈3.5 m 出发**，不在世界原点；开着「视角跟随机器人」
   镜头会自动跟过去（默认开着）。想看全景可以点「全景」预设。
+- **正步 + 敬礼（连贯）**也是满场走的：正步段会前进 3.15 m 才收步，敬礼在原地完成。
+  请保持「视角跟随机器人」勾着（默认勾选），否则走完就出画了；想要"一步到位"的
+  构图，可以切「单人」+ 手动拉远相机。
 - 开启回放会**自动关掉「运行 MuJoCo 物理」**：两者互斥（一个是回放录好的 qpos，
   一个是本地现算 `mj_step`）。
 - 打拳策略在 t≈148 s 会失稳摔倒，所以录制在**最后一次姿态健康**的时刻截断
@@ -241,6 +271,8 @@ python web/tools/bake_squat.py --no-cycle         # 只要两个单段
 - URL 参数：`?motion=fight_policy&speed=0.5&follow=0`
   （一键脚本用的就是这条；爬楼梯用 `?motion=climb_policy`，螃蟹步用 `?motion=crab`，
   **蹲下起立循环**用 `?motion=squat_cycle`，单段用 `?motion=squat_down` / `squat_up`）。
+  场景默认是矩阵，想看单个机器人加 `&scene=single`（例：`?scene=single&motion=crab`，
+  否则矩阵模式下不切「螃蟹步」机位、也不显示台阶）。
 
 ---
 
@@ -296,12 +328,13 @@ python web/tools/bake_squat.py --no-cycle         # 只要两个单段
 
 | 控件           | 说明                                          |
 | ------------ | ------------------------------------------- |
-| 机器人          | 显示 / 隐藏 30 个视觉网格（group 2）                   |
+| 场景           | **单人**（1 个机器人）/ **矩阵**（10 行 × 20 列 = 200 份同步播放，默认）。矩阵用实例化渲染，绘制批次不变；地形与阴影不复制 |
+| 机器人          | 显示 / 隐藏 32 个视觉网格（group 2，含两只手的 mesh）；矩阵模式下控制的是 200 份实例 |
 | 楼梯 / 障碍      | 显示 / 隐藏 `scene_bx.xml` 里的地形（`universal_test` 紧凑障碍：10 cm 低楼梯 / 15 cm 高楼梯 / 壕沟堤岸） |
 | 地面网格         | 显示 / 隐藏地板                                   |
 | 阴影           | 开关实时阴影                                      |
 | 碰撞体（调试图层）    | 显示 group 3 的 36 个碰撞几何（绿色半透明 capsule）        |
-| 视角预设         | 正面 / 背面 / 侧面 / 头部特写 / 俯视 / 螃蟹步 / **蹲起 3/4** / 全景 |
+| 视角预设         | 正面 / 背面 / 侧面 / 头部特写 / 俯视 / 螃蟹步 / **蹲起 3/4** / **矩阵全景** / 全景 |
 | 运行 MuJoCo 物理 | 默认**关闭**；打开后真实跑 `mj_step`，机器人会因重力倒地（模型无控制器） |
 | 复位姿态         | 回到落地对齐后的静止站立姿态                              |
 | 复位世界位置       | 把世界平移 / 旋转复位                                |
@@ -469,7 +502,7 @@ onSeeThrough` 三个回调里接 UI。`setSeeThrough()` 幂等且不依赖真头
 
 ---
 
-### 7.8 蹲下 / 起立参考轨迹回放（`motion_squat_*`）
+### 7.8 蹲下 / 起立参考动作回放（`motion_squat_*`）
 
 数据从 `scripts/export_squat_npz.py` 来：`squat_down.npz`（站姿 → 极限蹲，124 帧）
 与 `squat_up.npz`（极限蹲 → 站姿，102 帧），都是 50 Hz、`qpos [T,38]`。
@@ -499,8 +532,9 @@ onSeeThrough` 三个回调里接 UI。`setSeeThrough()` 幂等且不依赖真头
 `loop=true` 的回放里用，看不出来）。
 
 页面侧（`main.js`）给 `kind === 'squat'` 加了三件事：隐藏两套台阶、切 3/4 机位、
-显示「参考轨迹」说明。`js/motion.js` 的 `describe()` 也补了「参考轨迹」分类。
-`tools/verify.mjs` 新增 9 项自检（下拉项 / 循环首尾帧 / 基座高度变化 / 地形与机位 /
+显示「参考动作」说明。`js/motion.js` 的 `describe()` 把四类轨迹统一显示成
+「参考动作」（只有 onnx 闭环录制才叫「策略仿真」）。
+`tools/verify.mjs` 新增自检（下拉项 / 循环首尾帧 / 基座高度变化 / 地形与机位 /
 HUD / 冻结末帧 / 蹲姿高度 / 暂停按钮 / 从头播放）。
 
 > 完整部署语义（时长、结束状态、ONNX、npz 键）：见 `docs/squat_rl_training.md` §6~§9。
@@ -511,14 +545,15 @@ HUD / 冻结末帧 / 蹲姿高度 / 暂停按钮 / 从头播放）。
 
 | 脚本                  | 用途                                                   |
 | ------------------- | ---------------------------------------------------- |
-| `verify.mjs`        | **端到端自检**：加载 / 模型 / UI / 开关 / 视角 / 物理 / 复位 / 回放（打拳 + 爬楼梯 + 螃蟹步 + 蹲起）/ XR / 半透明透视，65 项 |
+| `verify.mjs`        | **端到端自检**：加载 / 模型 / UI / 场景（单人 · 矩阵 200 份）/ 开关 / 视角 / 物理 / 复位 / 回放（打拳 + 爬楼梯 + 螃蟹步 + 蹲起 + 贴地爬行）/ XR / 半透明透视，79 项 |
 | `shoot.mjs`         | 用 CDP 等页面就绪后截图（可注入 JS 改相机、改可见性）                      |
 | `dump-geoms.mjs`    | 列出每个视觉网格的世界 AABB，用于和 MuJoCo 对账                       |
 | `make-manifest.mjs` | 重新生成 `assets/manifest.json`                          |
 | `bake_motion.py`    | 本机跑 MuJoCo + `policy.onnx`，把每步 qpos 录成 `assets/motion_*.bin` |
 | `bake_climb.py`     | 本机跑 MuJoCo + `normal_depth.onnx` 深度视觉闭环（复用 climb stairs 工作区的 `climb_stairs.py`），把爬楼梯的每步 qpos 录成 `assets/motion_climb_policy.bin` |
-| `bake_crab.py`      | 跑 `gen_crab_stairs.py` + `crab_climb.py`（脚本步态，无策略网络），录成 `assets/motion_crab.bin`，并把台阶几何同步到 `assets/scene_crab.xml` |
+| `bake_crab.py`      | 跑 `gen_crab_stairs.py` + `crab_climb.py`（脚本烘焙的参考动作，无策略网络），录成 `assets/motion_crab.bin`，并把台阶几何同步到 `assets/scene_crab.xml` |
 | `bake_squat.py`     | 把 `logs/export/squat_{down,up}.npz` 的 38 维 qpos 按关节名对账成网页 36 维，逐帧做落地自检，烘焙出 `motion_squat_{down,up,cycle}.bin/.json`（纯运动学，不跑策略） |
+| `bake_crawl.py`     | 把 `scripts/build_prone_crawl_sequence.py` 合并的贴地爬行序列（38 维）按关节名重映射成 36 维，四元数归一化 + 站姿段落地自检，烘焙出 `motion_crawl.bin/.json`（趴姿接触点是手/躯干，不套用脚底全程贴地判据） |
 | `fetch-three.mjs`   | 下载 three.js 与 addons                                 |
 | `selfsign.mjs`      | 纯 JS 生成自签证书（无 openssl 依赖，SAN 含本机所有内网 IP）             |
 | `make-cert.mjs`     | 证书生成的封装                                              |
@@ -578,24 +613,24 @@ A：缺 `assets/motion_climb_policy.bin`。跑一次 `python web/tools/bake_clim
 `normal_depth.onnx` + `universal_test` 地形；工作区路径默认由脚本自身位置推导，
 目录搬过家也不用改，特殊情况才用 `--ws <路径>` 指定。
 
-**Q：面板里选「参考轨迹 · 蹲下 / 起立」提示"加载失败"？**  
+**Q：选了「参考动作 · 蹲下起立循环」（或 `?motion=squat_down`）提示"加载失败"？**  
 A：缺 `assets/motion_squat_*.bin/.json`。依次跑
 `python scripts/export_squat_npz.py` 和 `python web/tools/bake_squat.py` 即可，
 全程只依赖本机 numpy + mujoco，不需要 GPU 和训练。若报「脚底没有贴在 z=0 上」，
 说明轨迹与 `web/assets/elf3.xml` 不配套，按提示用 `--z-offset` 补偿。
 
 **Q：为什么蹲起回放里的机器人不会倒，也不像训练回放那样有抖动？**  
-A：这三段是**纯运动学参考轨迹**，网页端只做 `mj_kinematics` + 插值摆位，
+A：这几段是**纯运动学参考动作**，网页端只做 `mj_kinematics` + 插值摆位，
 不跑 `mj_step`、没有重力和接触，也不加载 ONNX 策略。要看 RL 策略实际控制的
 效果，得在服务器把闭环仿真的 qpos 录下来再烘焙；详见 §7.8 与
 `docs/squat_rl_training.md` §9。
 
-**Q：面板里选「脚本步态 · 螃蟹步横移上楼」提示"加载失败"？**  
+**Q：面板里选「参考动作 · 螃蟹步横移上楼」提示"加载失败"？**  
 A：缺 `assets/motion_crab.bin`（或 `assets/scene_crab.xml`）。跑一次
 `python web/tools/bake_crab.py` 生成即可，它会顺带写好台阶几何和 `manifest.json`。
 换一套台阶：`python web/tools/bake_crab.py --seed 7`。
 
-**Q：选「脚本步态 · 螃蟹步横移上楼」后看不到台阶？**  
+**Q：选「参考动作 · 螃蟹步横移上楼」后看不到台阶？**  
 A：地形由「显示 → **螃蟹步台阶**」这个复选框控制，选回放时会自动勾上。
 如果手动取消了，机器人会像在踏空 —— 再勾回来即可。注意它和「楼梯 / 障碍」是
 两套独立地形，选不同回放时脚本会自动切换，也可以两个都勾上看全景。

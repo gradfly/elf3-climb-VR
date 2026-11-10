@@ -95,8 +95,13 @@ def elbow_target_for(wrist: np.ndarray, shoulder: np.ndarray = SHOULDER_R,
 class Params:
     elbow_weight: float = 0.35       # 肘位置约束权重（相对腕=1.0）
     prior_w: float = 3e-5            # 轻微零空间正则，抑制反关节
-    wrist_x: float = 0.00            # 敬礼手掌朝向
-    wrist_y: float = -0.30
+    # 手掌朝向：腕绕**前臂轴**（r_wrist_x）滚转。手 mesh 在 wrist_z_link 里的
+    # 局部轴实测为：**+x = 四指方向、+z = 掌心法向**（body 局部包围盒 x 17.9 cm
+    # 最长 = 手长，y 6.2 = 手宽，z 8.4 = 握拳厚度）。
+    # roll 0 时掌心朝下（−0.92）；+90° 把掌心转到朝后（−0.97）—— 掌缘朝前、
+    # 手背朝观众，正是军礼的立掌；−90° 反过来让掌心正朝前（+0.92），是要避免的方向。
+    wrist_roll_deg: float = 90.0
+    wrist_y: float = -0.30           # 掌根偏摆（保持原值，观感用）
     wrist_z: float = 0.25
     wrist_right: float = 0.10        # 腕相对基准手位向右（−y）水平移动量
     # 左臂 / 立正姿态的自然下垂：大臂沿 −z 垂下，小臂必须靠 elbow_y≈90°
@@ -125,6 +130,25 @@ def attention_q(p: Params) -> np.ndarray:
         q[i + 3] = p.l_elbow
         q[i + 4:i + 7] = 0.0
     return q
+
+
+def palm_frame(m: mujoco.MjModel, d: mujoco.MjData, side: str = "r"):
+    """手 mesh 的部位坐标：返回 (掌心法向, 手指方向) 的世界向量。
+
+    手 mesh 挂在 ``<side>_wrist_z_link`` 上，实测其 **body 局部 +x = 四指方向、
+    +z = 掌心法向**。判据是顶点包围盒：x 17.9 cm（手长，指尖伸出）、
+    y 6.2 cm（手宽）、z 8.4 cm（半握拳的厚度），且滚 −90° 时 +z 面正对相机
+    —— 那一档观众看到的是掌心（用户正是在这一版抱怨"手心朝前"）。
+
+    **踩过的坑**：别用 ``-R[:,0]`` 当掌心法向。那是指尖的反方向（指向腕），
+    会得出"−90° 是立掌"的错误结论，把掌心正好转到镜头前。也别用 ``geom_rbound``
+    或包围盒判朝向——握拳造型三轴尺寸接近，分辨不出手掌转没转。
+    """
+    b = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, f"{side}_wrist_z_link")
+    if b < 0:
+        raise RuntimeError("找不到手部 body（先跑 scripts/add_hand_mesh.py）")
+    R = d.xmat[b].reshape(3, 3)
+    return R[:, 2].copy(), R[:, 0].copy()
 
 
 def solve_salute(ik: IK, p: Params) -> tuple[np.ndarray, dict]:
@@ -158,11 +182,13 @@ def solve_salute(ik: IK, p: Params) -> tuple[np.ndarray, dict]:
     resid = best[2]
     # 手掌朝向（腕 3 个关节不参与腕的位置 IK，直接给）
     i = IDX["r_shoulder_y"]
-    q[i + 4], q[i + 5], q[i + 6] = p.wrist_x, p.wrist_y, p.wrist_z
+    q[i + 4] = math.radians(p.wrist_roll_deg)
+    q[i + 5], q[i + 6] = p.wrist_y, p.wrist_z
     ik.d.qpos[7:36] = q
     mujoco.mj_forward(ik.m, ik.d)
     wrist = ik.body_pos("r_wrist_y_link").copy()
     elbow = ik.body_pos("r_elbow_y_link").copy()
+    palm_n, finger_d = palm_frame(ik.m, ik.d, "r")
     # 左臂（不参与 IK）顺手量一下：自然下垂要求小臂方向几乎竖直向下
     lw = ik.body_pos("l_wrist_y_link").copy()
     le = ik.body_pos("l_elbow_y_link").copy()
@@ -172,6 +198,9 @@ def solve_salute(ik: IK, p: Params) -> tuple[np.ndarray, dict]:
                 wrist_to_head_mm=round(float(np.linalg.norm(wrist - HEAD_CENTER)) * 1000, 1),
                 wrist_y_m=round(float(wrist[1]), 4),
                 wrist_right_m=p.wrist_right,
+                wrist_roll_deg=p.wrist_roll_deg,
+                palm_normal=[round(float(v), 3) for v in palm_n],
+                finger_dir=[round(float(v), 3) for v in finger_d],
                 left_forearm_down=round(float(-lfa[2] / np.linalg.norm(lfa)), 4),
                 left_wrist=[round(float(v), 3) for v in lw],
                 ik_residual_mm=round(resid * 1000, 2),
@@ -230,6 +259,15 @@ def report(qpos: np.ndarray, info: dict, p: Params) -> None:
           f"IK 残差 {info['ik_residual_mm']:.2f} mm")
     print(f"  腕 -> 头中心 {info['wrist_to_head_mm']:.0f} mm（手位在头右侧外）")
     print(f"  右腕向右平移 {info['wrist_right_m']*100:.0f} cm  ->  y = {info['wrist_y_m']:+.3f} m")
+    pn, fd = info["palm_normal"], info["finger_dir"]
+    print(f"  右手腕绕前臂滚 {info['wrist_roll_deg']:+.0f}°  掌心法向 "
+          f"({pn[0]:+.2f},{pn[1]:+.2f},{pn[2]:+.2f})  手指方向 "
+          f"({fd[0]:+.2f},{fd[1]:+.2f},{fd[2]:+.2f})")
+    ax = int(np.argmax(np.abs(pn)))
+    face = ("朝前" if pn[0] > 0 else "朝后", "朝内(朝头)" if pn[1] > 0 else "朝外",
+            "朝上" if pn[2] > 0 else "朝下")[ax]
+    print(f"    -> 掌心主要{face}，前向分量 {pn[0]:+.2f}"
+          f"（负 = 手背朝前，正是军礼的立掌）")
     print(f"  左臂小臂竖直度 {info['left_forearm_down']:.4f}"
           f"（1.0 = 完全垂直向下），左腕 {info['left_wrist']}")
     print(f"  右臂解算角：{info['salute_joints_deg']}")
@@ -248,12 +286,15 @@ def main() -> None:
                     help="右手腕沿机器人右侧（−y）水平移动的米数")
     ap.add_argument("--l-elbow", type=float, default=1.52,
                     help="左臂肘关节角（rad），1.57≈90° 才让小臂垂下")
+    ap.add_argument("--wrist-roll", type=float, default=90.0,
+                    help="右腕绕前臂轴滚转角（度）：0=掌心朝下，+90=立掌（手背朝前、掌缘朝前）")
     ap.add_argument("--check-only", action="store_true")
     ap.add_argument("--out-dir", default=str(DATA))
     args = ap.parse_args()
 
     p = Params(elbow_weight=args.elbow_weight, t_hold=args.hold,
-               wrist_right=args.wrist_right, l_elbow=args.l_elbow)
+               wrist_right=args.wrist_right, l_elbow=args.l_elbow,
+               wrist_roll_deg=args.wrist_roll)
     ik = IK()
     qpos, info = build(p, ik)
     report(qpos, info, p)

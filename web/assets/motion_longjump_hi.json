@@ -1,0 +1,38 @@
+{
+  "fps": 50.0,
+  "dt": 0.02,
+  "model": "elf3.xml",
+  "scene": "平地（选这段回放时自动隐藏障碍）",
+  "policy": null,
+  "camera": "jump",
+  "kind": "jump",
+  "name": "longjump_hi",
+  "label": "参考动作 · 跳高",
+  "loop": false,
+  "freezeAtEnd": true,
+  "source": "long_jump_real.py 纯自驱闭环仿真（PD + 摆臂 + 蹬腿，零冲量注入）录制的 29 关节 qpos，经 web/tools/bake_longjump.py 按关节名重排成网页 36 维 + 逐帧落地自检",
+  "zOffset": 0.0,
+  "refNpz": [
+    "sim/vendor/bxi_controller_ros2/src/bxi_example_py_elf3/data/mujoco_simulation/long_jump_real_hi.npz"
+  ],
+  "stats": {
+    "nframes": 312,
+    "fps": 50.0,
+    "durationS": 6.24,
+    "startComZ": 1.0339,
+    "peakComZ": 1.3351,
+    "jumpHeightRelCm": 30.1,
+    "travelXm": 0.088,
+    "footMinZCm": -0.48,
+    "footMaxZCm": 29.37,
+    "flightFrames": 25,
+    "flightS": 0.5
+  },
+  "bin": "motion_longjump_hi.bin",
+  "generated": "2026-11-10T15:31:22",
+  "version": "2026-11-10T15:31:22-312",
+  "nframes": 312,
+  "nq": 36,
+  "duration": 6.24,
+  "qposFormat": "float32-le, row-major, (nframes, nq)"
+}

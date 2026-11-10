@@ -40,6 +40,13 @@ cd - && python scripts/check_prone_crawl.py --traj <.../prone_gait_traj.npz>  # 
 - 字段统一是 `time / qpos(N,38) / dt / contact_flags / action / meta`
 - 场景 `elf3_prone.xml` + `prone_flat.xml`（自动生成）
 - 验收报告 `logs/prone_crawl/report_standup.txt` / `report_gait.txt` + 对应 `contact_*.csv`
+- **合并动作序列**（见 §9）：`python scripts/build_prone_crawl_sequence.py [--preset fast]`
+  产出 `prone_crawl_sequence_traj.npz`（normal 649 帧 / 12.98 s）= 动作 1 的 250 帧
+  + 动作 2 的 399 帧，`meta.sequence` 记录分段边界；
+  `prone_replay.py --traj <该文件> --mode kin` 可一播到底。
+- **网页 WASM 回放**（见 §9）：`python web/tools/bake_crawl.py` 把上面那份序列按关节名
+  重映射成 36 维 float32，产出 `web/assets/motion_crawl.bin/.json`；下拉菜单
+  「参考动作 · 贴地爬行」或 `?motion=crawl&scene=single`。
 - 预览：`python scripts/render_prone_preview.py --preset fast` 生成
   `logs/prone_crawl/a1_sheet_p1.png` / `a1_sheet_p2.png`（动作 1 十个阶段 × 两视角）、
   `a1_standup_final.gif` / `a2_gait_final.gif`
@@ -704,3 +711,66 @@ u≥PLANT_U（0.44，手撑地）之后手掌不能重新离地（后伸期实�
 - 没有导出给 mjlab 的参考表（`train/assets/ref_tables/` 里是 `crab_ref_v1.npz` 那套
   `q[root, tread, frames, 29]` 结构，本轨迹是单档平地，需要另外定义键）。下一步训练时再补。
 - 过渡段脚是"拖"到位的（设计上允许滑），所以验收脚本的滑移只统计循环段。
+
+## 9. 合并动作序列与网页 WASM 回放（2026-11-10）
+
+把「动作 1 + 动作 2」连成一条序列给真机 / 网页回放，涉及两个新脚本：
+
+```bash
+python scripts/build_prone_crawl_sequence.py              # -> prone_crawl_sequence_traj.npz
+python web/tools/bake_crawl.py                            # -> web/assets/motion_crawl.bin/.json
+node web/tools/make-manifest.mjs
+node web/tools/verify.mjs http://localhost:8080/           # 79/79，含 5 条 crawl 专项断言
+```
+
+### 9.1 为什么自己拼，而不是用 `--merge`
+
+`run_crawl.sh --merge` 产出的 `prone_crawl_traj.npz` 是 join 版（两段一起求解），
+接缝处二阶差分 514 rad/s²，是当初拆段的直接原因；而且它的 `meta` 里还是旧参数。
+**split 版才是对的起点**：`build_split()` 用 `blend_tail_to(48)` 把动作 1 末 48 帧
+五次 Hermite 对齐到动作 2 首帧，实测 `qpos` 差 **1.29e-4 rad**（fast 1.36e-4）。
+
+拼接时**丢掉动作 2 的首帧** —— 它与动作 1 末帧几乎完全重复，留着会多一次 20 ms
+定格。结果 normal 档 250 + 399 = **649 帧 / 12.98 s**，X 向推进 1.098 m；
+fast 档 250 + 169 = 419 帧 / 8.38 s。接缝处角加速度 223.7 rad/s²，
+低于 gait 段自身的峰值，不是新的最差点。`meta.sequence` 存分段边界、接缝残差、
+每循环推进量；`--cycles N` 可以把爬行段重复 N 遍并按 `travel` 累加基座 x
+（不累加会让第二个循环把机器人瞬移回原点）。
+
+### 9.2 38 → 36 维与两种"落地"判据
+
+网页模型 `web/assets/elf3.xml` 是 nq=36（少 `head_z/head_y`），
+`bake_crawl.py` 复用 `bake_squat.build_qpos_remap()` **按关节名**取列。
+源 qpos 的四元数只保留 4 位小数（范数偏 7.45e-5），烘焙时统一归一化 ——
+网页端 `mj_kinematics` 不会替你归一化，非单位四元数会让旋转矩阵轻微缩放。
+
+**不能照抄蹲起 / 正步的「脚底全程贴地」判据**：趴姿时脚在身后抬起，
+接触点是手 + 躯干。这里只查开头 60 帧（站姿段）视觉最低点 -0.73~-0.57 cm，
+以及全程最低点不低于 -12 cm（防整体陷地）。
+
+**已知视觉遗留（源轨迹固有，不是重映射出错）**：撑地瞬间 f107 左右手 mesh
+最低 **-8.95 cm**、趴姿段约 -5 cm。`elf3_prone.xml` 与 web 端用的是同一份
+`l_hand.STL` / `r_hand.STL`（md5 一致）、同样的编译期 `geom_pos/quat`，
+两端逐帧算出来的数字完全一样；数值验收只看碰撞代理（腕部 r=0.05 球），
+所以一直没查出来。别用 `--z-offset` 硬抬 9 cm（站立时脚会整体离地），
+也别改手腕姿态（会与真机轨迹不一致）；真要消除得改动作 1 的手腕朝向设计。
+`motion_crawl.json` 的 `stats.visualMinZCm` / `handMinZCm` 如实记录了这个值。
+
+### 9.3 网页端行为
+
+`kind="crawl"`、`loop=false` + `freezeAtEnd=true`（播完冻结在趴姿，不跳回站立），
+`camera="crawl"` 专用低机位 `[1.65, 1.02, -1.10] → [0, 0.42, -0.15]`：
+站姿 1.03 m 到趴姿 0.10 m 都得在画面里，目标点必须压到 0.42 m。
+这段回放还把视角跟随的 lerp 从默认 0.07 单独提到 **0.25** —— 它沿 three -Z
+推进 1.1 m 且包围盒中心下降约 0.57 m，低帧率（无头浏览器实测 8~10 fps）下
+0.07/帧收敛太慢，末帧机器人会被挤到画面右下裁掉。
+
+菜单项「参考动作 · 贴地爬行（蹲下→撑地→后伸→爬行）」，
+也可直接开 `?motion=crawl&scene=single`（矩阵 10×20 的机位太远，看不清贴地细节）。
+`web/tools/verify.mjs` 里加了 5 条专项断言：下拉项存在、649 帧 / 播完冻结、
+z 1.034→0.099、分段 250+399 / 接缝 f250、自动切低机位。
+
+快档可用 `python web/tools/bake_crawl.py --preset fast --name crawl_fast`
+另出一份，但它的单帧关节跳变 0.4477 rad（动作 2 的万向锁抖动被 0.85 s 周期放大），
+网页回放会明显顿挫，所以**默认只下发 normal 档**。
+

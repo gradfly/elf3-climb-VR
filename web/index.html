@@ -41,6 +41,7 @@
   </div>
   <dl>
     <div><dt>状态</dt><dd id="hud-mode">静止站立</dd></div>
+    <div><dt>场景</dt><dd id="hud-scene">矩阵 10×20</dd></div>
     <div><dt>回放</dt><dd id="hud-motion">—</dd></div>
     <div><dt>结构</dt><dd id="hud-model">—</dd></div>
     <div><dt>渲染</dt><dd id="hud-render">—</dd></div>
@@ -51,6 +52,13 @@
 <section id="panel" class="panel hidden">
   <button class="fold" id="panel-fold" title="折叠/展开">⚙</button>
   <div class="body">
+    <h2>场景</h2>
+    <div class="seg" id="scene-mode" role="radiogroup" aria-label="场景">
+      <label><input type="radio" name="opt-scene" value="single" /><span>单人</span></label>
+      <label class="on"><input type="radio" name="opt-scene" value="matrix" checked /><span>矩阵 10×20</span></label>
+    </div>
+    <p class="note" id="scene-note">矩阵 = 把单人场景复制 <b>10 行 × 20 列 = 200 份</b>，同一段动画同步播放；地形 / 阴影不复制。</p>
+
     <h2>运动仿真</h2>
     <label class="rowsel"><span>回放</span>
       <select id="opt-motion">
@@ -58,14 +66,13 @@
         <option value="fight_policy">策略仿真 · 打拳</option>
         <option value="fight_ref">参考动作 · 打拳</option>
         <option value="climb_policy">策略仿真 · 爬楼梯</option>
-        <option value="crab">脚本步态 · 螃蟹步横移上楼</option>
+        <option value="crab">参考动作 · 螃蟹步横移上楼</option>
         <option value="policy_crab">策略仿真 · 螃蟹步横移上楼</option>
-        <option value="squat_cycle">参考轨迹 · 蹲下起立循环</option>
-        <option value="squat_down">参考轨迹 · 下蹲（播完保持蹲姿）</option>
-        <option value="squat_up">参考轨迹 · 起立（播完保持站姿）</option>
-        <option value="goose_walk">脚本动作 · 走正步（前进）</option>
-        <option value="goose_inplace">脚本动作 · 原地正步（循环）</option>
-        <option value="salute">脚本动作 · 敬礼（右手军礼）</option>
+        <option value="squat_cycle">参考动作 · 蹲下起立循环</option>
+        <option value="crawl">参考动作 · 贴地爬行（蹲下→撑地→后伸→爬行）</option>
+        <option value="goose_walk">参考动作 · 走正步（前进）</option>
+        <option value="parade_seq">参考动作 · 正步 + 敬礼（连贯）</option>
+        <option value="longjump_hi">参考动作 · 高跳（自驱摆臂 + 蹬腿）</option>
       </select>
     </label>
     <label class="rowsel"><span>倍速</span>
@@ -81,7 +88,7 @@
       <button id="btn-motion-restart">从头播放</button>
       <button id="btn-motion-pause">暂停</button>
     </div>
-    <p class="note" id="motion-note">回放数据由 <code>tools/bake_motion.py</code> 等在本机跑一遍 MuJoCo 仿真后录制；蹲下 / 起立由 <code>tools/bake_squat.py</code> 直接烘焙参考轨迹。</p>
+    <p class="note" id="motion-note">回放数据由 <code>tools/bake_motion.py</code> 等在本机跑一遍 MuJoCo 仿真后录制；蹲下 / 起立由 <code>tools/bake_squat.py</code> 直接烘焙参考动作。</p>
 
     <h2>显示</h2>
     <label class="chk"><input type="checkbox" id="opt-robot" checked /><span>机器人</span></label>
@@ -100,6 +107,7 @@
       <button data-view="top">俯视</button>
       <button data-view="crab">螃蟹步</button>
       <button data-view="squat">蹲起 3/4</button>
+      <button data-view="grid">矩阵全景</button>
       <button data-view="wide">全景</button>
     </div>
 
@@ -115,6 +123,7 @@
   <div class="col">
     <h3>桌面</h3>
     <p>左键拖动 = 旋转 · 滚轮 = 缩放 · 右键拖动 = 平移</p>
+    <p>右侧「场景」= 单人（1 个机器人）/ 矩阵（10×20 = 200 份同步播放）</p>
     <p>右侧「运动仿真」= 回放策略跟踪打拳的动作</p>
   </div>
   <div class="col">

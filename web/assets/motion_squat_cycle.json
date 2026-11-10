@@ -58,7 +58,7 @@
     "durationS": 6.46
   },
   "name": "squat_cycle",
-  "label": "参考轨迹 · 蹲下起立循环",
+  "label": "参考动作 · 蹲下起立循环",
   "loop": true,
   "freezeAtEnd": false,
   "mode": "cycle",

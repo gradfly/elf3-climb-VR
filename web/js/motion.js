@@ -12,7 +12,7 @@
  * 出现缩放，MuJoCo 的 mj_forward 不会帮你归一化，所以这里必须 slerp）。
  *
  * meta.loop === false 时播完不会跳回第一帧，而是冻结在末帧 —— 单段「下蹲 / 起立」
- * 参考轨迹用这个语义（和真机部署的 freeze_at_end 一致）；循环版不设该字段。
+ * 单段参考动作（下蹲 / 起立）用这个语义（和真机部署的 freeze_at_end 一致）；循环版不设该字段。
  */
 
 export class MotionPlayer {
@@ -162,10 +162,11 @@ export class MotionPlayer {
 
   /** 供 HUD 显示 */
   describe() {
-    const kindText = this.kind === 'ref' ? '参考动作'
-      : this.kind === 'squat' ? '参考轨迹'
-        : this.kind === 'crab' ? '脚本步态'
-          : '策略仿真';
+    // 面板里统一叫「参考动作」：参考动作 / 参考轨迹（蹲起）/ 脚本步态（螃蟹步）/
+    // 脚本动作（正步）四类数据都是本机烘焙好的轨迹，只有 onnx 闭环录制的才叫策略仿真。
+    const kindText = (this.kind === 'ref' || this.kind === 'squat'
+      || this.kind === 'crab' || this.kind === 'parade' || this.kind === 'jump'
+      || this.kind === 'crawl') ? '参考动作' : '策略仿真';
     return `${this.label} · ${kindText}`
       + ` · ${this.time.toFixed(1)}/${this.duration.toFixed(1)} s`;
   }

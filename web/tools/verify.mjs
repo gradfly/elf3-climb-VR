@@ -94,7 +94,9 @@ try {
       minZ:+s.robotMinZ().toFixed(4),
       box:(()=>{const b=s.robotBounds();return [+b.min.x.toFixed(3),+b.max.x.toFixed(3),+b.min.z.toFixed(3),+b.max.z.toFixed(3)]})(),
       children:s.root.children.length};})()`);
-  check('30 个视觉网格全部建好', scene.robotGeoms === 30 && scene.geoms === 30, `${scene.geoms} 个几何 / ${scene.tris} 三角面`);
+  check('视觉网格全部建好（几何数 = 机器人网格数）',
+    scene.robotGeoms === scene.geoms && scene.robotGeoms >= 30,
+    `${scene.geoms} 个几何 / ${scene.tris} 三角面`);
   check('脚底对齐地面（minZ ≈ 0）', Math.abs(scene.minZ) < 0.01, `minZ = ${scene.minZ} m`);
   check('机器人高度合理（≈1.5 m）', scene.box[3] > 1.3 && scene.box[3] < 1.8, `z ∈ [${scene.box[2]}, ${scene.box[3]}]`);
   check('three.js 场景对象数与几何数一致', scene.children >= scene.ngeom, `${scene.children} 个对象`);
@@ -116,13 +118,65 @@ try {
   check('半透明 VR 按钮带独立样式类（磨砂玻璃观感）',
     (ui.xrBtns.find((b) => b.id === 'xr-ar') || {}).cls === 'xr-btn xr-ar',
     (ui.xrBtns.find((b) => b.id === 'xr-ar') || {}).cls);
-  check('8 个视角预设齐全', ui.views.length === 8, ui.views.join(','));
+  check('9 个视角预设齐全（含矩阵全景）', ui.views.length === 9, ui.views.join(','));
   const wantOpts = ['opt-robot', 'opt-stairs', 'opt-crab', 'opt-floor', 'opt-shadow',
     'opt-collision', 'opt-sim', 'opt-follow'];
   check('显示/物理/跟随开关齐全', wantOpts.every((id) => ui.opts.includes(id)), ui.opts.join(','));
   check('运动仿真控件齐全（回放/倍速/暂停）',
     !!(await evalJs(ws, `!!(document.getElementById('opt-motion')&&document.getElementById('opt-motion-speed')&&document.getElementById('btn-motion-pause')&&document.getElementById('btn-motion-restart'))`)));
   console.log('  加载日志:'); for (const l of ui.log) console.log('    ' + l);
+
+  // 2.5 场景模式（单人 / 矩阵）
+  const scn = await evalJs(ws, `(()=>{const s=__elf.mjScene,$=id=>document.getElementById(id);
+    const out={mode:__elf.sceneMode,
+      checked:[...document.querySelectorAll('input[name="opt-scene"]')].filter(i=>i.checked).map(i=>i.value),
+      hud:$('hud-scene').textContent.trim(),
+      grid:s.grid?{rows:s.grid.rows,cols:s.grid.cols,count:s.grid.count,
+        meshes:s.grid.meshes.length,perInst:s.grid.meshes[0].count}:null,
+      robotGeoms:s.robotGeomIds.length,
+      robotShownOff:s.objs[s.robotGeomIds[0]].visible,
+      stairsOn:s.opts.showStairs, crabOn:s.opts.showCrab,
+      cam:[+__elf.camera.position.x.toFixed(2),+__elf.camera.position.y.toFixed(2),
+        +__elf.camera.position.z.toFixed(2)],
+      camDist:+__elf.camera.position.distanceTo(__elf.controls.target).toFixed(2),
+      calls:__elf.renderer.info.render.calls};
+    const el=$('opt-robot'); el.checked=false; el.dispatchEvent(new Event('change'));
+    out.gridHidden=s.grid.meshes.every(m=>!m.visible);
+    el.checked=true; el.dispatchEvent(new Event('change'));
+    out.gridVisible=s.grid.meshes.every(m=>m.visible);
+    return out;})()`);
+  check('默认进矩阵场景（单选按钮 matrix / HUD 显示矩阵）',
+    scn.mode === 'matrix' && scn.checked.join() === 'matrix' && scn.hud.includes('矩阵'),
+    `mode=${scn.mode} checked=${scn.checked} hud=${scn.hud}`);
+  check('矩阵 = 10 行 × 20 列 = 200 份实例（每批 InstancedMesh 画 200 次）',
+    !!scn.grid && scn.grid.rows === 10 && scn.grid.cols === 20 && scn.grid.count === 200
+      && scn.grid.perInst === 200 && scn.grid.meshes === scn.robotGeoms,
+    JSON.stringify(scn.grid));
+  check('矩阵模式隐藏地形（地形不参与复制）',
+    scn.stairsOn === false && scn.crabOn === false,
+    `showStairs=${scn.stairsOn} showCrab=${scn.crabOn}`);
+  check('矩阵模式原件不画（只画实例）', scn.robotShownOff === false);
+  // 机位只校验「是远景」，具体数值允许调（VIEWS.grid 经常被按观感微调）
+  check('矩阵机位是远景（相机离方阵中心 6 m 以上，在 OrbitControls 上限内）',
+    scn.camDist > 6 && scn.camDist <= 40,
+    `camera=${JSON.stringify(scn.cam)} 距 target ${scn.camDist} m`);
+  check('「机器人」开关能同时控制 200 份实例', scn.gridHidden && scn.gridVisible);
+  console.log(`  （矩阵模式绘制批次 ${scn.calls} 次 / 单人 30 个几何 —— 实例化没有把 draw call 乘 200）`);
+
+  const scn2 = await evalJs(ws, `(()=>{const s=__elf.mjScene,$=id=>document.getElementById(id);
+    __elf.setSceneMode('single');
+    return {mode:__elf.sceneMode, gridCleared:!s.grid,
+      robotVisible:s.objs[s.robotGeomIds[0]].visible,
+      stairsOn:s.opts.showStairs, hud:$('hud-scene').textContent.trim(),
+      radio:[...document.querySelectorAll('input[name="opt-scene"]')].filter(i=>i.checked).map(i=>i.value),
+      labelOn:[...document.querySelectorAll('#scene-mode label')].filter(l=>l.classList.contains('on')).length,
+      children:s.root.children.length};})()`);
+  check('切回单人：实例全部销毁、原件重新显示',
+    scn2.mode === 'single' && scn2.gridCleared && scn2.robotVisible === true,
+    `grid=${scn2.gridCleared} robot=${scn2.robotVisible} children=${scn2.children}`);
+  check('切回单人：地形恢复、单选按钮与高亮同步',
+    scn2.stairsOn === true && scn2.radio.join() === 'single' && scn2.labelOn === 1,
+    `showStairs=${scn2.stairsOn} radio=${scn2.radio} 高亮=${scn2.labelOn} hud=${scn2.hud}`);
 
   // 3. 显示开关
   const toggles = await evalJs(ws, `(async()=>{const s=__elf.mjScene,out={};
@@ -152,7 +206,7 @@ try {
       out[b.dataset.view]=[+c.x.toFixed(2),+c.y.toFixed(2),+c.z.toFixed(2),+t.y.toFixed(2)];
     } return out;})()`);
   const allMoved = Object.values(views).every((v) => v.some((x) => x !== 0));
-  check('8 个视角预设均可用', Object.keys(views).length === 8 && allMoved, JSON.stringify(views));
+  check('9 个视角预设均可用', Object.keys(views).length === 9 && allMoved, JSON.stringify(views));
 
   // 5. 物理开关 + 复位
   const phys = await evalJs(ws, `(async()=>{
@@ -282,7 +336,7 @@ try {
   check('选“策略仿真 · 爬楼梯”会自动打开“楼梯 / 障碍”',
     climb2.beforeHide === false && climb2.afterPick === true, JSON.stringify(climb2));
 
-  // 5.6 螃蟹步横移回放（脚本步态，另一套地形）
+  // 5.6 螃蟹步横移回放（参考动作 · 脚本烘焙，另一套地形）
   const crab = await evalJs(ws, `(async()=>{const $=id=>document.getElementById(id);
     __elf.setMotion('off');
     const r = await __elf.setMotion('crab');
@@ -307,12 +361,12 @@ try {
   check('螃蟹步回放真的在横移（y 增大）', crab.movedY > 0.02, `Δy=${crab.movedY} m`);
   check('螃蟹步回放自动切到“螃蟹步”机位（相机在 -Z 侧）',
     crab.camZ < -3, `camera.z=${crab.camZ}`);
-  check('螃蟹步回放 HUD 显示“脚本步态”',
-    crab.mode.includes('运动仿真') && crab.hud.includes('脚本步态'), `${crab.mode} · ${crab.hud}`);
+  check('螃蟹步回放 HUD 显示“参考动作”',
+    crab.mode.includes('运动仿真') && crab.hud.includes('参考动作'), `${crab.mode} · ${crab.hud}`);
   console.log(`  （螃蟹步回放统计: ${JSON.stringify(crab.stats && {
     steps: crab.stats.steps, maxTop: crab.stats.maxTop, travelY: crab.stats.travelY })}）`);
 
-  // 5.7 蹲下 / 起立参考轨迹（纯运动学，无策略网络）
+  // 5.7 蹲下 / 起立参考动作（纯运动学，无策略网络）
   const squat = await evalJs(ws, `(async()=>{const $=id=>document.getElementById(id);
     __elf.setMotion('off');
     const r = await __elf.setMotion('squat_cycle');
@@ -331,9 +385,13 @@ try {
       opts:[...$('opt-motion').options].map(o=>o.value) };
     __elf.setMotion('off');
     return out;})()`);
-  check('蹲起三段回放都在「回放」下拉里',
-    ['squat_down','squat_up','squat_cycle'].every(v=>squat.opts.includes(v)),
+  check('蹲起循环在下拉里，单段下蹲 / 起立已从下拉移除',
+    squat.opts.includes('squat_cycle')
+      && !squat.opts.includes('squat_down') && !squat.opts.includes('squat_up'),
     squat.opts.filter(v=>v.startsWith('squat')).join(', '));
+  check('下拉里不再有「原地正步 / 敬礼」两个已下线选项',
+    !squat.opts.includes('goose_inplace') && !squat.opts.includes('salute'),
+    squat.opts.join(', '));
   check('蹲下起立循环加载成功（kind=squat，loop=true）',
     squat.loaded && squat.kind === 'squat' && squat.loop === true && squat.nframes > 300,
     `${squat.nframes} 帧｜${squat.hud}`);
@@ -345,8 +403,8 @@ try {
     squat.crabOn === false && squat.stairsOn === false
       && squat.camX > 1 && squat.camZ > 1,
     `stairs=${squat.stairsOn} crab=${squat.crabOn} / cam=(${squat.camX}, ${squat.camZ})`);
-  check('蹲起回放 HUD 显示「参考轨迹」',
-    squat.mode.includes('参考轨迹') && squat.hud.includes('参考轨迹'),
+  check('蹲起回放 HUD 显示「参考动作」',
+    squat.mode.includes('参考动作') && squat.hud.includes('参考动作'),
     `${squat.mode} · ${squat.hud}`);
 
   const frozen = await evalJs(ws, `(async()=>{const $=id=>document.getElementById(id);
@@ -372,6 +430,104 @@ try {
   check('点「从头播放」后解除冻结',
     frozen.afterRestart.paused === false && frozen.afterRestart.time === 0
       && frozen.afterRestart.btn === '暂停', JSON.stringify(frozen.afterRestart));
+
+  // 5.6 贴地爬行：动作 1（站立→蹲下→撑地→后伸→趴姿）+ 动作 2（爬行）合并序列
+  const crawlSeq = await evalJs(ws, `(async()=>{
+    const r = await __elf.setMotion('crawl');
+    if (!r) return { loaded:false };
+    const m = __elf.motion;
+    const out = {
+      loaded:true, kind:m.kind, nframes:m.nframes, nq:m.nq, loop:m.loop,
+      freeze:m.meta.freezeAtEnd, camera:m.meta.camera,
+      cam:__elf.camera.position.toArray().map(v=>+v.toFixed(2)),
+      stats:m.meta.stats,
+      z0:+m.frames[2].toFixed(3),
+      zEnd:+m.frames[(m.nframes-1)*m.nq+2].toFixed(3),
+      opts:[...document.getElementById('opt-motion').options].map(o=>o.value),
+    };
+    m.paused=true; m.seek(2.20);                 // u=0.44 双手撑地
+    await new Promise(res=>setTimeout(res,350));
+    out.zPlant=+__elf.data.qpos[2].toFixed(3);
+    __elf.setMotion('off');
+    return out;})()`);
+  check('贴地爬行合并序列在下拉里且加载成功',
+    crawlSeq.loaded && crawlSeq.opts.includes('crawl')
+      && crawlSeq.kind === 'crawl' && crawlSeq.nq === 36,
+    `opts 含 crawl=${crawlSeq.opts?.includes('crawl')}｜kind=${crawlSeq.kind}`);
+  check('合并序列 649 帧、播完冻结（不跳回站立）',
+    crawlSeq.nframes === 649 && crawlSeq.loop === false && crawlSeq.freeze === true,
+    `${crawlSeq.nframes} 帧｜loop=${crawlSeq.loop}`);
+  check('序列真的从站姿走到趴姿（z 1.03 → 0.10）',
+    Math.abs(crawlSeq.z0 - 1.034) < 0.01 && crawlSeq.zEnd < 0.15,
+    `z0=${crawlSeq.z0} zEnd=${crawlSeq.zEnd} zPlant=${crawlSeq.zPlant}`);
+  check('分段信息完整（250 帧过渡 + 399 帧爬行，接缝 f250）',
+    crawlSeq.stats?.standupFrames === 250 && crawlSeq.stats?.gaitFrames === 399
+      && crawlSeq.stats?.seamFrame === 250,
+    JSON.stringify({standup:crawlSeq.stats?.standupFrames,
+      gait:crawlSeq.stats?.gaitFrames, seam:crawlSeq.stats?.seamFrame}));
+  check('贴地爬行自动切到低机位（相机在 +X / -Z 侧）',
+    crawlSeq.camera === 'crawl' && crawlSeq.cam[0] > 1 && crawlSeq.cam[2] < 0,
+    `camera=${crawlSeq.camera} pos=${crawlSeq.cam}`);
+
+  // 5.8 正步 + 敬礼 连贯序列（scripts/build_parade_sequence.py 拼出）
+  const paradeSeq = await evalJs(ws, `(async()=>{const $=id=>document.getElementById(id);
+    __elf.setMotion('off');
+    const r = await __elf.setMotion('parade_seq');
+    if (!r) return { loaded:false };
+    const m = __elf.motion, nq = m.nq;
+    const xs = [];
+    for (let k=0;k<m.nframes;k++) xs.push(m.frames[k*nq]);
+    const p = (m.meta.sequence||{}).parts||[];
+    const part = (n)=>p.find(q=>q.action===n)||{};
+    let maxBack = 0;
+    for (let k=1;k<xs.length;k++) maxBack = Math.min(maxBack, xs[k]-xs[k-1]);
+    const sal = xs.slice(part('salute').start_frame, part('salute').end_frame+1);
+    const out = { loaded:true, kind:m.kind, nframes:m.nframes, nq, loop:m.loop,
+      freeze:m.meta.freezeAtEnd, camera:m.meta.camera,
+      x0:+xs[0].toFixed(3), xEnd:+xs[xs.length-1].toFixed(3),
+      xGooseEnd:+xs[part('goose_walk').end_frame].toFixed(3),
+      saluteSpan:+(Math.max(...sal)-Math.min(...sal)).toFixed(6),
+      maxBack:+maxBack.toFixed(5),
+      frames:{goose:part('goose_walk').frames, blend:part('attention_blend').frames,
+              salute:part('salute').frames, hold:part('hold_attention').frames},
+      note:$('motion-note').textContent,
+      opts:[...$('opt-motion').options].map(o=>o.value) };
+    __elf.setMotion('off');
+    return out;})()`);
+  check('正步 + 敬礼（连贯）在下拉里且加载成功（kind=parade，641 帧）',
+    paradeSeq.loaded && paradeSeq.opts.includes('parade_seq')
+      && paradeSeq.kind === 'parade' && paradeSeq.nq === 36
+      && paradeSeq.nframes === 641 && paradeSeq.camera === 'parade',
+    `nframes=${paradeSeq.nframes}｜camera=${paradeSeq.camera}｜kind=${paradeSeq.kind}`);
+  check('净位移链：正步走到 3.152 m，敬礼段原地不动',
+    Math.abs(paradeSeq.xGooseEnd - 3.152) < 1e-3
+      && Math.abs(paradeSeq.xEnd - 3.152) < 1e-3 && paradeSeq.saluteSpan < 1e-6,
+    `x: 0 → ${paradeSeq.xGooseEnd}（敬礼段跨度 ${paradeSeq.saluteSpan} m）`);
+  check('过渡段基座没有回退（不会倒着滑回原点）',
+    paradeSeq.maxBack >= -1e-6, `单帧最小 Δx = ${paradeSeq.maxBack} m`);
+  check('分段完整：341 正步 + 50 过渡 + 225 敬礼 + 25 定格',
+    paradeSeq.frames.goose === 341 && paradeSeq.frames.blend === 50
+      && paradeSeq.frames.salute === 225 && paradeSeq.frames.hold === 25,
+    JSON.stringify(paradeSeq.frames));
+  check('面板说明走「连贯动作」专属文案（不串成单段正步 / 敬礼）',
+    paradeSeq.note.includes('连贯动作') && paradeSeq.note.includes('build_parade_sequence'),
+    (paradeSeq.note || '').slice(0, 46) + '…');
+
+  const paradeFrozen = await evalJs(ws, `(async()=>{const $=id=>document.getElementById(id);
+    await __elf.setMotion('parade_seq');
+    const m=__elf.motion;
+    m.time = m.duration - 0.01;
+    await new Promise(x=>setTimeout(x,250));
+    const out={ loop:m.loop, paused:m.paused, time:+m.time.toFixed(3),
+      duration:+m.duration.toFixed(3), btn:$('btn-motion-pause').textContent.trim(),
+      x:+__elf.data.qpos[0].toFixed(3) };
+    __elf.setMotion('off');
+    return out;})()`);
+  check('连贯序列播完冻结在末帧立正（loop=false，按钮变「继续」）',
+    paradeFrozen.loop === false && paradeFrozen.paused === true
+      && Math.abs(paradeFrozen.time - paradeFrozen.duration) < 1e-6
+      && paradeFrozen.btn === '继续' && Math.abs(paradeFrozen.x - 3.152) < 1e-3,
+    `t=${paradeFrozen.time}/${paradeFrozen.duration} s · x=${paradeFrozen.x} m · ${paradeFrozen.btn}`);
 
   // 6. 渲染循环确实在出帧
   const frames = await evalJs(ws, `(async()=>{const r=__elf.renderer;const a=r.info.render.frame;

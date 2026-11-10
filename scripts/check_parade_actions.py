@@ -52,6 +52,8 @@ CASES = [
     ("goose_step_traj.npz", "goose_walk", False),
     ("goose_step_inplace_traj.npz", "goose_inplace", True),
     ("salute_traj.npz", "salute", True),
+    # 正步 + 敬礼 连贯序列（scripts/build_parade_sequence.py）
+    ("parade_sequence_traj.npz", "parade_seq", False),
 ]
 
 _lines: list[str] = []
@@ -79,7 +81,16 @@ def load(path: Path) -> dict:
 
 
 def fk_points(qpos: np.ndarray, names: list[str]) -> dict:
-    """用仿真模型逐帧 FK，取左右踝 / 右腕的世界坐标与整机质心 x。"""
+    """用仿真模型逐帧 FK，取左右踝 / 右腕的世界坐标与整机质心 x。
+
+    另外输出右手 mesh 的**掌心法向 / 四指方向**（世界系）：手 mesh 挂在
+    ``r_wrist_z_link`` 上，body 局部 **+z 是掌心法向、+x 是四指方向**（实测包围盒
+    x 17.9 cm 手长、y 6.2 手宽、z 8.4 握拳厚度）。敬礼的掌形只能靠这两个向量判
+    —— 腕部三个关节角"有没有动"看不出手心朝哪。
+
+    **别再用 ``-R[:,0]`` 当掌心法向**：那是"指尖→腕"的反方向，会把结论判反，
+    上一版就因此把掌心正对镜头当成了"立掌"。
+    """
     m = mujoco.MjModel.from_xml_path(str(SIM_XML))
     d = mujoco.MjData(m)
     mass = m.body_mass
@@ -89,14 +100,20 @@ def fk_points(qpos: np.ndarray, names: list[str]) -> dict:
               "l_elbow_y_link", "l_wrist_y_link",
               "r_elbow_y_link", "r_wrist_y_link", "head_y_link"]
     ids = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, b) for b in bodies]
+    hand_b = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "r_wrist_z_link")
     out = {b: [] for b in bodies}
     out["com"] = []
+    out["palm"], out["finger"] = [], []
     for row in qpos:
         d.qpos[:] = row
         mujoco.mj_forward(m, d)
         for b, i in zip(bodies, ids):
             out[b].append(d.xpos[i].copy())
         out["com"].append((mass[:, None] * d.xpos).sum(axis=0)[0] / mass.sum())
+        if hand_b >= 0:
+            R = d.xmat[hand_b].reshape(3, 3)
+            out["palm"].append(R[:, 2].copy())
+            out["finger"].append(R[:, 0].copy())
     return {b: np.asarray(v) for b, v in out.items()}
 
 
@@ -381,6 +398,24 @@ def check_salute(tag: str, d: dict, fk: dict) -> None:
        f"y = {w[i,1]:+.3f} m")
     dist = float(np.linalg.norm(w[i] - head[i])) * 1000
     ok(100.0 < dist < 260.0, "手在头右侧外侧、不插进头部", f"距头中心 {dist:.0f} mm")
+
+    # 掌形：腕绕前臂轴（r_wrist_x）滚 +90°，手掌立起来 —— 掌缘朝前、手掌宽面转到
+    # 侧向（掌心朝后、手背朝观众）。只查「腕关节角有没有动」看不出手心朝哪，
+    # 必须量世界系法向：滚 0° 时掌心朝下（−0.92，宽面正对观众 = 用户抱怨的
+    # "手心朝前"），滚 −90° 会把掌心转成正朝前（+0.92），只有 +90° 是手背朝前。
+    pn, fd = fk["palm"][i], fk["finger"][i]
+    roll = float(meta.get("wrist_roll_deg", 0.0))
+    ok(float(pn[0]) < -0.70, "掌心不朝前、手背朝前（立掌）",
+       f"掌心法向 ({pn[0]:+.2f},{pn[1]:+.2f},{pn[2]:+.2f})，腕滚 {roll:+.0f}°")
+    ok(abs(float(pn[0])) > 0.85, "掌面基本正对前后轴（掌缘朝前，不是斜着）",
+       f"前向分量 {pn[0]:+.2f}")
+    # 四指不是"竖直朝上"：军礼是四指并拢、斜指太阳穴，实测 (−0.22,+0.88,+0.42)
+    # —— 主要朝躯干中线（+y 对右手是朝内）、另有 0.42 的上抬分量。
+    # 旧判据要求 fd[2] > 0.60（竖直朝上）会把这正确形态判 FAIL。
+    ok(float(fd[1]) > 0.60, "四指并拢指向太阳穴（朝躯干中线）",
+       f"四指方向 ({fd[0]:+.2f},{fd[1]:+.2f},{fd[2]:+.2f})")
+    ok(0.20 < float(fd[2]) < 0.80, "四指斜向上（不是水平横指、也没朝下）",
+       f"上抬分量 {fd[2]:+.2f}")
     over = float(w[:, 2].max() - wz)
     ok(over < 0.02, "抬手路径不过冲（腕不越过太阳穴）",
        f"全程 z 峰值比保持帧高 {over*1000:.1f} mm")
@@ -412,6 +447,78 @@ def check_salute(tag: str, d: dict, fk: dict) -> None:
     ok(float(lw[a:b, 2].max()) < 0.72, "左腕垂到大腿高度", f"z = {lw[a:b,2].max():.3f} m")
 
 
+def check_sequence(tag: str, d: dict) -> None:
+    """连贯序列：拆回「正步段 / 敬礼段」各自复检 + 接缝与位移专项。
+
+    拼接不该悄悄改变任何一段的姿态，所以这里把切片 + 该段的原始 meta 重新
+    组装成"单段数据"，直接复用 check_goose / check_salute 的全部判据
+    （两段原始 meta 存在 meta.parts_meta 里，因为拼好后 frames / dt 同名，
+    不能平铺在顶层）。
+    """
+    q = d["qpos"]
+    dt = d["dt"]
+    meta = d["meta"]
+    seq = meta.get("sequence") or {}
+    parts = {p["action"]: p for p in seq.get("parts", [])}
+    pm = meta.get("parts_meta") or {}
+    say("  -- 连贯序列专项 --")
+    if not parts:
+        ok(False, "meta.sequence 分段信息完整", "缺 sequence.parts")
+        return
+
+    g, b = parts["goose_walk"], parts["attention_blend"]
+    s, h = parts["salute"], parts["hold_attention"]
+
+    total = sum(int(p["frames"]) for p in seq["parts"])
+    ok(total == len(q), "分段帧数之和 = 总帧数", f"{total} / {len(q)}")
+    chain = (g["end_frame"] + 1 == b["start_frame"]
+             and b["end_frame"] + 1 == s["start_frame"]
+             and s["end_frame"] + 1 == h["start_frame"])
+    ok(chain, "四段首尾相接无缝隙、无重复帧",
+       " → ".join(f"{p['action']}[{p['start_frame']}~{p['end_frame']}]"
+                  for p in seq["parts"]))
+
+    # ---- 位移：正步走到哪，敬礼就在哪；过渡段不许把基座一起插值 ----
+    x = q[:, 0]
+    back = float(np.diff(x).min())
+    ok(back > -1e-6, "基座全程不后退（过渡段没丢位移）",
+       f"单帧最小 Δx = {back*1000:+.4f} mm")
+    x_end = float(q[g["end_frame"], 0])
+    xs = q[s["start_frame"]:s["end_frame"] + 1, 0]
+    ok(abs(float(xs[0]) - x_end) < 1e-6, "敬礼段起点接上正步终点（不回弹）",
+       f"正步终点 x = {x_end:.3f} m，敬礼起点 x = {xs[0]:.3f} m")
+    ok(float(np.ptp(xs)) < 1e-6, "敬礼段基座 x 恒定（军礼原地不动）",
+       f"波动 {np.ptp(xs)*1000:.4f} mm")
+    ok(abs(float(x[-1] - x[0]) - x_end) < 1e-6, "总位移 = 正步位移",
+       f"{x[-1] - x[0]:.3f} m")
+
+    # ---- 接缝：过渡段是平滑起步，不该有台阶 ----
+    jd = np.abs(np.diff(q[:, 7:36], axis=0))
+    seg = jd[b["start_frame"] - 1:b["end_frame"] + 1]
+    ok(float(seg.max()) < 0.05, "过渡段单帧关节跳变 < 0.05 rad",
+       f"{seg.max():.4f} rad（正步段 {jd[:g['end_frame']].max():.4f} rad）")
+    seams = seq.get("seams") or {}
+    ok(max(seams.values(), default=1.0) < 1e-3, "三处接缝残差 < 1e-3 rad",
+       ", ".join(f"{k}={v:.1e}" for k, v in seams.items()))
+
+    # ---- 末帧定格：重复敬礼末帧，播完停得住 ----
+    still = float(np.abs(q[h["start_frame"]:h["end_frame"] + 1][1:]
+                         - q[h["start_frame"]:h["end_frame"] + 1][:-1]).max())
+    ok(still < 1e-9, "末段定格完全静止", f"max|Δ|={still:.2e}")
+
+    # ---- 拆段复检：拼接前后每一段的姿态必须一致 ----
+    for key, p, tag_sub, fn in (("goose", g, "goose_walk", check_goose),
+                                ("salute", s, "salute", check_salute)):
+        sub = dict(d)
+        sub["qpos"] = q[p["start_frame"]:p["end_frame"] + 1].copy()
+        sub["meta"] = dict(pm.get(key) or {})
+        if not sub["meta"]:
+            ok(False, f"{tag_sub} 段原始 meta 可读", "meta.parts_meta 缺该段")
+            continue
+        say(f"  -- {tag_sub} 段（f{p['start_frame']}~f{p['end_frame']}）复检 --")
+        fn(tag_sub, sub, fk_points(sub["qpos"], sub["names"]))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--report", default="logs/parade_actions/report.txt")
@@ -430,6 +537,9 @@ def main() -> int:
         d = load(src / fname)
         ix = build_qpos_remap(m, d["names"])
         check_common(tag, d, loop, m, data, gids, ix)
+        if tag == "parade_seq":
+            check_sequence(tag, d)       # 自己按段做 FK，避免整段重复算一遍
+            continue
         fk = fk_points(d["qpos"], d["names"])
         if tag.startswith("goose"):
             check_goose(tag, d, fk)

@@ -58,7 +58,7 @@
     "durationS": 2.04
   },
   "name": "squat_up",
-  "label": "参考轨迹 · 起立（极限蹲 → 站姿）",
+  "label": "参考动作 · 起立（极限蹲 → 站姿）",
   "loop": false,
   "freezeAtEnd": true,
   "mode": "up",

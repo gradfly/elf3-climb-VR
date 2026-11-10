@@ -122,6 +122,36 @@ html, body {
 }
 .chk input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
 
+/* 单选按钮组（场景：单人 / 矩阵）——两个并排的分段按钮 */
+.seg {
+  display: flex;
+  gap: 6px;
+  padding: 2px 0 4px;
+}
+.seg label {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 4px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--panel-line);
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.seg label:hover { border-color: rgba(84, 209, 255, 0.45); }
+.seg label.on {
+  color: var(--fg);
+  border-color: rgba(84, 209, 255, 0.6);
+  background: rgba(84, 209, 255, 0.14);
+}
+.seg input { accent-color: var(--accent); width: 13px; height: 13px; cursor: pointer; }
+
 /* 带下拉框的一行（运动仿真：回放数据 / 倍速） */
 .rowsel {
   display: flex;

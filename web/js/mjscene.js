@@ -61,6 +61,10 @@ export class MjScene {
     this.disposables = [];
     this._mat = new THREE.Matrix4();
     this._box = new THREE.Box3();
+
+    /** 矩阵模式：机器人视觉网格的实例化副本（见 enableRobotGrid），未开启时为 null */
+    this.grid = null;
+    this._gridTmp = new Float32Array(16);
   }
 
   // ------------------------------------------------------------------ 构建
@@ -306,16 +310,114 @@ export class MjScene {
       obj.matrix.copy(m);
       obj.matrixWorldNeedsUpdate = true;
     }
+    if (this.grid) this._syncGrid();
     return this;
+  }
+
+  // ------------------------------------------------------------------ 矩阵模式
+  /**
+   * 把机器人视觉网格复制成 rows × cols 份、按网格铺开的实例（InstancedMesh）。
+   *
+   * 为什么用实例化而不是克隆 Mesh：200 份 × 32 个几何 = 6400 个对象 / 6400 次
+   * draw call，浏览器直接跪；实例化后几何与材质只有一份，绘制批次仍等于机器人
+   * 几何数（32），只是每批画 count 次。
+   *
+   * 实例矩阵 = 平移(offset) × 几何世界矩阵。因为 offset 是纯平移，乘出来只有
+   * 平移列不同 → 每帧只改 4 个分量就够了（见 _syncGrid）。
+   *
+   * 排布在 MuJoCo 坐标系里给：col 沿 mj y（左右），row 沿 mj x（前后），
+   * 整体以原点（单人模式那个机器人的位置）为中心。
+   *
+   * @param {object} [o]
+   * @param {number} [o.rows]   行数（前后方向）    默认 10
+   * @param {number} [o.cols]   列数（左右方向）    默认 20
+   * @param {number} [o.pitchX] 列间距（米）        默认 0.72
+   * @param {number} [o.pitchZ] 行间距（米）        默认 0.78
+   */
+  enableRobotGrid({ rows = 10, cols = 20, pitchX = 0.72, pitchZ = 0.78 } = {}) {
+    this.disableRobotGrid();
+    const THREE = this.THREE;
+    const count = rows * cols;
+
+    const ox = new Float32Array(count);  // MuJoCo x 偏移（前后）
+    const oy = new Float32Array(count);  // MuJoCo y 偏移（左右）
+    let n = 0;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++, n++) {
+        ox[n] = (r - (rows - 1) / 2) * pitchZ;
+        oy[n] = (c - (cols - 1) / 2) * pitchX;
+      }
+    }
+
+    const group = new THREE.Group();
+    group.name = 'robot-grid';
+    const meshes = [];
+    const geoms = [];
+    for (const gi of this.robotGeomIds) {
+      const src = this.objs[gi];
+      if (!src) continue;
+      const im = new THREE.InstancedMesh(src.geometry, src.material, count);
+      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      im.frustumCulled = false;   // 实例铺满十几米，默认包围球会误判剔除
+      im.castShadow = false;      // 200 份阴影没有视觉收益，只是白烧一遍 GPU
+      im.receiveShadow = false;
+      im.matrixAutoUpdate = false;
+      im.name = `${src.name}:grid`;
+      group.add(im);
+      meshes.push(im);
+      geoms.push(gi);
+    }
+    this.root.add(group);
+    this.grid = { rows, cols, count, pitchX, pitchZ, ox, oy, group, meshes, geoms };
+    this.sync();          // 先把实例矩阵填好，避免第一帧全在原点
+    this.applyOptions();
+    return this.grid;
+  }
+
+  /** 关闭矩阵模式（原件重新按显示开关显示） */
+  disableRobotGrid() {
+    if (!this.grid) return this;
+    this.root.remove(this.grid.group);
+    // 只释放实例缓冲；geometry / material 是原件共享的，不能动
+    for (const im of this.grid.meshes) im.dispose();
+    this.grid = null;
+    this.applyOptions();
+    return this;
+  }
+
+  /** 刷新所有实例的 instanceMatrix（旋转部分共用，只有平移列随 offset 变） */
+  _syncGrid() {
+    const { count, ox, oy, meshes, geoms } = this.grid;
+    const tmp = this._gridTmp;
+    for (let k = 0; k < meshes.length; k++) {
+      const e = this.objs[geoms[k]].matrix.elements;
+      const arr = meshes[k].instanceMatrix.array;
+      tmp[0] = e[0]; tmp[1] = e[1]; tmp[2] = e[2]; tmp[3] = 0;
+      tmp[4] = e[4]; tmp[5] = e[5]; tmp[6] = e[6]; tmp[7] = 0;
+      tmp[8] = e[8]; tmp[9] = e[9]; tmp[10] = e[10]; tmp[11] = 0;
+      tmp[15] = 1;
+      for (let i = 0; i < count; i++) {
+        tmp[12] = e[12] + ox[i];
+        tmp[13] = e[13] + oy[i];
+        tmp[14] = e[14];
+        arr.set(tmp, i * 16);
+      }
+      meshes[k].instanceMatrix.needsUpdate = true;
+    }
   }
 
   /** 依据当前选项刷新可见性 */
   applyOptions() {
     const o = this.opts;
+    // 矩阵模式下原件必须藏起来（画的是实例），实例显隐由同一个「机器人」开关控制
     for (const gi of this.robotGeomIds) {
       const obj = this.objs[gi];
-      if (obj) obj.visible = o.showRobot;
+      if (obj) obj.visible = o.showRobot && !this.grid;
     }
+    if (this.grid) {
+      for (const im of this.grid.meshes) im.visible = o.showRobot;
+    }
+
     for (const gi of this.envGeomIds) {
       const obj = this.objs[gi];
       if (obj) obj.visible = o.showStairs;
@@ -474,6 +576,7 @@ export class MjScene {
   }
 
   dispose() {
+    this.disableRobotGrid();
     for (const d of this.disposables) d.dispose?.();
     for (const obj of this.objs) obj?.material?.dispose?.();
     this.disposables.length = 0;

@@ -61,9 +61,9 @@ if str(HERE) not in sys.path:
 from bake_climb import save                      # noqa: E402  共用 bin/json 写出格式
 
 LABELS = {
-    "down": "参考轨迹 · 下蹲（站姿 → 极限蹲）",
-    "up": "参考轨迹 · 起立（极限蹲 → 站姿）",
-    "cycle": "参考轨迹 · 蹲下起立循环",
+    "down": "参考动作 · 下蹲（站姿 → 极限蹲）",
+    "up": "参考动作 · 起立（极限蹲 → 站姿）",
+    "cycle": "参考动作 · 蹲下起立循环",
 }
 
 
