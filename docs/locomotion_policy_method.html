@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Elf3 螃蟹步爬楼 · 当前运动策略技术解析</title>
+<style>
+  :root{
+    --bg:#f6f7f9;
+    --panel:#ffffff;
+    --panel-2:#fbfcfd;
+    --text:#1f2937;
+    --muted:#6b7280;
+    --border:#e5e7eb;
+    --border-strong:#d1d5db;
+    --accent:#2563eb;
+    --accent-soft:#eff4ff;
+    --green:#047857;
+    --green-soft:#ecfdf5;
+    --red:#b91c1c;
+    --red-soft:#fef2f2;
+    --amber:#92400e;
+    --amber-soft:#fffbeb;
+    --code-bg:#f3f4f6;
+    --shadow:0 1px 2px rgba(16,24,40,.05),0 8px 24px -12px rgba(16,24,40,.18);
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    font-size:15px;line-height:1.75;-webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  /* ---------- 顶部 ---------- */
+  .hero{
+    background:
+      radial-gradient(900px 320px at 12% -10%, #e8f0ff 0%, transparent 60%),
+      radial-gradient(700px 300px at 92% 0%, #eefaf5 0%, transparent 55%),
+      #ffffff;
+    border-bottom:1px solid var(--border);
+    padding:44px 32px 30px;
+  }
+  .hero-inner{max-width:1180px;margin:0 auto}
+  .eyebrow{
+    display:inline-flex;align-items:center;gap:8px;
+    font-size:12px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--accent);font-weight:600;margin-bottom:14px;
+  }
+  .eyebrow::before{content:"";width:22px;height:2px;background:var(--accent);border-radius:2px}
+  h1{font-size:32px;line-height:1.3;margin:0 0 12px;letter-spacing:-.02em;font-weight:700}
+  .subtitle{color:var(--muted);max-width:820px;margin:0 0 22px;font-size:15.5px}
+  .meta{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{
+    display:inline-flex;align-items:center;gap:6px;
+    background:#fff;border:1px solid var(--border);border-radius:999px;
+    padding:5px 12px;font-size:12.5px;color:#374151;
+  }
+  .chip b{color:var(--text);font-weight:600}
+  .chip .dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+
+  /* ---------- 布局 ---------- */
+  .layout{max-width:1180px;margin:0 auto;padding:28px 32px 80px;display:grid;grid-template-columns:248px minmax(0,1fr);gap:34px}
+  nav.toc{position:sticky;top:24px;align-self:start;max-height:calc(100vh - 48px);overflow:auto;padding-right:6px}
+  nav.toc h4{font-size:11.5px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);margin:0 0 12px 12px;font-weight:600}
+  nav.toc a{
+    display:block;padding:7px 12px;border-radius:8px;color:#4b5563;font-size:13.5px;
+    border-left:2px solid transparent;transition:.15s;
+  }
+  nav.toc a:hover{background:#eef1f5;text-decoration:none;color:var(--text)}
+  nav.toc a.active{background:var(--accent-soft);color:var(--accent);border-left-color:var(--accent);font-weight:600}
+  nav.toc .num{display:inline-block;width:22px;color:#9ca3af;font-variant-numeric:tabular-nums}
+  nav.toc a.active .num{color:var(--accent)}
+
+  main{min-width:0}
+  section{
+    background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
+    padding:28px 30px;margin-bottom:20px;box-shadow:var(--shadow);
+  }
+  section > h2{
+    font-size:21px;margin:0 0 6px;letter-spacing:-.01em;display:flex;align-items:center;gap:10px;
+  }
+  section > h2 .idx{
+    display:inline-flex;align-items:center;justify-content:center;
+    width:28px;height:28px;border-radius:8px;background:var(--accent-soft);color:var(--accent);
+    font-size:13px;font-weight:700;flex:none;
+  }
+  .lead{color:var(--muted);margin:0 0 20px;font-size:14px}
+  h3{font-size:16px;margin:26px 0 10px;letter-spacing:-.01em}
+  h3:first-of-type{margin-top:6px}
+  p{margin:10px 0}
+  ul,ol{margin:10px 0;padding-left:22px}
+  li{margin:5px 0}
+  strong{font-weight:600}
+  code{
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+    background:var(--code-bg);padding:1.5px 6px;border-radius:5px;font-size:12.5px;color:#111827;
+  }
+  pre{
+    background:#0f172a;color:#e2e8f0;border-radius:10px;padding:16px 18px;overflow:auto;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.65;
+    margin:14px 0;
+  }
+  pre code{background:none;padding:0;color:inherit;font-size:inherit}
+
+  /* ---------- TL;DR ---------- */
+  .tldr{
+    background:linear-gradient(180deg,#fbfdff,#f7faff);
+    border:1px solid #dbe6fb;border-radius:var(--radius);padding:20px 22px;margin:0 0 20px;
+  }
+  .tldr .tag{font-size:11.5px;font-weight:700;letter-spacing:.08em;color:var(--accent);text-transform:uppercase}
+  .tldr p{margin:8px 0 0;font-size:14.5px}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:16px}
+  .kpi{background:#fff;border:1px solid var(--border);border-radius:10px;padding:12px 14px}
+  .kpi .v{font-size:20px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+  .kpi .k{font-size:11.5px;color:var(--muted);margin-top:2px}
+
+  /* ---------- 流程 ---------- */
+  .flow{display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:0;margin:18px 0 22px;align-items:stretch}
+  .step{
+    position:relative;background:var(--panel-2);border:1px solid var(--border);
+    padding:14px 14px 12px;border-radius:10px;margin-right:16px;
+  }
+  .step:last-child{margin-right:0}
+  .step::after{
+    content:"";position:absolute;right:-13px;top:50%;transform:translateY(-50%);
+    width:0;height:0;border-left:7px solid var(--border-strong);
+    border-top:5px solid transparent;border-bottom:5px solid transparent;
+  }
+  .step:last-child::after{display:none}
+  .step .n{font-size:11px;color:var(--accent);font-weight:700;letter-spacing:.06em}
+  .step .t{font-size:13px;font-weight:600;margin:4px 0 3px}
+  .step .d{font-size:11.5px;color:var(--muted);line-height:1.55}
+
+  /* ---------- 表格 ---------- */
+  .table-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:10px;margin:14px 0}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:520px}
+  thead th{
+    background:#f8fafc;text-align:left;padding:10px 14px;font-weight:600;font-size:12.5px;
+    color:#374151;border-bottom:1px solid var(--border);white-space:nowrap;
+  }
+  tbody td{padding:10px 14px;border-bottom:1px solid #f1f3f6;vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:#fafbfc}
+  td.num,th.num{font-variant-numeric:tabular-nums;white-space:nowrap}
+  .w-pos{color:var(--green);font-weight:700}
+  .w-neg{color:var(--red);font-weight:700}
+  .w-probe{color:var(--muted);font-weight:600}
+  .note{
+    border-left:3px solid var(--amber);background:var(--amber-soft);
+    padding:12px 16px;border-radius:0 8px 8px 0;margin:14px 0;font-size:13.5px;color:#4b3a12;
+  }
+  .danger{border-left-color:var(--red);background:var(--red-soft);color:#5b1a1a}
+  .ok{border-left-color:var(--green);background:var(--green-soft);color:#0b3d2e}
+
+  .pill{
+    display:inline-block;padding:1px 8px;border-radius:999px;font-size:11.5px;font-weight:600;
+    background:var(--accent-soft);color:var(--accent);white-space:nowrap;
+  }
+
+  /* ---------- 文件树 ---------- */
+  .tree{
+    background:var(--panel-2);border:1px solid var(--border);border-radius:10px;
+    padding:16px 18px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:12.5px;line-height:1.85;color:#374151;overflow-x:auto;white-space:pre;
+  }
+  .tree .cmt{color:#9ca3af}
+  .tree .f{color:#111827;font-weight:600}
+  .tree .dir{color:var(--accent)}
+
+  footer{max-width:1180px;margin:0 auto;padding:0 32px 60px;color:var(--muted);font-size:12.5px;text-align:center}
+
+  .top-btn{
+    position:fixed;right:26px;bottom:26px;width:42px;height:42px;border-radius:50%;
+    background:#fff;border:1px solid var(--border);box-shadow:var(--shadow);
+    display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--muted);
+    opacity:0;pointer-events:none;transition:.2s;font-size:18px;
+  }
+  .top-btn.show{opacity:1;pointer-events:auto}
+  .top-btn:hover{color:var(--accent);border-color:#c7d7f5}
+
+  @media (max-width:980px){
+    .layout{grid-template-columns:1fr;padding:20px}
+    nav.toc{display:none}
+    .flow{grid-template-columns:1fr;gap:10px}
+    .step{margin-right:0}
+    .step::after{display:none}
+    .kpis{grid-template-columns:1fr 1fr}
+    .hero{padding:32px 20px 24px}
+    h1{font-size:25px}
+    section{padding:22px 18px}
+  }
+  @media print{
+    body{background:#fff}
+    nav.toc,.top-btn{display:none}
+    .layout{display:block;padding:0}
+    section{break-inside:avoid;box-shadow:none;border-color:#ddd}
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div class="eyebrow">Technical Deep Dive</div>
+    <h1>Elf3 螃蟹步爬楼<br>当前运动策略技术解析</h1>
+    <p class="subtitle">
+      以 <code>train/mjlab_tasks/crab/*.py</code> 与 <code>crab_climb.py</code> 的代码为准，
+      拆解「离线准静态参考步态 + 在线地形参数估计 + PPO 残差修正」的完整实现。
+    </p>
+    <div class="meta">
+      <span class="chip"><span class="dot"></span><b>残差 RL</b> · 非 end-to-end</span>
+      <span class="chip">Elf3-Crab-Residual</span>
+      <span class="chip">29 可控关节</span>
+      <span class="chip">50 Hz 控制</span>
+      <span class="chip">更新于 2026-11-05</span>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="toc" id="toc">
+    <h4>目录</h4>
+    <a href="#s1"><span class="num">01</span>方法总览</a>
+    <a href="#s2"><span class="num">02</span>机器人与任务建模</a>
+    <a href="#s3"><span class="num">03</span>参考步态层</a>
+    <a href="#s4"><span class="num">04</span>地形感知与选表</a>
+    <a href="#s5"><span class="num">05</span>残差动作项</a>
+    <a href="#s6"><span class="num">06</span>观测空间</a>
+    <a href="#s7"><span class="num">07</span>奖励函数</a>
+    <a href="#s8"><span class="num">08</span>课程与训练算法</a>
+    <a href="#s9"><span class="num">09</span>安全 / 随机化 / 地形</a>
+    <a href="#s10"><span class="num">10</span>已踩过的坑</a>
+    <a href="#s11"><span class="num">11</span>文件索引</a>
+  </nav>
+
+  <main>
+
+    <div class="tldr">
+      <div class="tag">TL;DR</div>
+      <p>
+        策略网络<strong>不从零学步态</strong>。步态的"骨架"由四相位准静态 IK 离线解成一张
+        以 (rise, tread) 为索引的关节角表；运行时用高度扫描估计台阶参数、按相位插值出
+        <code>q_ref</code>，PPO 只输出对它的小幅修正 <code>Δq</code>。
+        好处是初值就能爬、训练量小；代价是参考表的几何上限就是策略的上限。
+      </p>
+      <div class="kpis">
+        <div class="kpi"><div class="v">29</div><div class="k">可控关节（腰3+腿12+臂14）</div></div>
+        <div class="kpi"><div class="v">14×4×90</div><div class="k">参考表 rise × tread × 帧</div></div>
+        <div class="kpi"><div class="v">393</div><div class="k">actor 观测维度</div></div>
+        <div class="kpi"><div class="v">13</div><div class="k">奖励项（逐项实跑标定）</div></div>
+      </div>
+    </div>
+
+    <!-- ============ 1 ============ -->
+    <section id="s1">
+      <h2><span class="idx">1</span>方法总览</h2>
+      <p class="lead">四层结构：离线生成、在线估计、动作映射、策略学习。</p>
+
+      <div class="flow">
+        <div class="step"><div class="n">OFFLINE</div><div class="t">脚本步态</div><div class="d">四相位准静态 IK，解出每 20 ms 一帧的关节角</div></div>
+        <div class="step"><div class="n">OFFLINE</div><div class="t">参考表</div><div class="d">枚举 14×4 组 (rise, tread)，存 90 帧 × 29 关节</div></div>
+        <div class="step"><div class="n">ONLINE</div><div class="t">地形估计</div><div class="d">射线高度场 → 边缘检测 → rise / tread（EMA）</div></div>
+        <div class="step"><div class="n">ONLINE</div><div class="t">残差动作</div><div class="d">q_cmd = q_ref + scale·clip(Δq)，相位 per-env</div></div>
+        <div class="step"><div class="n">LEARN</div><div class="t">PPO</div><div class="d">MLP 512-256-128，非对称 actor-critic</div></div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>层</th><th>职责</th><th>代码</th></tr></thead>
+          <tbody>
+            <tr><td>参考步态生成</td><td>把"怎么迈步"离线解成参数化关节角表</td><td><code>crab_climb.py</code> + <code>crab_ik.py</code> → <code>build_ref_tables.py</code></td></tr>
+            <tr><td>地形感知与选表</td><td>估计 (rise, tread)，插值当前相位参考</td><td><code>ref_table.py</code></td></tr>
+            <tr><td>残差动作映射</td><td>q_cmd 合成、相位推进、α 课程、限幅</td><td><code>residual_action.py</code></td></tr>
+            <tr><td>环境与奖励</td><td>观测重组、奖励重排、课程、终止、域随机化</td><td><code>env_cfg.py</code> + <code>env_cfg_residual.py</code> + <code>mdp_extra.py</code></td></tr>
+            <tr><td>训练算法</td><td>PPO（rsl_rl）</td><td><code>rl_cfg.py</code></td></tr>
+            <tr><td>地形</td><td>四列倒置金字塔 + 时间型课程</td><td><code>terrain_cfg.py</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="note">
+        <strong>任务 ID：</strong><code>Elf3-Crab-Residual</code>（训练）/
+        <code>Elf3-Crab-Residual-Play</code>（回放评测）。观测与动作语义均与旧任务
+        <code>Elf3-Crab-Stairs</code> 不同，<strong>checkpoint 不通用</strong>。
+      </div>
+
+<pre><code>离线（一次性）                          在线（每步 50 Hz）
+┌──────────────────────────┐           ┌─────────────────────────────────────┐
+│ crab_climb.py            │           │ ① terrain_scan 射线高度场            │
+│ 四相位准静态 IK 解算      │  枚举     │    [B, 21×13] → 剖面/中值滤波/边缘   │
+│ LOAD→SWING→LAND→SETTLE   │ ────────► │ ② RefTable.estimate()               │
+└──────────────────────────┘  (rise,   │    rise_est(级高) tread_est(踏面)    │
+┌──────────────────────────┐   tread)  │ ③ RefTable.select()                 │
+│ build_ref_tables.py      │           │    按相位插值出 q_ref[29]            │
+│ 枚举 14×4 组参数，        │           │ ④ 策略网络 π(obs) → Δq              │
+│ 存 crab_ref_v1.npz       │           │    q_cmd = q_ref + scale·clip(Δq)   │
+│ q[R,T,90帧,29关节]        │           │ ⑤ MuJoCo PD 跟踪 q_cmd              │
+└──────────────────────────┘           └─────────────────────────────────────┘</code></pre>
+    </section>
+
+    <!-- ============ 2 ============ -->
+    <section id="s2">
+      <h2><span class="idx">2</span>机器人与任务建模</h2>
+      <p class="lead">最容易抄错的是坐标约定：机器人不面向台阶，而是侧着走上去。</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>项</th><th>值</th></tr></thead>
+          <tbody>
+            <tr><td>机器人</td><td>Elf3 人形，<strong>29 个可控关节</strong>（腰 3 + 腿 12 + 臂 14；head_z / head_y 被动）</td></tr>
+            <tr><td>控制频率</td><td>50 Hz（<code>timestep=0.002 × decimation=10</code>），MuJoCo Warp</td></tr>
+            <tr><td>回合长度</td><td>20 s（1000 步）</td></tr>
+            <tr><td>朝向约定</td><td>机器人<strong>面朝 +X</strong>，台阶沿 <strong>+Y</strong> 逐级抬升——侧向横移上楼即"螃蟹步"</td></tr>
+            <tr><td>速度指令</td><td><code>lin_vel_x=(0,0)</code> 禁前后；<code>lin_vel_y=(0.14,0.20)</code> 只许 +Y；<code>ang_vel_z=0</code> 训练不指令转向</td></tr>
+            <tr><td>仿真参数</td><td><code>iterations=20</code>、<code>tolerance=1e-6</code>（float32 下可达，避免求解器每步跑满）</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>
+        机器人 XML 由 <code>train/assets/make_robot_xml.py</code> 生成：去掉地形 include、只保留 29 个
+        执行器，并把<strong>视觉 mesh 挪到 geom group 2</strong>。最后一条不是为了渲染，而是因为向下的
+        高度射线会打到机器人<strong>自己的腿</strong>（见 §10）。
+      </p>
+    </section>
+
+    <!-- ============ 3 ============ -->
+    <section id="s3">
+      <h2><span class="idx">3</span>参考步态层：脚本控制器 → 参数化参考表</h2>
+      <p class="lead">这是整条链路的"先验"，也是策略能力的天花板。</p>
+
+      <h3>3.1 四相位准静态步态（crab_climb.py）</h3>
+      <p>每个"步"分四相位：</p>
+      <ol>
+        <li><strong>LOAD</strong>——重心平移到支撑脚正上方；</li>
+        <li><strong>SWING</strong>——摆动脚抬到 <code>max(z0,z1)+5.5cm</code>，横移过踏面边界；</li>
+        <li><strong>LAND</strong>——落到目标踏面；</li>
+        <li><strong>SETTLE</strong>——重心回到双脚中点，骨盆侧倾回目标值。</li>
+      </ol>
+      <p>每步 0.9 s @ 50 Hz = 45 帧；一个周期（先左后右两步）<strong>90 帧 = 1.8 s</strong>。</p>
+
+      <ul>
+        <li><strong>GATHER / SPLIT 站姿序列</strong>：每个落脚面给 L/R 各一个固定落点（中心 ∓ off），
+        相邻转换只动一只脚，始终保留清晰的支撑多边形；</li>
+        <li><strong>骨盆侧倾解级高</strong>：25 cm 级高只需 <code>waist_x</code> 侧倾 10.4°（限位 15°），
+        绕开"平脚 + 踝限位 ±20°"的瓶颈；</li>
+        <li><strong>DLS 数值 IK</strong>：闭式解只作种子，每帧收敛到 &lt; 1 mm，全程检查关节限位与
+        质心-支撑面裕度；重心时序在归一化进度 <code>p ∈ (0.32, 0.78)</code> 区间钉在支撑脚正上方；</li>
+        <li><strong>回退梯度 LADDER</strong>：IK 不收敛时按（重心转移比例 lam，摆动脚姿态权重）逐级放松。</li>
+      </ul>
+
+      <h3>3.2 参数化参考表（build_ref_tables.py → crab_ref_v1.npz）</h3>
+      <p>脚本轨迹只依赖 (rise, tread) 两个标量，因此可以离线枚举：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>维度</th><th>取值</th><th>数量</th></tr></thead>
+          <tbody>
+            <tr><td>rise（级高）</td><td>0.00 ~ 0.26 m，步长 0.02</td><td class="num">14 档</td></tr>
+            <tr><td>tread（踏面）</td><td>{0.24, 0.30, 0.36, 0.40} m</td><td class="num">4 档</td></tr>
+            <tr><td>相位</td><td>稳态两步（跳过起步），循环平滑 k=5</td><td class="num">90 帧</td></tr>
+            <tr><td>关节</td><td>与训练侧完全一致的 29 个</td><td class="num">29</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        输出 <code>q[14, 4, 90, 29]</code>，另存 <code>root_y / root_z / swing / dy_cycle / v_ref</code>。
+        质量门槛：IK 误差 &lt; 1 mm、一阶差分 &lt; 0.40 rad/帧、二阶差分 &lt; 0.12 rad、
+        周期净位移 ≈ tread（±25%）。该表 207 KB，<strong>入库</strong>，训练与回放共用同一份。
+      </p>
+    </section>
+
+    <!-- ============ 4 ============ -->
+    <section id="s4">
+      <h2><span class="idx">4</span>地形感知与参考选择（ref_table.py）</h2>
+
+      <h3>4.1 高度扫描</h3>
+      <p>
+        <code>terrain_scan</code> 从躯干向下打射线，yaw 对齐网格 <strong>21(y) × 13(x)</strong>、
+        分辨率 0.1 m、覆盖前后 ±0.6 / 左右 ±1.0 m（螃蟹步加宽侧向），
+        <code>include_geom_groups=(0,)</code> 只打地形。
+        <code>scan_to_heights()</code> 把射线距离换算成"躯干高出地形"的高度场 <code>[B, 273]</code>。
+      </p>
+
+      <h3>4.2 (rise, tread) 估计</h3>
+      <ol>
+        <li>取中央 3 列 x 的<strong>中值</strong>得 y 向剖面（抗机器人自腿遮挡的单格凹陷）；</li>
+        <li>3 点中值滤波 → 上升边缘 <code>dh = h[iy] − h[iy+1]</code>（地形升高 ⇒ height 变小）；</li>
+        <li>检测带 <code>|y| ∈ (0.15, 1.00)</code>，边缘须满足
+          <code>0.03 &lt; dh &lt; 0.30</code>（参考表最大档才 0.22，更大的"台阶"必是遮挡/异常）；</li>
+        <li>rise = 各边缘 dh 的<strong>高斯加权均值</strong>（σ = 0.5 m，离机器人越近权重越大），
+          两侧都认（允许倒着接近）；tread 只看 +Y 半侧，取<strong>相邻边缘间距均值</strong>；</li>
+        <li><strong>EMA 平滑</strong>：rise α = 0.5、tread α = 0.3；长期测不到边时 rise 以 0.9/步回落；
+          测不到边（平地）时 tread 取 <strong>per-env 兜底值</strong>——按 <code>terrain_origins</code>
+          最近邻反查该 env 所在<strong>地形列</strong>的真实踏面（0.40 / 0.40 / 0.30 / 0.24）。
+          每 5 步刷新一次。</li>
+      </ol>
+      <div class="note">
+        <strong>为什么兜底要按列给：</strong>四列真实踏面各不相同，一个全局标量最多只能对齐一列。
+        拿 <code>terrain_types</code> 当列号也不行——本版 mjlab 实测对不上（type=0 同时出现 12.5 和 8.0 cm）。
+      </div>
+
+      <h3>4.3 查表插值</h3>
+      <p>
+        对 (rise, tread, phase) 做双线性 + 相位线性插值，返回 <code>q_ref[29]</code> 和该档参考步速
+        <code>v_ref</code>。纯 numpy/torch、不 import mjlab，训练与回放（crab_replay）共用。
+      </p>
+    </section>
+
+    <!-- ============ 5 ============ -->
+    <section id="s5">
+      <h2><span class="idx">5</span>残差动作项（residual_action.py）</h2>
+      <p class="lead">整个方法的"接缝"就在这一行公式上。</p>
+
+<pre><code>q_cmd = q_ref(rise, tread, phase) + scale · clip(Δq, ±clip_rad)
+        └── 时变 offset，每步由参考表给出      └── 策略输出，即"残差"</code></pre>
+
+      <p>
+        继承 mjlab <code>JointPositionAction</code>，只重写 <code>process_actions</code> /
+        <code>reset</code>。要点：
+      </p>
+      <ol>
+        <li><strong>相位是 per-env 状态量</strong>：<code>phase += (v_cmd / v_ref) / 90</code>，
+          速率夹在 [0.6, 1.8]。指令快则步频快，几何上限是
+          <code>可达速度 = tread × 1.8 / 1.8 = tread</code>。
+          开局 <strong>hold 25 步</strong>（0.5 s）相位冻结；相位平移 33/90 使 phase=0 落在
+          <strong>双支撑</strong>帧，初始相位随机取 {0, 0.5}。</li>
+        <li><strong>α 课程（参考幅度）</strong>：<code>q_ref = q_stand + α·(q_gait − q_stand)</code>，
+          α 从 0 线性升到 1，默认 1500 iteration × 24 步。α=0 时参考退化为默认站姿，与已验证的
+          基线任务（动作全零 = 站姿）同难度。续训必须用 <code>ELF3_ALPHA=1.0</code> 钉住，
+          或用 <code>ELF3_ALPHA_START</code> 接上。</li>
+        <li><strong>限幅按关节组</strong>：腿 ±0.55 rad、腰 ±0.20、臂 ±0.20（可用
+          <code>ELF3_LEG_CLIP</code> 等覆盖）。0.40 时代 76% 输出顶死限幅、梯度在 clamp 外恒 0；
+          放宽到 0.55 解除天花板。限幅同时是动作映射，可用旧 checkpoint 做零样本对拍。</li>
+        <li><strong>诊断开关</strong>：<code>ELF3_RESIDUAL_SCALE=0</code> 纯参考开环走，用来拆分
+          "参考自带偏置"与"残差学出偏置"；<code>ELF3_RESET_RAMP=25</code> 每回合开局做站姿→参考软启动。</li>
+      </ol>
+      <div class="ok note">
+        <strong>一致性原则：</strong>内部量（ref_joint_pos / phase / rise_est / scan_ok ...）全部暴露为
+        只读属性，offset、观测 <code>joint_pos_ref_err</code>、奖励 <code>ref_tracking</code> 三者
+        读同一份 <code>_ref_q</code>——否则前 N 步会白扣奖励。
+      </div>
+    </section>
+
+    <!-- ============ 6 ============ -->
+    <section id="s6">
+      <h2><span class="idx">6</span>观测空间（actor 393 维，critic 更大）</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>项</th><th class="num">维度</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td>base_lin_vel / base_ang_vel</td><td class="num">3 + 3</td><td>躯干线/角速度（<code>robot/torso_lin_vel</code> 等）</td></tr>
+            <tr><td>projected_gravity</td><td class="num">3</td><td>重力投影</td></tr>
+            <tr><td>joint_pos</td><td class="num">29</td><td>相对默认站姿（噪声 ±0.01）</td></tr>
+            <tr><td><strong>joint_pos_ref_err</strong></td><td class="num">12</td><td>12 条腿相对 q_ref 的偏差——残差任务的核心观测</td></tr>
+            <tr><td>joint_vel</td><td class="num">29</td><td>关节速度</td></tr>
+            <tr><td>actions</td><td class="num">29</td><td>上一步动作</td></tr>
+            <tr><td>command</td><td class="num">3</td><td>速度指令</td></tr>
+            <tr><td><strong>phase</strong></td><td class="num">2</td><td>sin / cos(2π·phase)</td></tr>
+            <tr><td><strong>ref_meta</strong></td><td class="num">3</td><td>(rise×5, tread×2.5, v_ref×5) 归一化地形档位</td></tr>
+            <tr><td><strong>height_scan</strong></td><td class="num">273</td><td>21×13 高度网格（×1/5 归一化，噪声 ±0.1）</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        critic 在 actor 基础上：<code>joint_pos</code> 换<strong>无偏</strong>版本，追加
+        <code>foot_height / foot_air_time / foot_contact / foot_contact_forces</code>（特权信息）
+        以及<strong>完整 29 维 ref_joint_pos</strong>。噪声只加在 actor 上（非对称 actor-critic）。
+      </p>
+    </section>
+
+    <!-- ============ 7 ============ -->
+    <section id="s7">
+      <h2><span class="idx">7</span>奖励函数（残差版重排后）</h2>
+      <p class="lead">
+        主线：速度项只管"别停、别超速"；步态质量全权交给 ref_tracking + 抬脚正激励；
+        方向约束单列。所有数值都经实跑标定，代码注释保留了每次改动的实测依据。
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>项</th><th class="num">权重</th><th>作用与关键设计</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>forward_progress_y</code></td><td class="num w-pos">+5.0</td>
+              <td>替换内置瞬时速度 exp 核。参考步态 COM 是脉冲式（峰值 1.6 m/s、26% 帧倒退），
+                瞬时核只会奖励"匀速蹭走"。改为 <strong>EMA（tau=1.8 s = 一个步态周期）平均推进 ÷ 指令</strong>，
+                夹 [0,1]：跟参考 0.85 / 蹭走 0.70 / 站住 0。原地踏步 env 打五折，避免抬高 value baseline。</td>
+            </tr>
+            <tr>
+              <td><code>ref_tracking</code></td><td class="num w-pos">+2.0</td>
+              <td>12 腿关节跟踪 exp 核（σ = 0.30 rad）——唯一逼出"真正侧步"的项。用 exp 而非 L2，
+                避免退化成行为克隆。</td>
+            </tr>
+            <tr>
+              <td><code>swing_clearance</code></td><td class="num w-pos">+2.0</td>
+              <td>脚底离地高度 / target，<strong>平方</strong>后按脚平均。破"抬脚无收益、失衡 −5 分"的
+                不对称稳态（贴地蹭）。平方是关键：线性版被"贴地快蹭"刷分（air_time 涨、peak_height 反降）。
+                带 max_height 截断 + <strong>竖直姿态门控</strong>（up_z &gt; 0.6）防摔倒扑腾刷分。</td>
+            </tr>
+            <tr><td><code>air_time</code></td><td class="num w-pos">+1.0</td>
+              <td>门槛 threshold_min 0.05 s（原 0.12 让这条恒为 0）。</td></tr>
+            <tr><td><code>upright</code></td><td class="num w-pos">+0.5</td>
+              <td>从 1.0 压到 0.5：原值 0.92/步属"白送分"，策略优先生存不前进。</td></tr>
+            <tr><td><code>foot_swing_height</code> / <code>foot_clearance</code></td><td class="num w-neg">−1.0 / −2.0</td>
+              <td>target 统一压到 0.15 m（原 0.18 与 α&lt;1 时参考只抬 5~12 cm 直接打架）。</td></tr>
+            <tr>
+              <td><code>yaw_drift</code></td><td class="num w-neg">−4.0</td>
+              <td>帧间偏航角速度平方，<strong>死区 0.08 rad/s</strong>。原 <code>sin²(yaw)</code> 版本
+                绕圈"无罪"（20 s 转 367° 只罚 0.018）；纯平方版在 0.09 rad/s 处梯度塌缩。权重按
+                <code>w ≈ 1853 / ep_len</code> 重标。</td>
+            </tr>
+            <tr>
+              <td><code>lateral_bias</code></td><td class="num w-neg">−20</td>
+              <td>机身系<strong>纵向</strong>速度 EMA(1.8 s) 偏置平方，死区 0.03——治步态自带的 X 向漂移
+                （三档实测都是 +0.10~0.13 m/s）。⚠️ −80 会把策略压垮成"别动"（ref_tracking 0.98→0.30）。</td>
+            </tr>
+            <tr><td><code>lateral_drift</code></td><td class="num w-neg">−0.2</td>
+              <td>(x − x₀)² 位移惩罚（保留，量级已由 lateral_bias 覆盖）。</td></tr>
+            <tr><td><code>action_rate_l2</code></td><td class="num w-neg">−0.006</td>
+              <td>从 −0.1 一路压下来：原值 −2.89/回合是前进奖励的 2.2 倍，等于奖励"别动"。</td></tr>
+            <tr><td><code>foot_slip</code></td><td class="num w-neg">−0.2</td><td>打滑惩罚（基线保留）。</td></tr>
+            <tr><td><code>dof_pos_limits</code></td><td class="num w-neg">−1.0</td><td>关节限位（基线保留）。</td></tr>
+            <tr>
+              <td><code>is_terminated</code></td><td class="num w-neg">−250</td>
+              <td>摔倒一次性惩罚。−5 形同虚设（×dt 只有 0.1 分）；−400 把策略逼成"站着不动"
+                （摔率 78% 时走路的期望收益转负）→ −250 是平衡点。</td>
+            </tr>
+            <tr><td><code>ref_probe</code></td><td class="num w-probe">1e-9</td>
+              <td>探针：把 rise_est / tread_est / scan_ok / ref_alpha 写进 Metrics。
+                权重为 0 时 mjlab 连 func 都不调用，故用 1e-9。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="note">
+        <strong>A/B 开关：</strong><code>ELF3_REWARD_OFF=项名,项名</code> 一次关一批做归因。
+        实测曾出现"训练指标一路向好、eval 反而退步"的静默换目标，靠它把责任定位到单项。
+      </div>
+    </section>
+
+    <!-- ============ 8 ============ -->
+    <section id="s8">
+      <h2><span class="idx">8</span>课程与训练算法</h2>
+
+      <h3>8.1 三重课程</h3>
+      <ol>
+        <li><strong>地形课程</strong>（自研 <code>terrain_levels_time</code>，替换内置
+          <code>terrain_levels_vel</code>）：内置判据"走够 |cmd| × 剩余时间"导致<strong>摔得越早
+          要求越高</strong>，全部 env 钉死 level 0（曾因此 12000 轮无效）。新判据：
+          <strong>升级 = 活到 25%（5 s）且离出生点 ≥ 0.90 m</strong>；<strong>降级 = 活不到 40%（8 s）</strong>。
+          碗底半宽 flat 1.00 / easy 0.80 / mid 0.40 / hard 0.62 m，0.90 等于"至少踏上第一级"。</li>
+        <li><strong>指令速度课程</strong>：<code>lin_vel_y</code> 三段
+          (0.10,0.14) → (0.13,0.17) → (0.14,0.20)。上界与"步态几何可达速度 = tread"对齐，
+          避免物理上追不上的指令把梯度削平。</li>
+        <li><strong>参考幅度 α 课程</strong>：见 §5。</li>
+      </ol>
+      <div class="note">
+        初始地形等级钉 0、四档 <code>step_height_range</code> 低端全部对齐 0——保证存在
+        "先在平地站稳"的阶段（曾实测 level 0 的八个 env 里 7 个出生就在 6~14 cm 台阶上）。
+      </div>
+
+      <h3>8.2 PPO 超参（rl_cfg.py）</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>项</th><th>值</th><th>备注</th></tr></thead>
+          <tbody>
+            <tr><td>网络</td><td>MLP 512-256-128，ELU，obs 归一化</td><td>actor / critic 同构</td></tr>
+            <tr><td>分布</td><td>高斯，std_type=scalar，init_std=1.0</td><td></td></tr>
+            <tr>
+              <td>entropy_coef</td><td><strong>0.0002</strong></td>
+              <td>⚠️ mjlab 奖励按 per-step × dt(0.02) 缩放，每步任务奖励仅 ~0.03；29 维高斯 H≈37，
+                coef=0.0015 时熵项 0.056/步 = 任务奖励的 1.5 倍 → 优化器在<strong>最大化随机性</strong>
+                （std 与熵单调升、ep_len 单调降）。按量纲重标到 0.0002。</td>
+            </tr>
+            <tr><td>学习率</td><td>1e-3，adaptive（desired_kl=0.01）</td><td></td></tr>
+            <tr><td>γ / λ / clip</td><td>0.99 / 0.95 / 0.2</td><td></td></tr>
+            <tr><td>采样</td><td>24 步/env × mini-batch 4 × 5 epochs</td><td>最大 30000 iter</td></tr>
+            <tr><td>logger</td><td>启动时探测 wandb 兼容性</td><td>rsl_rl 写死 <code>start_method="thread"</code>
+              与新版 wandb 冲突，失败自动退 tensorboard</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============ 9 ============ -->
+    <section id="s9">
+      <h2><span class="idx">9</span>安全终止、域随机化与地形</h2>
+
+      <h3>终止条件</h3>
+      <ul>
+        <li><strong>躯干 / 腰 / 头触地力 &gt; 20 N</strong> 即终止——<code>fell_over</code>(70°) 挡不住
+          "跪在台阶上蹭上去"这类局部最优；</li>
+        <li>倾角 &gt; 70°、超时、出地形边界。</li>
+      </ul>
+
+      <h3>域随机化</h3>
+      <ul>
+        <li><strong>推撞</strong>：每 3~6 s，±0.2 m/s / ±0.15 rad/s（从每 1~3 s ±0.3 降下来：爬台阶
+          容错小一个量级）。可 <code>ELF3_PUSH_SCALE</code> 缩放——训练分布比测试暴力一个数量级时，
+          策略会变成"抗推专家"而不是"走得好"。</li>
+        <li>脚底摩擦 0.4~1.2、编码器偏置 ±0.015 rad、躯干质心偏移 ±2.5~3 cm、出生位姿 ±0.2 m / yaw ±0.15 rad。</li>
+      </ul>
+
+      <h3>地形</h3>
+      <p>
+        <code>pyramid_stairs_inv</code> <strong>倒置</strong>金字塔：碗底出生，向外走全是上台阶。
+        正金字塔的 origin 在最高平台，曾因此白训 12000 轮。
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>列</th><th>级高范围</th><th class="num">踏面</th><th>用途</th></tr></thead>
+          <tbody>
+            <tr><td>flat</td><td>0 ~ 2 cm</td><td class="num">0.40</td><td>先学会不摔、学会横着迈步</td></tr>
+            <tr><td>easy</td><td>0 ~ 10 cm</td><td class="num">0.40</td><td>缓台阶</td></tr>
+            <tr><td>mid</td><td>0 ~ 16 cm</td><td class="num">0.30</td><td>标准</td></tr>
+            <tr><td>hard</td><td>0 ~ 25 cm</td><td class="num">0.24</td><td>窄踏面高台阶</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>踏面取 0.1 m 整数倍以对齐射线栅格，使 tread 估计不在档位间跳变。</p>
+    </section>
+
+    <!-- ============ 10 ============ -->
+    <section id="s10">
+      <h2><span class="idx">10</span>已踩过的坑（诊断指纹速查）</h2>
+      <p class="lead">这些坑的共同点：代码不报错，指标看起来"正常"，只是永远学不会。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>症状</th><th>根因</th><th>修复</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>rise_est 恒 0、tread_est 恒等于兜底值</td>
+              <td>height_scan 取数 <code>frame_pos[:,:,2:3] − hit[...,2]</code> 广播成 [B,B,N]，
+                被维度守卫静默丢弃；B=1 时恰好正确</td>
+              <td>统一走 <code>scan_to_heights()</code>，两边先 view 成 [B,F,N]</td>
+            </tr>
+            <tr>
+              <td>rise / tread 顶到 clamp 上限</td>
+              <td>射线打到机器人自己的腿（视觉 mesh 在 geom group 0）</td>
+              <td>mesh 挪 group 2；estimate 中值滤波 + dh_max=0.30 丢弃异常</td>
+            </tr>
+            <tr>
+              <td>全员站一会就摔、rise_est 恒 0</td>
+              <td>正金字塔出生在最高平台，往外全是下楼梯</td>
+              <td>换 <code>pyramid_stairs_inv</code></td>
+            </tr>
+            <tr><td>课程冻结在 level 0</td><td>内置课程"摔得越早要求越高"</td><td>自研时间型课程</td></tr>
+            <tr><td>ep_len 稳定在 2~4 s 不动</td><td>课程死带 [2s, 5s]：不降级也升不了</td><td>demote_frac 0.10 → 0.40</td></tr>
+            <tr><td>贴地蹭、peak_height 1.6 cm</td><td>抬脚在奖励里零收益、失衡 −5 分</td><td>swing_clearance 正激励（平方 + 门控）</td></tr>
+            <tr><td>std / 熵单调升、ep_len 单调降</td><td>entropy_coef 相对任务奖励量纲过大</td><td>0.0015 → 0.0002</td></tr>
+            <tr><td>续训后当场崩</td><td>α ramp 从 0 重来，参考打回站姿</td><td><code>ELF3_ALPHA=1.0</code> / <code>ELF3_ALPHA_START</code></td></tr>
+            <tr><td>play 漂移数字不可信</td><td>play 配置的指令范围被放宽</td><td>评测必须 <code>--freeze-command</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><strong>工具链：</strong></p>
+      <ul>
+        <li><code>diagnose_policy.py</code> —— <code>--alpha</code> / <code>--trace</code> /
+          <code>--dump-scan-all</code> / <code>--freeze-command</code>；</li>
+        <li><code>analyze_trace.py</code> —— 漂移 A/B/C 分类；</li>
+        <li><code>check_ref_vs_terrain.py</code> —— 参考档位 vs 实际地形核对；</li>
+        <li><code>python -m ...ref_table</code> —— 自测，覆盖遮挡 / miss / 兜底等回归用例。</li>
+      </ul>
+    </section>
+
+    <!-- ============ 11 ============ -->
+    <section id="s11">
+      <h2><span class="idx">11</span>文件索引</h2>
+<div class="tree"><span class="dir">train/mjlab_tasks/crab/</span>
+├── <span class="f">env_cfg.py</span>            <span class="cmt"># 基线环境（传感器/观测/奖励/事件/终止）</span>
+├── <span class="f">env_cfg_residual.py</span>   <span class="cmt"># 残差版增量：动作/观测重组/奖励重排/课程/安全</span>
+├── <span class="f">residual_action.py</span>    <span class="cmt"># 残差动作项 q_cmd = q_ref + scale·clip(Δq)</span>
+├── <span class="f">ref_table.py</span>          <span class="cmt"># 参考表运行时：读表/估地形/插值 + 自测</span>
+├── <span class="f">mdp_extra.py</span>          <span class="cmt"># 自定义观测项与奖励项（含实测标定注释）</span>
+├── <span class="f">terrain_cfg.py</span>        <span class="cmt"># 四列倒置金字塔地形</span>
+├── <span class="f">rl_cfg.py</span>             <span class="cmt"># PPO 超参</span>
+├── <span class="f">robot_cfg.py</span>          <span class="cmt"># 机器人资产/增益/scale</span>
+├── <span class="f">traj_action.py</span>        <span class="cmt"># 时间轴跟踪动作（蹲起任务复用）</span>
+└── <span class="f">squat_*.py</span>            <span class="cmt"># 蹲下/起立子任务</span>
+
+<span class="dir">train/assets/</span>
+├── <span class="f">build_ref_tables.py</span>   <span class="cmt"># 离线生成 crab_ref_v1.npz（14 rise × 4 tread）</span>
+├── <span class="f">make_robot_xml.py</span>     <span class="cmt"># 生成 elf3_robot_only.xml（含 geom group 修复）</span>
+└── <span class="dir">ref_tables/</span>
+    └── <span class="f">crab_ref_v1.npz</span>   <span class="cmt"># 参考表（入库，207 KB）</span>
+
+<span class="dir">sim/.../launch/</span>
+├── <span class="f">crab_climb.py</span>         <span class="cmt"># 四相位准静态 IK 脚本步态（参考表源头）</span>
+├── <span class="f">crab_ik.py</span>            <span class="cmt"># DLS 数值 IK / 可行性窗口</span>
+└── <span class="f">crab_replay.py</span>        <span class="cmt"># 用同一份 RefTable 做开环/闭环回放</span>
+
+<span class="dir">scripts/</span>
+├── <span class="f">diagnose_policy.py</span>    <span class="cmt"># 策略诊断（α / 扫描 / 轨迹落盘）</span>
+├── <span class="f">analyze_trace.py</span>      <span class="cmt"># 漂移分类（A/B/C）</span>
+└── <span class="f">check_ref_vs_terrain.py</span> <span class="cmt"># 参考步态档位 vs 实际地形核对</span></div>
+      <div class="note" style="margin-top:18px">
+        <strong>相关文档：</strong><code>docs/crab_rl_training.md</code> 是早期训练设计稿
+        （已自注部分数字被实现取代）；<code>docs/crab_gait_pipeline.md</code> 讲开环脚本步态的
+        网页烘焙链路。本文以当前代码为准。
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  Elf3 螃蟹步爬楼 · 运动策略技术解析 &nbsp;|&nbsp; 依据代码版本 2026-11-05 &nbsp;|&nbsp; 单文件 HTML，可直接分发
+</footer>
+
+<button class="top-btn" id="topBtn" title="回到顶部" aria-label="回到顶部">↑</button>
+
+<script>
+(function(){
+  var links = Array.prototype.slice.call(document.querySelectorAll('#toc a'));
+  var sections = links.map(function(a){ return document.querySelector(a.getAttribute('href')); });
+  var byId = {};
+  links.forEach(function(a,i){ byId[sections[i].id] = a; });
+
+  function setActive(id){
+    links.forEach(function(a){ a.classList.remove('active'); });
+    if(byId[id]) byId[id].classList.add('active');
+  }
+
+  if('IntersectionObserver' in window){
+    var visible = {};
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){ visible[e.target.id] = e.isIntersecting ? e.intersectionRatio : 0; });
+      var best = null, bestVal = -1;
+      Object.keys(visible).forEach(function(id){
+        if(visible[id] > bestVal){ bestVal = visible[id]; best = id; }
+      });
+      if(best && bestVal > 0) setActive(best);
+    }, {rootMargin:'-15% 0px -70% 0px', threshold:[0,0.2,0.5,1]});
+    sections.forEach(function(s){ if(s) io.observe(s); });
+  } else {
+    window.addEventListener('scroll', function(){
+      var y = window.scrollY + 120;
+      var cur = sections[0] ? sections[0].id : null;
+      sections.forEach(function(s){ if(s && s.offsetTop <= y) cur = s.id; });
+      if(cur) setActive(cur);
+    });
+  }
+
+  var btn = document.getElementById('topBtn');
+  window.addEventListener('scroll', function(){
+    if(window.scrollY > 600) btn.classList.add('show');
+    else btn.classList.remove('show');
+  });
+  btn.addEventListener('click', function(){ window.scrollTo({top:0,behavior:'smooth'}); });
+})();
+</script>
+</body>
+</html>

@@ -52,6 +52,7 @@
     <mesh name="l_wrist_x_link" file="l_wrist_x_link.STL"/>
     <mesh name="l_wrist_y_link" file="l_wrist_y_link.STL"/>
     <mesh name="l_wrist_z_link" file="l_wrist_z_link.STL"/>
+    <mesh name="l_hand" file="l_hand.STL"/>
 
     <mesh name="r_shoulder_y_link" file="r_shoulder_y_link.STL"/>
     <mesh name="r_shoulder_x_link" file="r_shoulder_x_link.STL"/>
@@ -60,6 +61,7 @@
     <mesh name="r_wrist_x_link" file="r_wrist_x_link.STL"/>
     <mesh name="r_wrist_y_link" file="r_wrist_y_link.STL"/>
     <mesh name="r_wrist_z_link" file="r_wrist_z_link.STL"/>
+    <mesh name="r_hand" file="r_hand.STL"/>
 
     <!-- <texture type="skybox" builtin="gradient" width="512" height="512" rgb1=".4 .6 .8"   rgb2="0 0 0" /> -->
     <!-- <texture name="texgeom" type="cube" builtin="flat" mark="cross" width="128"  height="128"  rgb1="0.6 0.6 0.6" rgb2="0.6 0.6 0.6" markrgb="1 1 1" /> -->
@@ -247,6 +249,7 @@
                     <inertial pos="0.0308695 1.39176e-09 0.0141752" quat="0.92388 0 0.382683 0" mass="0.106561" diaginertia="8.685e-05 7.12e-05 7.068e-05"/>
                     <joint name="l_wrist_z_joint" pos="0 0 0" axis="0 0 1" range="-0.7854 0.7854" damping="0.5"/>
                     <geom class="visual" type="mesh" rgba="0.752941 0.752941 0.752941 1" mesh="l_wrist_z_link"/>
+                    <geom class="visual" type="mesh" rgba="0.752941 0.752941 0.752941 1" mesh="l_hand"/>
                     <geom name="l_wrist_z_collision" class="collision" type="sphere" size="0.03" pos="0.04 0 0"/>
                   </body>
                 </body>
@@ -294,6 +297,7 @@
                     <inertial pos="0.0308695 1.11972e-09 0.0141752" quat="0.92388 0 0.382683 0" mass="0.106561" diaginertia="8.685e-05 7.12e-05 7.068e-05"/>
                     <joint name="r_wrist_z_joint" pos="0 0 0" axis="0 0 1" range="-0.7854 0.7854" damping="0.5"/>
                     <geom class="visual" type="mesh" rgba="0.752941 0.752941 0.752941 1" mesh="r_wrist_z_link"/>
+                    <geom class="visual" type="mesh" rgba="0.752941 0.752941 0.752941 1" mesh="r_hand"/>
                     <geom name="r_wrist_z_collision" class="collision" type="sphere" size="0.03" pos="0.04 0 0"/>
                 
                   </body>

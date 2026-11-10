@@ -148,6 +148,7 @@ let motion = null;     // 当前回放（MotionPlayer）
 let motionName = 'off';
 let following = true;  // 视角是否跟随机器人
 let motionHudAcc = 0;
+let motionPausedUi = false;   // 暂停按钮当前显示的状态（冻结末帧时自动同步）
 const _vRobot = new THREE.Vector3();
 const _vDelta = new THREE.Vector3();
 
@@ -162,6 +163,12 @@ const VIEWS = {
   // "机器人中心 +（0, 1.5, -6.0）"，既适合开视角跟随时做追尾机位，
   // 关掉跟随时也能看到起步段和左侧整条楼梯。
   crab:  { pos: [-1.35, 2.50, -6.00], target: [-1.35, 1.00, 0] },
+  // 蹲起：原地不动，用 3/4 机位同时看得见膝角与躯干前倾；蹲下后躯干只有
+  // 0.52 m 高，所以视点比正面机位略低，别把目标点还留在 0.95 m。
+  squat: { pos: [1.30, 1.05, 1.65], target: [0, 0.70, 0] },
+  // 正步 / 敬礼：机器人正面朝 three −Z（见 mjscene 的 yaw = +PI/2），所以
+  // 正面 3/4 机位必须站在 −Z 一侧，否则看到的是后背（旧配置就吃到这个坑）。
+  parade: { pos: [-1.45, 1.15, -1.75], target: [0, 0.98, 0] },
   wide:  { pos: [7.20, 4.60, 10.5], target: [1.6, 0.90, 0] },
 };
 
@@ -324,11 +331,12 @@ async function boot() {
     get seeThrough() { return xr ? xr.through : false; },
     xrCapabilities: () => (xr ? xr.capabilities() : null),
     get kinematicsName() { return kinematics === mujoco.mj_forward ? 'mj_forward' : 'mj_kinematics'; },
+    get motion() { return motion; },          // 调试/自检：可直接快进、查 loop 状态
     getMotion: () => (motion ? {
       name: motionName, kind: motion.kind, label: motion.label,
       nframes: motion.nframes, nq: motion.nq, fps: motion.fps,
       duration: +motion.duration.toFixed(3), time: +motion.time.toFixed(3),
-      speed: motion.speed, paused: motion.paused,
+      speed: motion.speed, paused: motion.paused, loop: motion.loop,
       stats: motion.meta.stats || null,
     } : { name: motionName, kind: null }),
   };
@@ -341,7 +349,7 @@ async function boot() {
 }
 
 // ---------------------------------------------------------------- 运动仿真回放
-/** URL 参数：?motion=<off|fight_policy|fight_ref|climb_policy|crab|1> &speed=0.5 &follow=0/1 */
+/** URL 参数：?motion=<off|fight_policy|fight_ref|climb_policy|crab|squat_cycle|squat_down|squat_up|goose_walk|goose_inplace|salute|1> &speed=0.5 &follow=0/1 */
 async function applyMotionFromQuery() {
   const q = new URLSearchParams(location.search);
   const speed = q.get('speed');
@@ -398,7 +406,8 @@ async function setMotion(name, { hideStairs = true } = {}) {
     $('motion-note').innerHTML =
       '回放数据由 <code>tools/bake_motion.py</code>（打拳）/ '
       + '<code>tools/bake_climb.py</code>（爬楼梯）/ '
-      + '<code>tools/bake_crab.py</code>（螃蟹步横移）在本机跑一遍仿真后录制。';
+      + '<code>tools/bake_crab.py</code>（螃蟹步横移）在本机跑一遍仿真后录制；'
+      + '<code>tools/bake_squat.py</code>（蹲下 / 起立）直接烘焙参考轨迹。';
     return null;
   }
 
@@ -421,14 +430,17 @@ async function setMotion(name, { hideStairs = true } = {}) {
     if (sel) sel.value = 'off';
     $('hud-motion').textContent = '—';
     $('motion-note').innerHTML = `加载失败：${e.message}<br>`
-      + '先在项目根目录跑 <code>python web/tools/bake_motion.py</code> 生成回放数据。';
+      + '先在项目根目录跑 <code>python web/tools/bake_*.py</code> 生成对应回放数据'
+      + '（蹲下 / 起立用 <code>bake_squat.py</code>）。';
     toast(`回放数据加载失败：${e.message}`, 4200);
     return null;
   }
 
   motion = player;
+  motion.loop = player.meta.loop !== false;   // 单段蹲起播完冻结末帧
   motion.speed = Number($('opt-motion-speed').value) || 1;
   motion.restart();
+  motionPausedUi = false;
   $('btn-motion-pause').textContent = '暂停';
 
   // 两套地形共用同一个编译好的模型：紧凑障碍沿 +X（爬楼梯策略用的），
@@ -438,11 +450,15 @@ async function setMotion(name, { hideStairs = true } = {}) {
   //   爬楼梯策略：显示紧凑障碍
   //   螃蟹步横移：显示 crab_ 台阶
   const isCrab = motion.kind === 'crab';
+  const isSquat = motion.kind === 'squat';
+  const isParade = motion.kind === 'parade';
   setTerrain({
     stairs: motion.kind === 'climb' || (!isCrab && !hideStairs),
     crab: isCrab,
   });
   if (isCrab) applyView('crab');      // 换成能看清台阶剖面的侧视机位
+  if (isSquat) applyView('squat');    // 原地蹲起用 3/4 机位看膝角与躯干前倾
+  if (isParade && motion.meta.camera) applyView(motion.meta.camera);  // 敬礼用近景
 
   renderer.shadowMap.autoUpdate = true;
   renderer.shadowMap.needsUpdate = true;
@@ -457,20 +473,61 @@ async function setMotion(name, { hideStairs = true } = {}) {
       + '（残差步态 + 地形高度扫描，<b>没有脚本轨迹</b>）。机器人朝 +X，沿 +Y 侧向横移上楼。'
     : '脚本步态：<code>crab_climb.py</code> 的四相位准静态控制器解出的关节轨迹'
       + '（闭式 IK + DLS 精修，<b>没有策略网络</b>）。机器人朝 +X，沿 +Y 侧向横移上楼。';
+  const squatHead = motion.meta.loop
+    ? '循环回放：下蹲 → 蹲姿保持 → 起立 → 站姿保持，首尾同姿态，无缝循环。'
+    : '单段回放：播完<b>冻结在末帧</b>（与真机 <code>freeze_at_end</code> 一致），不跳回起点。'
+      + '想重看请点「从头播放」。';
   const note = motion.kind === 'ref'
     ? '参考动作：<code>fight.npz</code> 里重定向后的运动，纯运动学装配（无物理）。'
-    : motion.kind === 'crab'
-      ? crabHead
-        + (s ? `<br>台阶 ${s.steps} 级 · 级高 ${s.riseMin}~${s.riseMax} m · 进深 `
-          + `${s.treadMin}~${s.treadMax} m · 最高 ${s.maxTop} m · 横移 ${s.travelY} m。` : '')
-      : motion.kind === 'climb'
-        ? '策略仿真：本机跑 MuJoCo + <code>normal_depth.onnx</code> 深度视觉闭环录制'
-          + '（躯干俯视深度相机；地形 = <code>universal_test</code> 紧凑障碍）。'
-          + (s ? `<br>最远 x = ${s.maxX} m（终点线 13.2 m），躯干高度 `
-            + `${s.rootZMin} ~ ${s.rootZMax} m，${s.fell ? '末段摔倒' : '全程未摔倒'}。` : '')
-        : '策略仿真：本机跑 MuJoCo + <code>policy.onnx</code> 闭环录制。'
-          + (s ? `跟踪误差：均值 ${s.anchorErrMean} m / 最大 ${s.anchorErrMax} m，`
-            + `躯干最大倾角 ${s.tiltMax}°。` : '');
+    : motion.kind === 'parade'
+      ? '脚本动作：<code>launch/goose_step.py</code> 用解析两连杆 IK 让<b>两条腿始终绷直</b>、'
+        + '支撑脚锁死不滑且大腿<b>微微后倾</b>；大臂前摆到最高点时<b>小臂水平横在胸前</b>'
+        + '（肩内旋把折 90° 的小臂转到横向）；'
+        + '<code>launch/salute.py</code> 用「腕 + 肘」双约束 IK 解出军礼手位。'
+        + '逐帧生成，纯运动学装配（<b>无策略网络、不跑 mj_step</b>）。'
+        + (s ? `<br>脚底最低点 ${s.footMinZCm} ~ ${s.footMaxZCm} cm，`
+          + `单帧最大关节跳变 ${s.maxJointJumpRad} rad，X 向推进 ${s.travelX} m。`
+          + (s.kickLiftCm ? `踢腿高度 ${s.kickLiftCm} cm @ ${s.baseSpeed} m/s。` : '')
+          + (s.wristRightCm !== undefined
+            ? `<br>右手腕沿<b>机器人右侧水平外移 ${s.wristRightCm} cm</b>`
+              + `（y = ${s.wristY_m} m，高度不变），距头中心 ${s.wristToHeadMm} mm`
+              + `（IK 误差 ${s.wristErrMm} mm）；左手自然下垂，`
+              + `小臂竖直度 <b>${s.leftArmDown}</b>（1.0 = 完全垂直向下）。`
+            : '')
+          + (s.wristToHeadMm && s.wristRightCm === undefined
+            ? `敬礼手到头中心 ${s.wristToHeadMm} mm（IK 误差 ${s.wristErrMm} mm）。` : '')
+          + (s.kneeSupportDeg ? `<br>双腿平均膝屈：支撑 <b>${s.kneeSupportDeg}°</b> / `
+            + `摆动 <b>${s.kneeSwingDeg}°</b>（腿基本笔直）；基座起伏 ${s.hipRiseCm} cm，`
+            + '这是「腿直 + 脚贴地 + 大步幅」三者兼得的必然结果。' : '')
+          + (s.stanceBackDeg ? `<br>支撑脚放在质心后方 ${s.stanceBackCm} cm，`
+            + `支撑腿大腿随之后倾 <b>${s.stanceBackDeg}°</b>（膝在髋后），`
+            + `前摆峰值大臂前摆 ${s.armFwdDeg}°、小臂水平横向 `
+            + `(横向占比 ${s.armMedial})。` : '')
+          + (s.leanDeg ? `<br>正步上体<b>前倾 ${s.leanDeg}°</b>，按 FK 实测质心前移 `
+            + `${s.balanceShiftCm} cm（收敛残差 ${s.comResidualMm} mm）；`
+            + '重心投影落在前脚掌上，是行进中的动态平衡姿势。' : '')
+          : '')
+        + (motion.meta.loop
+          ? '<br>循环回放：首尾同相位，播完自动从起点继续。'
+          : '<br>单段回放：播完<b>冻结在末帧</b>，想重看请点「从头播放」。')
+      : motion.kind === 'squat'
+      ? '参考轨迹：<code>logs/export/squat_{down,up}.npz</code> 的 29 关节极限蹲动作，'
+        + '纯运动学装配（<b>无策略网络、不跑 mj_step</b>，所以不会摔倒）。'
+        + (s ? `<br>基座 z ${s.zStand} → ${s.zSquat} m，蹲姿躯干前倾 ${s.pitchSquatDeg}°；`
+          + `${s.framesDown} 帧下蹲 + ${s.framesUp} 帧起立 @ ${s.fps} fps。` : '')
+        + `<br>${squatHead}`
+      : motion.kind === 'crab'
+        ? crabHead
+          + (s ? `<br>台阶 ${s.steps} 级 · 级高 ${s.riseMin}~${s.riseMax} m · 进深 `
+            + `${s.treadMin}~${s.treadMax} m · 最高 ${s.maxTop} m · 横移 ${s.travelY} m。` : '')
+        : motion.kind === 'climb'
+          ? '策略仿真：本机跑 MuJoCo + <code>normal_depth.onnx</code> 深度视觉闭环录制'
+            + '（躯干俯视深度相机；地形 = <code>universal_test</code> 紧凑障碍）。'
+            + (s ? `<br>最远 x = ${s.maxX} m（终点线 13.2 m），躯干高度 `
+              + `${s.rootZMin} ~ ${s.rootZMax} m，${s.fell ? '末段摔倒' : '全程未摔倒'}。` : '')
+          : '策略仿真：本机跑 MuJoCo + <code>policy.onnx</code> 闭环录制。'
+            + (s ? `跟踪误差：均值 ${s.anchorErrMean} m / 最大 ${s.anchorErrMax} m，`
+              + `躯干最大倾角 ${s.tiltMax}°。` : '');
   $('motion-note').innerHTML = note
     + `<br>${motion.nframes} 帧 @ ${motion.fps} fps = ${motion.duration.toFixed(1)} s。`;
   toast(`已载入回放：${motion.label}`);
@@ -558,7 +615,7 @@ function refreshHudMode() {
   const mode = xr ? xr.active : null;
   if (mode === 'ar') el.textContent = '半透明 VR（透视）';
   else if (mode === 'vr') el.textContent = 'VR 沉浸观看';
-  else if (motion) el.textContent = '运动仿真回放';
+  else if (motion) el.textContent = motion.kind === 'squat' ? '参考轨迹回放' : '运动仿真回放';
   else if (simulating) el.textContent = '物理运行（无控制器）';
   else el.textContent = '静止站立';
 }
@@ -578,14 +635,25 @@ function setupUI() {
     if (!motion) { toast('先在「回放」里选一段运动数据'); return; }
     motion.restart();
     motion.paused = false;
+    motionPausedUi = false;
     $('btn-motion-pause').textContent = '暂停';
     toast('已从头播放');
   });
   $('btn-motion-pause').addEventListener('click', () => {
     if (!motion) { toast('先在「回放」里选一段运动数据'); return; }
-    motion.paused = !motion.paused;
-    $('btn-motion-pause').textContent = motion.paused ? '继续' : '暂停';
-    toast(motion.paused ? '回放已暂停' : '继续播放');
+    // 单段蹲起播完会冻结末帧；此时「继续」等价于从头播放，否则点了也不动。
+    const frozen = !motion.loop && motion.paused
+      && motion.time >= motion.duration - 1e-6;
+    if (frozen) {
+      motion.restart();
+      motion.paused = false;
+      toast('已从头播放');
+    } else {
+      motion.paused = !motion.paused;
+      toast(motion.paused ? '回放已暂停' : '继续播放');
+    }
+    motionPausedUi = motion.paused;
+    $('btn-motion-pause').textContent = motionPausedUi ? '继续' : '暂停';
   });
 
   // 显示开关
@@ -681,6 +749,10 @@ function frame() {
   if (motion) {
     // 运动仿真回放：按时间插值写回 qpos → 刷新几何位姿 → 同步 three.js
     motion.advance(dt);
+    if (motion.paused !== motionPausedUi) {       // 单段冻结末帧时自动改按钮文字
+      motionPausedUi = motion.paused;
+      $('btn-motion-pause').textContent = motionPausedUi ? '继续' : '暂停';
+    }
     motion.writeQpos(data.qpos);
     kinematics(model, data);
     mjScene.sync();

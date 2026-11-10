@@ -179,6 +179,16 @@ def main() -> int:
                 i += 1
                 continue
             if status.startswith(("R", "C")):     # 重命名/复制多一个旧路径
+                # ⚠️ 重命名必须「先删旧路径再写新路径」：Git Data API 的 tree 是
+                # 增量补丁（base_tree + entries），只加新路径会让旧路径继续留在
+                # base_tree 里。之前只写新文件，结果新 tree 比本地多出两个已删的
+                # onnx，末尾的 tree 一致性校验直接报错（幸好拦住了，没强推）。
+                old_p = toks[i + 1].decode("utf-8", "surrogateescape")
+                if status.startswith("R"):
+                    entries.append({"path": old_p, "mode": "100644",
+                                    "type": "blob", "sha": None})
+                    deletions += 1
+                    print(f"  删除 {old_p}（重命名的旧路径）")
                 p = toks[i + 2]
                 i += 3
             else:

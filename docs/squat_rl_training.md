@@ -931,3 +931,50 @@ def control(robot_state, action):          # 20 ms 调一次
    错位，表现为「蹲到一半开始抖」。§6.5 的超时保护（down 超过 3.5 s 仍未到末帧就停机）
    也依赖这个时间基准。
 
+---
+
+## 9. 在网页端 MuJoCo WASM 里播放
+
+**能播，而且不需要 GPU / 训练 / ONNX。** `web/` 里跑的是 MuJoCo 官方
+WebAssembly 构建，页面先用 VFS 编译 `web/assets/elf3.xml`，回放时按时间插值把
+`qpos` 写进 `data.qpos`，再调 `mj_kinematics` 刷新几何位姿。也就是说它播的是
+**录好的姿态序列**，不是策略网络，也不是真实物理。§8 导出的
+`logs/export/squat_{down,up}.npz` 正好就是这样的序列（`qpos [T,38]` @ 50 Hz），
+所以只要烘焙一次即可：
+
+```bash
+python scripts/export_squat_npz.py       # 已有 squat_down/up.npz 可跳过
+python web/tools/bake_squat.py            # 生成 3 段网页回放数据
+cd web && node server.mjs --no-https --open-path "/?motion=squat_cycle"
+```
+
+浏览器打开：
+
+| URL | 内容 |
+| --- | --- |
+| `?motion=squat_cycle` | 下蹲 → 蹲姿保持 1 s → 起立 → 站姿保持 1 s，323 帧 / 6.46 s，无缝循环 |
+| `?motion=squat_down` | 124 帧 / 2.46 s，**播完冻结在蹲姿**（`freeze_at_end`，与 §6 一致） |
+| `?motion=squat_up` | 102 帧 / 2.02 s，播完冻结在站姿 |
+
+也可以在右侧面板「运动仿真 → 回放」下拉里直接选；选蹲起会自动隐藏两套台阶、
+切到 3/4 机位（能同时看清膝角与躯干前倾）。VR 头显里用同一个 HTTPS 地址 + 相应
+URL 参数即可 1:1 观看。
+
+**三个和真机部署不同的地方，别混：**
+
+1. **不跑策略、不跑物理**。网页端没有 onnxruntime，也不调 `mj_step`，所以没有
+   重力 / 接触 / 扰动，机器人永远不会倒 —— 它演示的是**设计出来的参考动作**，
+   不是 `Elf3-Squat-*` 策略的控制效果。想看策略闭环的实际画面，要在服务器把
+   MuJoCo + §7 的 `squat_down.onnx` 闭环每步 `qpos` 录成同格式 npz，再用
+   `python web/tools/bake_squat.py --src-dir <目录>` 烘焙（键名保持一致）。
+2. **38 → 36 维关节对账**。网页模型 `elf3.xml` 是老版 nq=36，没有
+   `head_z` / `head_y` 两个被动头关节；`bake_squat.py` 按关节名把 npz 的
+   `qpos[:, :36]` 重排后再写 bin，不依赖列顺序不变。
+3. **落地自检**。脚本按网页 `MjScene.robotMinZ()` 的公式逐帧核对视觉网格最低点
+   （**不要重复叠加 `mesh_pos`**，MuJoCo 已把质心偏移折进 `geom_xpos`）。
+   当前 226 帧全部为 0.00 cm，即脚底正好贴地，`zOffset = 0`；偏了会直接报错，
+   而不是在网页里看到脚陷进地板。
+
+完整的网页端数据格式、循环拼接、`meta.loop` 冻结语义与自检项，见
+`web/README.md` §3 / §7.8。
+

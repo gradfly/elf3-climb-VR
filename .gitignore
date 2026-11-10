@@ -19,6 +19,8 @@ wandb/
 *.mjb
 # mjlab 训练用的派生机型 XML（由 train/assets/make_robot_xml.py 生成）
 elf3_robot_only.xml
+# MuJoCo 运行时日志（每次启动都往工作目录写，不是源码）
+MUJOCO_LOG.TXT
 
 # ---- 本地自签证书（web/tools/selfsign.mjs 每次启动自动生成）----
 web/certs/*.pem

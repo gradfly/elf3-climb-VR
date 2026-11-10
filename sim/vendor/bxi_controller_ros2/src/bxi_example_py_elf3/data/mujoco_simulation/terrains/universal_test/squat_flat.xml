@@ -1,0 +1,14 @@
+<mujocoinclude>
+  <!-- 蹲姿演示用的纯平地面，由 squat_stand.py 生成（勿手改）。 -->
+  <include file="assets.xml"/>
+  <asset>
+    <texture name="squat_floor_tex" type="2d" builtin="checker" rgb1="0.62 0.63 0.62" rgb2="0.50 0.51 0.50" width="512" height="512"/>
+    <material name="squat_floor" texture="squat_floor_tex" texrepeat="24 24" specular="0.15" shininess="0.10"/>
+  </asset>
+  <worldbody>
+    <light name="squat_world_light" pos="0 0 6" dir="0 0 -1" directional="true"
+           diffuse="0.55 0.55 0.55" ambient="0.32 0.32 0.32"
+           specular="0.05 0.05 0.05" castshadow="false"/>
+    <geom name="squat_ground" type="box" pos="0 0 -0.05" size="20.0 20.0 0.05" material="squat_floor" friction="1.0 0.01 0.001" condim="3"/>
+  </worldbody>
+</mujocoinclude>

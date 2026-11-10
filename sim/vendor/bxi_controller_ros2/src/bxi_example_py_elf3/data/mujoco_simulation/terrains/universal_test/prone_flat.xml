@@ -1,0 +1,14 @@
+<mujocoinclude>
+  <!-- 俯卧爬行用的纯平地面，由 prone_crawl.py 生成（勿手改）。 -->
+  <include file="assets.xml"/>
+  <asset>
+    <texture name="prone_floor_tex" type="2d" builtin="checker" rgb1="0.56 0.57 0.56" rgb2="0.44 0.45 0.44" width="512" height="512"/>
+    <material name="prone_floor" texture="prone_floor_tex" texrepeat="24 24" specular="0.12" shininess="0.08"/>
+  </asset>
+  <worldbody>
+    <light name="ut_world_light" pos="0 0 6" dir="0 0 -1" directional="true"
+           diffuse="0.55 0.55 0.55" ambient="0.30 0.30 0.30" specular="0.05 0.05 0.05" castshadow="false"/>
+    <geom name="ut_infinite_ground" type="box" pos="0 0 -0.05" size="20.0 20.0 0.05" material="prone_floor" friction="1.0 0.01 0.001" condim="3"/>
+    <site name="ut_spawn_origin" type="cylinder" pos="0 0 0.006" size="0.22 0.006" rgba="0.10 0.80 0.25 0.55"/>
+  </worldbody>
+</mujocoinclude>

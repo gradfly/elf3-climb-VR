@@ -49,6 +49,7 @@
     <mesh name="l_wrist_x_link" content_type="model/stl" file="l_wrist_x_link.STL"/>
     <mesh name="l_wrist_y_link" content_type="model/stl" file="l_wrist_y_link.STL"/>
     <mesh name="l_wrist_z_link" content_type="model/stl" file="l_wrist_z_link.STL"/>
+    <mesh name="l_hand" content_type="model/stl" file="l_hand.STL"/>
     <mesh name="r_shoulder_y_link" content_type="model/stl" file="r_shoulder_y_link.STL"/>
     <mesh name="r_shoulder_x_link" content_type="model/stl" file="r_shoulder_x_link.STL"/>
     <mesh name="r_shoulder_z_link" content_type="model/stl" file="r_shoulder_z_link.STL"/>
@@ -56,6 +57,7 @@
     <mesh name="r_wrist_x_link" content_type="model/stl" file="r_wrist_x_link.STL"/>
     <mesh name="r_wrist_y_link" content_type="model/stl" file="r_wrist_y_link.STL"/>
     <mesh name="r_wrist_z_link" content_type="model/stl" file="r_wrist_z_link.STL"/>
+    <mesh name="r_hand" content_type="model/stl" file="r_hand.STL"/>
   </asset>
 
   <worldbody>
@@ -203,6 +205,7 @@
                     <inertial pos="0.03004397 0 0.01513885" mass="0.09977741" fullinertia="6.728e-05 8.372e-05 6.773e-05 0 2.438e-05 0"/>
                     <joint name="l_wrist_z_joint" pos="0 0 0" axis="0 0 1" range="-0.7854 0.7854" actuatorfrcrange="-25 25" armature="0.00424198"/>
                     <geom rgba="0.752941 0.752941 0.752941 1" mesh="l_wrist_z_link"/>
+                    <geom mesh="l_hand"/>
                     <geom name="l_wrist_z_collision" class="collision" size="0.03" pos="0.04 0 0" type="sphere" condim="1"/>
                   </body>
                 </body>
@@ -243,6 +246,7 @@
                     <inertial pos="0.03004397 0 0.01513885" mass="0.09977741" fullinertia="6.728e-05 8.372e-05 6.773e-05 0 2.438e-05 0"/>
                     <joint name="r_wrist_z_joint" pos="0 0 0" axis="0 0 1" range="-0.7854 0.7854" actuatorfrcrange="-25 25" armature="0.00424198"/>
                     <geom rgba="0.752941 0.752941 0.752941 1" mesh="r_wrist_z_link"/>
+                    <geom mesh="r_hand"/>
                     <geom name="r_wrist_z_collision" class="collision" size="0.03" pos="0.04 0 0" type="sphere" condim="1"/>
                   </body>
                 </body>

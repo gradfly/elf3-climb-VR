@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-10-30T04:36:06.000Z",
+  "generatedAt": "2026-11-10T00:53:50.080Z",
   "entry": "elf3.xml",
   "files": [
     {
       "path": "elf3.xml",
-      "size": 33286
+      "size": 33584
     },
     {
       "path": "scene_bx.xml",
@@ -28,7 +28,7 @@
     },
     {
       "path": "meshes/l_hand.STL",
-      "size": 400084
+      "size": 400034
     },
     {
       "path": "meshes/l_hip_x_link.STL",
@@ -88,7 +88,7 @@
     },
     {
       "path": "meshes/r_hand.STL",
-      "size": 400084
+      "size": 400034
     },
     {
       "path": "meshes/r_hip_x_link.STL",
@@ -151,5 +151,5 @@
       "size": 500034
     }
   ],
-  "totalBytes": 12074147
+  "totalBytes": 12074345
 }

@@ -116,7 +116,7 @@ try {
   check('半透明 VR 按钮带独立样式类（磨砂玻璃观感）',
     (ui.xrBtns.find((b) => b.id === 'xr-ar') || {}).cls === 'xr-btn xr-ar',
     (ui.xrBtns.find((b) => b.id === 'xr-ar') || {}).cls);
-  check('7 个视角预设齐全', ui.views.length === 7, ui.views.join(','));
+  check('8 个视角预设齐全', ui.views.length === 8, ui.views.join(','));
   const wantOpts = ['opt-robot', 'opt-stairs', 'opt-crab', 'opt-floor', 'opt-shadow',
     'opt-collision', 'opt-sim', 'opt-follow'];
   check('显示/物理/跟随开关齐全', wantOpts.every((id) => ui.opts.includes(id)), ui.opts.join(','));
@@ -152,7 +152,7 @@ try {
       out[b.dataset.view]=[+c.x.toFixed(2),+c.y.toFixed(2),+c.z.toFixed(2),+t.y.toFixed(2)];
     } return out;})()`);
   const allMoved = Object.values(views).every((v) => v.some((x) => x !== 0));
-  check('7 个视角预设均可用', Object.keys(views).length === 7 && allMoved, JSON.stringify(views));
+  check('8 个视角预设均可用', Object.keys(views).length === 8 && allMoved, JSON.stringify(views));
 
   // 5. 物理开关 + 复位
   const phys = await evalJs(ws, `(async()=>{
@@ -311,6 +311,67 @@ try {
     crab.mode.includes('运动仿真') && crab.hud.includes('脚本步态'), `${crab.mode} · ${crab.hud}`);
   console.log(`  （螃蟹步回放统计: ${JSON.stringify(crab.stats && {
     steps: crab.stats.steps, maxTop: crab.stats.maxTop, travelY: crab.stats.travelY })}）`);
+
+  // 5.7 蹲下 / 起立参考轨迹（纯运动学，无策略网络）
+  const squat = await evalJs(ws, `(async()=>{const $=id=>document.getElementById(id);
+    __elf.setMotion('off');
+    const r = await __elf.setMotion('squat_cycle');
+    const s0 = __elf.getMotion();
+    const m = __elf.motion;
+    const first = Array.from(m.frames.slice(0, m.nq));
+    const last = Array.from(m.frames.slice((m.nframes-1)*m.nq, m.nframes*m.nq));
+    const seam = Math.max(...first.map((v,k)=>Math.abs(v-last[k])));
+    let zMin = Infinity, zMax = -Infinity;
+    for (let i=0;i<m.nframes;i++){const v=m.frames[i*m.nq+2];zMin=Math.min(zMin,v);zMax=Math.max(zMax,v);}
+    const out = { loaded:!!r, kind:s0.kind, nframes:s0.nframes, loop:s0.loop,
+      stats:s0.stats, seam:+seam.toFixed(6), zMin:+zMin.toFixed(3), zMax:+zMax.toFixed(3),
+      crabOn:__elf.mjScene.opts.showCrab, stairsOn:__elf.mjScene.opts.showStairs,
+      camX:+__elf.camera.position.x.toFixed(2), camZ:+__elf.camera.position.z.toFixed(2),
+      mode:$('hud-mode').textContent.trim(), hud:$('hud-motion').textContent.trim(),
+      opts:[...$('opt-motion').options].map(o=>o.value) };
+    __elf.setMotion('off');
+    return out;})()`);
+  check('蹲起三段回放都在「回放」下拉里',
+    ['squat_down','squat_up','squat_cycle'].every(v=>squat.opts.includes(v)),
+    squat.opts.filter(v=>v.startsWith('squat')).join(', '));
+  check('蹲下起立循环加载成功（kind=squat，loop=true）',
+    squat.loaded && squat.kind === 'squat' && squat.loop === true && squat.nframes > 300,
+    `${squat.nframes} 帧｜${squat.hud}`);
+  check('循环首尾帧完全同姿态（不会跳一下）', squat.seam < 1e-6,
+    `max|Δ|=${squat.seam}`);
+  check('循环里基座真的从站姿降到蹲姿再升回来',
+    squat.zMax - squat.zMin > 0.4, `z ${squat.zMin} ~ ${squat.zMax} m`);
+  check('蹲起回放隐藏两套台阶并切到 3/4 机位',
+    squat.crabOn === false && squat.stairsOn === false
+      && squat.camX > 1 && squat.camZ > 1,
+    `stairs=${squat.stairsOn} crab=${squat.crabOn} / cam=(${squat.camX}, ${squat.camZ})`);
+  check('蹲起回放 HUD 显示「参考轨迹」',
+    squat.mode.includes('参考轨迹') && squat.hud.includes('参考轨迹'),
+    `${squat.mode} · ${squat.hud}`);
+
+  const frozen = await evalJs(ws, `(async()=>{const $=id=>document.getElementById(id);
+    const r = await __elf.setMotion('squat_down');
+    const m = __elf.motion;
+    m.time = m.duration - 0.01;
+    await new Promise(x=>setTimeout(x,200));
+    const out = { loaded:!!r, loop:m.loop, paused:m.paused,
+      time:+m.time.toFixed(3), duration:+m.duration.toFixed(3), progress:+m.progress.toFixed(3),
+      z:+__elf.data.qpos[2].toFixed(3), zEnd:m.frames[(m.nframes-1)*m.nq+2],
+      btn:$('btn-motion-pause').textContent.trim() };
+    $('btn-motion-restart').click();
+    out.afterRestart = { paused:m.paused, time:+m.time.toFixed(3), btn:$('btn-motion-pause').textContent.trim() };
+    __elf.setMotion('off');
+    return out;})()`);
+  check('单段下蹲播完冻结在末帧（loop=false，progress=1）',
+    frozen.loaded && frozen.loop === false && frozen.paused === true
+      && Math.abs(frozen.time - frozen.duration) < 1e-6 && frozen.progress === 1,
+    `t=${frozen.time}/${frozen.duration} s · progress=${frozen.progress}`);
+  check('冻结时姿态是蹲姿、按钮变「继续」',
+    Math.abs(frozen.z - frozen.zEnd) < 0.01 && frozen.btn === '继续',
+    `z=${frozen.z} m（末帧 ${(+frozen.zEnd).toFixed(3)}）· ${frozen.btn}`);
+  check('点「从头播放」后解除冻结',
+    frozen.afterRestart.paused === false && frozen.afterRestart.time === 0
+      && frozen.afterRestart.btn === '暂停', JSON.stringify(frozen.afterRestart));
 
   // 6. 渲染循环确实在出帧
   const frames = await evalJs(ws, `(async()=>{const r=__elf.renderer;const a=r.info.render.frame;

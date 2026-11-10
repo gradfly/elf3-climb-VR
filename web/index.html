@@ -60,6 +60,12 @@
         <option value="climb_policy">策略仿真 · 爬楼梯</option>
         <option value="crab">脚本步态 · 螃蟹步横移上楼</option>
         <option value="policy_crab">策略仿真 · 螃蟹步横移上楼</option>
+        <option value="squat_cycle">参考轨迹 · 蹲下起立循环</option>
+        <option value="squat_down">参考轨迹 · 下蹲（播完保持蹲姿）</option>
+        <option value="squat_up">参考轨迹 · 起立（播完保持站姿）</option>
+        <option value="goose_walk">脚本动作 · 走正步（前进）</option>
+        <option value="goose_inplace">脚本动作 · 原地正步（循环）</option>
+        <option value="salute">脚本动作 · 敬礼（右手军礼）</option>
       </select>
     </label>
     <label class="rowsel"><span>倍速</span>
@@ -75,7 +81,7 @@
       <button id="btn-motion-restart">从头播放</button>
       <button id="btn-motion-pause">暂停</button>
     </div>
-    <p class="note" id="motion-note">回放数据由 <code>tools/bake_motion.py</code> 在本机跑一遍 MuJoCo 仿真后录制。</p>
+    <p class="note" id="motion-note">回放数据由 <code>tools/bake_motion.py</code> 等在本机跑一遍 MuJoCo 仿真后录制；蹲下 / 起立由 <code>tools/bake_squat.py</code> 直接烘焙参考轨迹。</p>
 
     <h2>显示</h2>
     <label class="chk"><input type="checkbox" id="opt-robot" checked /><span>机器人</span></label>
@@ -93,6 +99,7 @@
       <button data-view="head">头部特写</button>
       <button data-view="top">俯视</button>
       <button data-view="crab">螃蟹步</button>
+      <button data-view="squat">蹲起 3/4</button>
       <button data-view="wide">全景</button>
     </div>
 

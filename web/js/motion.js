@@ -10,6 +10,9 @@
  *
  * 采样：位置线性插值，四元数用最短路径 slerp（直接对四元数做线性插值会让旋转矩阵
  * 出现缩放，MuJoCo 的 mj_forward 不会帮你归一化，所以这里必须 slerp）。
+ *
+ * meta.loop === false 时播完不会跳回第一帧，而是冻结在末帧 —— 单段「下蹲 / 起立」
+ * 参考轨迹用这个语义（和真机部署的 freeze_at_end 一致）；循环版不设该字段。
  */
 
 export class MotionPlayer {
@@ -29,7 +32,7 @@ export class MotionPlayer {
 
     this.time = 0;          // 当前播放时间（秒）
     this.speed = 1;
-    this.loop = true;
+    this.loop = meta.loop !== false;   // 单段蹲起：播完冻结在末帧
     this.paused = false;
 
     this._out = new Float64Array(this.nq);
@@ -55,13 +58,20 @@ export class MotionPlayer {
     return new MotionPlayer(meta, frames);
   }
 
-  /** 播放进度 0..1 */
+  /** 播放进度 0..1（冻结末帧的回放停在 1，不能取模回 0） */
   get progress() {
-    return this.duration > 0 ? (this.time % this.duration) / this.duration : 0;
+    if (this.duration <= 0) return 0;
+    const t = this.loop ? this.time % this.duration
+      : Math.min(this.duration, Math.max(0, this.time));
+    return t / this.duration;
   }
 
   seek(t) {
     const d = this.duration;
+    if (!this.loop) {
+      this.time = d > 0 ? Math.min(d, Math.max(0, t)) : 0;
+      return this;
+    }
     this.time = d > 0 ? ((t % d) + d) % d : 0;
     return this;
   }
@@ -76,8 +86,10 @@ export class MotionPlayer {
     if (this.paused) return this;
     let t = this.time + dt * this.speed;
     if (!this.loop && t >= this.duration) {
-      t = this.duration;
+      // 直接赋 time，别走 seek()：冻结模式下 time == duration 是合法终态
+      this.time = this.duration;
       this.paused = true;
+      return this;
     }
     this.seek(t);
     return this;
@@ -151,8 +163,9 @@ export class MotionPlayer {
   /** 供 HUD 显示 */
   describe() {
     const kindText = this.kind === 'ref' ? '参考动作'
-      : this.kind === 'crab' ? '脚本步态'
-        : '策略仿真';
+      : this.kind === 'squat' ? '参考轨迹'
+        : this.kind === 'crab' ? '脚本步态'
+          : '策略仿真';
     return `${this.label} · ${kindText}`
       + ` · ${this.time.toFixed(1)}/${this.duration.toFixed(1)} s`;
   }
