@@ -58,8 +58,13 @@ export class XRControls {
    * @param {Function} [o.onSeeThrough]   (on) => void  半透明合成开关（主程序用它淡化地面）
    * @param {Function} [o.toast]
    * @param {Function} [o.log]
+   * @param {number}   [o.framebufferScale] XR 帧缓冲缩放（0.5~1），默认 1.0（不缩放）
+   * @param {number}   [o.foveation] 注视点渲染等级（0~1，见 main.js 的 FFR 注释）。
+   *   这里是它唯一的写入点：three 在 setSession 内部会再 apply 一次，
+   *   所以必须在 setSession **之前** 拷进 renderer.xr，之后调 setFoveation() 也生效。
    */
-  constructor({ renderer, scene, slot, onEnter, onExit, onSeeThrough, toast, log } = {}) {
+  constructor({ renderer, scene, slot, onEnter, onExit, onSeeThrough, toast, log,
+    framebufferScale = 1, foveation = 0.5 } = {}) {
     this.renderer = renderer;
     this.scene = scene;
     this.slot = slot;
@@ -68,6 +73,12 @@ export class XRControls {
     this.onSeeThrough = onSeeThrough;
     this.toast = toast || (() => {});
     this.log = log || (() => {});
+    // 帧缓冲缩放：只能在 setSession 之前设（three 在 presenting 时只警告不生效）。
+    // 1.0 表示不缩放 —— enter() 里会直接跳过 setFramebufferScaleFactor，保持 three 默认路径。
+    const ss = Number(framebufferScale);
+    this.framebufferScale = Math.min(1, Math.max(0.5, Number.isFinite(ss) && ss > 0 ? ss : 1));
+    const fv = Number(foveation);
+    this.foveation = Math.min(1, Math.max(0, Number.isFinite(fv) ? fv : 0.5));
 
     this.modes = MODES.map((m) => m.id);
     this.entries = [];        // [{ def, btn }]
@@ -164,6 +175,21 @@ export class XRControls {
     };
   }
 
+  /**
+   * 现场改注视点渲染等级（0~1）：会话进行中立刻生效，用于 A/B 定位
+   * 「单眼丢细小几何」到底是 FFR 还是视口问题（console: __elf.xrQuality.foveation(0)）。
+   * @param {number} v
+   * @returns {number} 实际生效的等级
+   */
+  setFoveation(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return this.foveation;
+    this.foveation = Math.min(1, Math.max(0, n));
+    this.renderer.xr.setFoveation(this.foveation);
+    this.log(`· 注视点渲染 → ${this.foveation}`);
+    return this.foveation;
+  }
+
   // ------------------------------------------------------------------ 进入 / 退出
   async toggle(id) {
     const entry = this.entries.find((e) => e.def.id === id);
@@ -214,6 +240,15 @@ export class XRControls {
     session.addEventListener('end', () => this._onSessionEnd(), { once: true });
 
     try {
+      // 必须在 setSession 之前：three 在 setSession 内部把它写进 XRWebGLLayer /
+      // createProjectionLayer，presenting 之后再设只会打一条警告。
+      // 只有真的要缩小时才碰它：1.0 时保持 three 的默认路径，避免无谓地走
+      // 「按 scaleFactor 建投影层」那条在 PICO 上会全黑的代码（见 main.js 的 XR_SS 注释）。
+      if (this.framebufferScale < 1) {
+        this.renderer.xr.setFramebufferScaleFactor(this.framebufferScale);
+      }
+      // 注视点渲染同理（setSession 末尾会 this.setFoveation(foveation) 再 apply 一次）
+      this.renderer.xr.setFoveation(this.foveation);
       await this.renderer.xr.setSession(session);
     } catch (err) {
       this.session = null;
@@ -236,7 +271,21 @@ export class XRControls {
     this._paint();
 
     this.log(`· 进入 ${def.sessionMode}：参考空间 ${refType}，environmentBlendMode=${blend}`
-      + `，清屏 alpha=${this.renderer.getClearAlpha().toFixed(2)}`);
+      + `，清屏 alpha=${this.renderer.getClearAlpha().toFixed(2)}`
+      + `，注视点 ${this.foveation}`);
+    // 帧缓冲真实尺寸：XRWebGLLayer 用 framebufferWidth，XRProjectionLayer 用 textureWidth
+    const L = this.renderer.xr.getBaseLayer();
+    const fw = L ? (L.framebufferWidth ?? L.textureWidth) : 0;
+    const fh = L ? (L.framebufferHeight ?? L.textureHeight) : 0;
+    if (fw && fh) {
+      this.log(`· XR 帧缓冲 ${fw}×${fh}（scaleFactor=${this.framebufferScale}）`);
+    } else {
+      // 尺寸为 0 = 合成器拿不到有效纹理，头显里表现为「进入 VR 全黑、连地面都没有」。
+      // 已实测 PICO 4 Ultra + scaleFactor 0.8 会这样；默认值已改回 1.0。
+      this.log(`· ⚠️ XR 帧缓冲尺寸 ${fw}×${fh} —— 合成器会丢掉整帧（全黑）。`
+        + `先试 ?xrss=1，再试 ?ffr=0。`);
+      this.toast('XR 帧缓冲尺寸异常（0×0），画面可能全黑；试试在地址后加 ?xrss=1', 6000);
+    }
     this.onEnter?.(def.id, { through: this.through, blend, refType });
     return session;
   }

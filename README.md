@@ -32,7 +32,7 @@ elf3-climb-VR/
 │       #   （elf3_play.py / view_mujoco.py / climb_stairs.py / e2e_depth_policy.py）
 ├── web/                          # WebXR 网页端（VR 沉浸式体验）
 │   ├── index.html
-│   ├── js/  (main.js / mjscene.js / vrnav.js / xr.js / motion.js)
+│   ├── js/  (main.js / mjscene.js / vrnav.js / xr.js / xrpanel.js / motion.js)
 │   ├── vendor/  (mujoco.wasm / three.module.js)
 │   ├── assets/  (elf3.xml / 地形 scene_bx.xml + scene_crab.xml / 回放 motion_*.bin|json)
 │   ├── tools/  (verify.mjs 自检 / bake_*.py 烘焙 / 证书生成)
@@ -77,7 +77,13 @@ run_sim.bat onnx stairs
 - 在「显示 → 楼梯 / 障碍」里查看 universal_test 紧凑地形；
   「运动仿真」可选「打拳」(`motion_fight_*`)、「爬楼梯」(`motion_climb_policy`)
   或「螃蟹步横移上楼」(`motion_crab`) 回放。
-- 自检验证：`node tools/verify.mjs http://localhost:8123/`（56 项）。
+- 自检验证：`node tools/verify.mjs http://localhost:8080/`（125 项）。
+- 头显里的设置面板：WebXR 不合成 DOM，`js/xrpanel.js` 把 `#panel` 的控件投影成一块
+  CanvasTexture 平面（扳机点击、摇杆按下收起/展开）。头显面板按 `LAYOUT` 白名单只保留
+  最小两栏集合（场景：单选 / 回放 / 从头播放·继续；视角：6 个视角键 / 视角跟随机器人），
+  桌面 DOM 保持完整；默认整个面板 50% 半透明、标题栏可一键切 100%，头锁置于视野上方
+  并朝眼下倾，「归位」切换头锁 / 世界固定。说明段落只在二维面板显示，进会话时二维面板
+  自动进精简模式（`#panel.compact`）。
 
 网页模型 `nq=36`（老版 elf3.xml），官方场景 `nq=38`（多 head_z/head_y），
 前 36 个 qpos 关节顺序一致，故仿真闭环轨迹可直接回放。

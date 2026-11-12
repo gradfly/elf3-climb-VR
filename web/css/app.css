@@ -57,7 +57,14 @@ html, body {
   top: 14px;
   left: 14px;
   min-width: 260px;
+  display: flex;
+  align-items: stretch;      /* 左信息 / 右说明等高 */
+  gap: 18px;
 }
+#hud .hud-main { flex: 0 0 260px; min-width: 0; }
+/* JS 与 tools/verify.mjs 都要写 #hud-model，元素必须保留，只用样式隐藏这一行 */
+#hud .hud-stat-hidden { display: none; }
+
 #hud .title {
   display: flex;
   align-items: baseline;
@@ -102,6 +109,11 @@ html, body {
 }
 #panel.folded { width: 46px; height: 40px; padding: 0; overflow: hidden; }
 #panel.folded .body { display: none; }
+
+/* 精简模式（进 VR / 半透明 VR 时由 main.js 的 applyUiMode 加上）：
+   只去掉说明段落，分组标题与每个控件的标签照旧，控件保持可读。
+   头显里显示的是 xrpanel.js 画的贴图面板，同样不含 .note。 */
+#panel.compact .note { display: none; }
 #panel h2 {
   font-size: 11px;
   letter-spacing: 1.2px;
@@ -202,14 +214,22 @@ html, body {
 }
 .note code { font-family: var(--mono); color: var(--warn); }
 
-/* ------------------------------------------------ 底部说明 */
+/* ------------------------------------------------ 操作说明（HUD 右侧，与 HUD 等高） */
 #help {
-  bottom: 14px;
-  left: 14px;
   display: flex;
-  gap: 22px;
-  max-width: min(620px, 60vw);
+  flex-wrap: wrap;           /* 标题独占一行，「桌面 / 头显」两栏在下一行 */
+  align-content: center;     /* 整块在 HUD 高度内垂直居中 */
+  align-items: center;
+  gap: 6px 22px;
+  min-width: 0;
+  padding-left: 18px;
+  border-left: 1px solid var(--panel-line);
+  max-width: min(620px, calc(100vw - 620px));  /* 避开右上角设置面板 */
 }
+#help > .title { flex: 0 0 100%; margin-bottom: 0; }
+#help > .title b { font-size: 13px; }
+#help .col { min-width: 0; }
+
 #help h3 {
   margin: 0 0 3px;
   font-size: 11px;
@@ -367,6 +387,10 @@ html, body {
   border: 1px solid var(--panel-line);
   font-size: 13px;
   box-shadow: 0 8px 26px rgba(0, 0, 0, 0.5);
+}
+
+@media (max-width: 1180px) {
+  #help { flex-direction: column; align-items: flex-start; gap: 6px; }
 }
 
 @media (max-width: 860px) {

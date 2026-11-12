@@ -24,6 +24,13 @@ const GEOM_CYLINDER = 5;
 const GEOM_BOX = 6;
 const GEOM_MESH = 7;
 
+/**
+ * rgb → 量化后的 key 片段。
+ * 必须量化：elf3.xml 里躯干写 `0.75294`、其余 31 个写 `0.752941`，经 sRGB→linear
+ * 之后在 float32 下并不相等，按精确值做 key 会悄悄裂成两个材质（看不出错，但白丢一半共享）。
+ */
+const _q3 = (c) => `${Math.round(c[0] * 1000)},${Math.round(c[1] * 1000)},${Math.round(c[2] * 1000)}`;
+
 export class MjScene {
   /**
    * @param {object} o
@@ -61,13 +68,86 @@ export class MjScene {
     this.disposables = [];
     this._mat = new THREE.Matrix4();
     this._box = new THREE.Box3();
+    this._box2 = new THREE.Box3();      // robotBounds 的复用临时盒（别每帧 new）
+
+    /**
+     * 每次 sync() 要写矩阵的 geom 清单（null = 还没初始化 → 全量遍历）。
+     * 由 applyOptions() 里的 _rebuildSyncIds() 重建：可见 geom ∪ 矩阵模式下的实例源。
+     * 不裁剪的话 94 个 geom 里有 36 个隐藏碰撞球 + 两套隐藏地形在白白写矩阵。
+     */
+    this._syncIds = null;
+    this._dirty = false;                // applyOptions() 置位，主循环据此补一次 sync()
+    this._syncCount = 0;                // 自检用：累计 sync 次数
+
+    /**
+     * 材质共享表。32 个视觉 geom 的 rgba 其实同色，各建一份 MeshStandardMaterial
+     * 会让每个 draw 都重新上传环境贴图/粗糙度等 uniform（双眼 64 个 draw）。
+     * key 用**量化后**的颜色 —— 0.75294 与 0.752941 经 sRGB→linear 在 float32 下
+     * 并不相等，按精确值做 key 会悄悄裂成两个材质。
+     */
+    this._matCache = new Map();
+    this.robotMaterial = 'standard';   // 'standard' | 'lambert'（见 setRobotMaterial）
 
     /** 矩阵模式：机器人视觉网格的实例化副本（见 enableRobotGrid），未开启时为 null */
     this.grid = null;
     this._gridTmp = new Float32Array(16);
+    this._sphere = new THREE.Sphere();
+    this._frusta = null;               // 逐眼视锥（XR 里是两只眼）
+    this._projScreen = new THREE.Matrix4();
   }
 
   // ------------------------------------------------------------------ 构建
+  /** 按 key 共享材质；工厂只在第一次命中时执行 */
+  _sharedMat(key, factory) {
+    let m = this._matCache.get(key);
+    if (!m) {
+      m = factory();
+      this._matCache.set(key, m);
+    }
+    return m;
+  }
+
+  /**
+   * 切换机器人视觉网格的着色模型（只影响 32 个视觉 geom，不碰地板 / 地形 / 碰撞代理）。
+   *
+   *   'standard'（默认）MeshStandardMaterial + PMREM 环境贴图：金属质感、GGX 高光；
+   *   'lambert'  MeshLambertMaterial：只有漫反射（逐顶点光照），没有 metalness /
+   *              roughness / envMap → 机器人会变成**哑光塑料**。片元成本大约降到
+   *              1/2~1/3（省掉 GGX 求值 + 两次 cubemapUV 采样 + 一大段 BRDF 数学）。
+   *
+   * 只换材质引用：几何、矩阵、实例化都不动；矩阵模式下 32 个 InstancedMesh 也跟着换
+   * （它们共享原件材质）。用途是评估「为了帧率值不值得牺牲金属感」。
+   * 启动时用 `?mat=lambert`，运行期用 `__elf.setRobotMaterial('lambert')`。
+   *
+   * @param {'standard'|'lambert'} kind
+   * @returns {string} 实际生效的模型名
+   */
+  setRobotMaterial(kind) {
+    const lam = kind === 'lambert';
+    const THREE = this.THREE;
+    for (const gi of this.robotGeomIds) {
+      const obj = this.objs[gi];
+      const key = obj && obj.userData.matKey;
+      if (!key) continue;
+      if (lam) {
+        obj.material = this._sharedMat(`L|${key}`, () => {
+          const std = this._matCache.get(key);
+          return new THREE.MeshLambertMaterial({ color: std.color.clone() });
+        });
+      } else {
+        obj.material = this._matCache.get(key);
+      }
+    }
+    // 矩阵模式：实例材质是从原件传过去的引用，必须一起换
+    const g = this.grid;
+    if (g) {
+      for (let k = 0; k < g.meshes.length; k++) {
+        g.meshes[k].material = this.objs[g.geoms[k]].material;
+      }
+    }
+    this.robotMaterial = lam ? 'lambert' : 'standard';
+    return this.robotMaterial;
+  }
   build() {
     const { THREE, model, mujoco } = this;
     const rgba = model.geom_rgba;
@@ -94,15 +174,21 @@ export class MjScene {
 
       let geometry = null;
       let material = null;
+      let matKey = null;      // 机器人材质在 _matCache 里的 key（切 Lambert 时要能换回来）
 
       if (type === GEOM_MESH && group === 2) {
         geometry = getMeshGeometry(model.geom_dataid[gi]);
-        material = new THREE.MeshStandardMaterial({
-          color: new THREE.Color(c[0], c[1], c[2]),
-          metalness: 0.72,
-          roughness: 0.34,
-          envMapIntensity: 1.15,
-        });
+        // 32 个视觉 geom 同色 → 共享一份材质（见 _matCache 的注释）
+        matKey = `robot|${_q3(c)}|${alpha < 0.999 ? Math.round(alpha * 100) : 100}`;
+        material = this._sharedMat(
+          matKey,
+          () => new THREE.MeshStandardMaterial({
+            color: new THREE.Color(c[0], c[1], c[2]),
+            metalness: 0.72,
+            roughness: 0.34,
+            envMapIntensity: 1.15,
+          }),
+        );
         this.robotGeomIds.push(gi);
       } else if (type === GEOM_PLANE) {
         // MuJoCo 平面：局部 XY 平面，法线 +Z。three 的 PlaneGeometry 恰好一致。
@@ -110,6 +196,7 @@ export class MjScene {
         const sy = model.geom_size[gi * 3 + 1];
         const span = Math.max(sx > 0 ? sx * 2 : 80, sy > 0 ? sy * 2 : 80);
         geometry = new THREE.PlaneGeometry(span, span, 1, 1);
+        // 地板是唯一需要单独改 opacity 的（半透明 VR 透视时淡化），不进共享表
         material = new THREE.MeshStandardMaterial({
           map: floorTexture,
           color: 0xffffff,
@@ -122,12 +209,17 @@ export class MjScene {
         const s = model.geom_size;
         geometry = new THREE.BoxGeometry(s[gi * 3] * 2, s[gi * 3 + 1] * 2, s[gi * 3 + 2] * 2);
         const isBig = Math.max(s[gi * 3], s[gi * 3 + 1], s[gi * 3 + 2]) > 0.9;
-        material = new THREE.MeshStandardMaterial({
-          color: new THREE.Color(c[0], c[1], c[2]),
-          metalness: isBig ? 0.05 : 0.2,
-          roughness: 0.78,
-          envMapIntensity: 0.5,
-        });
+        material = this._sharedMat(
+          `box|${_q3(c)}|${isBig ? 1 : 0}|${alpha < 0.999 ? Math.round(alpha * 100) : 100}`,
+          () => new THREE.MeshStandardMaterial({
+            color: new THREE.Color(c[0], c[1], c[2]),
+            metalness: isBig ? 0.05 : 0.2,
+            roughness: 0.78,
+            envMapIntensity: 0.5,
+            transparent: alpha < 0.999,
+            opacity: alpha,
+          }),
+        );
         if (inWorld) {
           // 螃蟹步台阶按名字前缀单独分组：两套地形相距 4 m 以上，但共用同一个
           // 编译好的模型，回放时只显示当前这一段用到的那套。
@@ -161,17 +253,22 @@ export class MjScene {
       }
 
       if (!material) {
-        material = new THREE.MeshStandardMaterial({
-          color: new THREE.Color(c[0], c[1], c[2]),
-          metalness: 0.1,
-          roughness: 0.8,
-          transparent: alpha < 0.999,
-          opacity: alpha,
-        });
+        // 碰撞代理（球 / 胶囊 / 圆柱）：只做调试图层，同色的共享一份就够
+        material = this._sharedMat(
+          `gen|${type}|${_q3(c)}|${alpha < 0.999 ? Math.round(alpha * 100) : 100}`,
+          () => new THREE.MeshStandardMaterial({
+            color: new THREE.Color(c[0], c[1], c[2]),
+            metalness: 0.1,
+            roughness: 0.8,
+            transparent: alpha < 0.999,
+            opacity: alpha,
+          }),
+        );
       }
 
       const mesh = new THREE.Mesh(geometry, material);
       mesh.matrixAutoUpdate = false;
+      if (matKey) mesh.userData.matKey = matKey;
       mesh.castShadow = this.robotGeomIds.includes(gi) || group === 0;
       mesh.receiveShadow = true;
       {
@@ -291,26 +388,74 @@ export class MjScene {
   }
 
   // ------------------------------------------------------------------ 同步
-  /** 把 data 里的世界位姿写到 three.js 对象上（静止时只需调用一次） */
-  sync() {
-    const { model, data } = this;
+  /** 把一个 geom 的 MuJoCo 世界位姿写成 three 的本地矩阵 */
+  _writeGeom(gi) {
+    const obj = this.objs[gi];
+    if (!obj) return;
+    const { data } = this;
     const P = data.geom_xpos;
     const M = data.geom_xmat;
-    const m = this._mat;
-    const e = m.elements;
+    const e = this._mat.elements;
+    const o3 = gi * 3;
+    const m9 = gi * 9;
+    e[0] = M[m9]; e[1] = M[m9 + 3]; e[2] = M[m9 + 6]; e[3] = 0;
+    e[4] = M[m9 + 1]; e[5] = M[m9 + 4]; e[6] = M[m9 + 7]; e[7] = 0;
+    e[8] = M[m9 + 2]; e[9] = M[m9 + 5]; e[10] = M[m9 + 8]; e[11] = 0;
+    e[12] = P[o3]; e[13] = P[o3 + 1]; e[14] = P[o3 + 2]; e[15] = 1;
+    obj.matrix.copy(this._mat);
+    obj.matrixWorldNeedsUpdate = true;
+  }
 
-    for (let gi = 0; gi < model.ngeom; gi++) {
-      const obj = this.objs[gi];
-      if (!obj) continue;
-      const o3 = gi * 3;
-      e[0] = M[gi * 9]; e[1] = M[gi * 9 + 3]; e[2] = M[gi * 9 + 6]; e[3] = 0;
-      e[4] = M[gi * 9 + 1]; e[5] = M[gi * 9 + 4]; e[6] = M[gi * 9 + 7]; e[7] = 0;
-      e[8] = M[gi * 9 + 2]; e[9] = M[gi * 9 + 5]; e[10] = M[gi * 9 + 8]; e[11] = 0;
-      e[12] = P[o3]; e[13] = P[o3 + 1]; e[14] = P[o3 + 2]; e[15] = 1;
-      obj.matrix.copy(m);
-      obj.matrixWorldNeedsUpdate = true;
+  /**
+   * 把 data 里的世界位姿写到 three.js 对象上（静止时只需调用一次）。
+   *
+   * 只写「会动」的 geom：世界体（地板 + 两套地形盒）在 mj_kinematics / mj_step 下
+   * 位姿永远不变，由 _writeStatic() 在 applyOptions 之后写一次就够了。
+   */
+  sync() {
+    const ids = this._dynamicIds;      // undefined = build() 首次调用 → 走全量
+    if (ids) {
+      for (let k = 0; k < ids.length; k++) this._writeGeom(ids[k]);
+    } else {
+      for (let gi = 0; gi < this.model.ngeom; gi++) this._writeGeom(gi);
     }
     if (this.grid) this._syncGrid();
+    this._syncCount++;
+    this._dirty = false;
+    return this;
+  }
+
+  /** 世界体几何：位姿恒定，只在可见性/地形切换后写一次 */
+  _writeStatic() {
+    const ids = this._staticIds;
+    if (!ids) return this;
+    for (let k = 0; k < ids.length; k++) this._writeGeom(ids[k]);
+    return this;
+  }
+
+  /**
+   * 重建「要写矩阵的 geom」清单。
+   *
+   * = 当前可见的 geom ∪ （矩阵模式下）机器人视觉网格的原件。
+   * 后者必须无条件纳入：矩阵模式下原件 visible=false，但 InstancedMesh 的实例矩阵
+   * 就是从 this.objs[gi].matrix 读的（见 _syncGrid），漏掉会让整片实例冻在第一帧。
+   */
+  _rebuildSyncIds() {
+    const inGrid = !!this.grid;
+    const dyn = [];
+    const sta = [];
+    for (let gi = 0; gi < this.model.ngeom; gi++) {
+      const obj = this.objs[gi];
+      if (!obj) continue;
+      const isRobot = this.robotGeomIds.includes(gi);
+      if (!obj.visible && !(inGrid && isRobot)) continue;   // 隐藏的跳过（矩阵模式保留实例源）
+      // 按 body 判：worldbody（地板 + 地形盒）的位姿恒定，机器人本体与碰撞代理会动
+      if (this.model.geom_bodyid[gi] === 0) sta.push(gi);
+      else dyn.push(gi);
+    }
+    this._dynamicIds = dyn;
+    this._staticIds = sta;
+    this._syncIds = dyn.concat(sta);   // 并集：自检与诊断仍按它数
     return this;
   }
 
@@ -318,7 +463,7 @@ export class MjScene {
   /**
    * 把机器人视觉网格复制成 rows × cols 份、按网格铺开的实例（InstancedMesh）。
    *
-   * 为什么用实例化而不是克隆 Mesh：200 份 × 32 个几何 = 6400 个对象 / 6400 次
+   * 为什么用实例化而不是克隆 Mesh：96 份 × 32 个几何 = 3072 个对象 / 3072 次
    * draw call，浏览器直接跪；实例化后几何与材质只有一份，绘制批次仍等于机器人
    * 几何数（32），只是每批画 count 次。
    *
@@ -329,12 +474,12 @@ export class MjScene {
    * 整体以原点（单人模式那个机器人的位置）为中心。
    *
    * @param {object} [o]
-   * @param {number} [o.rows]   行数（前后方向）    默认 10
-   * @param {number} [o.cols]   列数（左右方向）    默认 20
-   * @param {number} [o.pitchX] 列间距（米）        默认 0.72
-   * @param {number} [o.pitchZ] 行间距（米）        默认 0.78
+   * @param {number} [o.rows]   行数（前后方向）    默认 8
+   * @param {number} [o.cols]   列数（左右方向）    默认 12
+   * @param {number} [o.pitchX] 列间距（米）        默认 1.08
+   * @param {number} [o.pitchZ] 行间距（米）        默认 1.17
    */
-  enableRobotGrid({ rows = 10, cols = 20, pitchX = 0.72, pitchZ = 0.78 } = {}) {
+  enableRobotGrid({ rows = 8, cols = 12, pitchX = 1.08, pitchZ = 1.17 } = {}) {
     this.disableRobotGrid();
     const THREE = this.THREE;
     const count = rows * cols;
@@ -368,10 +513,78 @@ export class MjScene {
       geoms.push(gi);
     }
     this.root.add(group);
-    this.grid = { rows, cols, count, pitchX, pitchZ, ox, oy, group, meshes, geoms };
+    this.grid = {
+      rows, cols, count, pitchX, pitchZ, ox, oy, group, meshes, geoms,
+      // 逐实例可见性：全 1 表示不剔除（桌面 / ?cull=0）
+      mask: new Uint8Array(count).fill(1),
+      drawn: count,
+    };
     this.sync();          // 先把实例矩阵填好，避免第一帧全在原点
     this.applyOptions();
     return this.grid;
+  }
+
+  /**
+   * 逐实例视锥剔除（只在 XR 里调用）。
+   *
+   * InstancedMesh 的包围球罩住整片网格，three 只能「整体画 / 整体不画」，所以
+   * `frustumCulled = false` 时 96 份全画。实测站在机器人前 2.6 m、水平半 FOV 48°
+   * 的典型站姿下，8×12 阵型里只有约 45 份在视野内 —— 另外一半是纯白烧的
+   * 96 × 20.6 万 = 1980 万三角/眼。这是矩阵模式下唯一够大的无损收益。
+   *
+   * 实例世界位置 = 机器人世界中心 + R_root · (ox, oy, 0)：
+   * 实例矩阵是在 MuJoCo 空间里「几何世界矩阵 + 纯平移」，再整体乘 root.matrixWorld，
+   * 所以偏移量要跟着 root 的旋转（Z-up→Y-up + stage 的 30° 转向）一起转。
+   *
+   * @param {any} camera XR 的 ArrayCamera（双目）或普通 Camera
+   * @param {THREE.Vector3} robotWorld 机器人中心（three 世界坐标，上一帧值即可）
+   * @param {number} radius 包围球半径：要盖住机器人（约 0.9 m）+ 一帧位姿滞后
+   * @returns {number} 本帧可见份数
+   */
+  cullGrid(camera, robotWorld, radius = 1.7) {
+    const g = this.grid;
+    if (!g || !camera) return 0;
+    const THREE = this.THREE;
+    const cams = camera.isArrayCamera ? camera.cameras : [camera];
+    if (!cams.length) return g.drawn;
+    if (!this._frusta || this._frusta.length !== cams.length) {
+      this._frusta = cams.map(() => new THREE.Frustum());
+    }
+    for (let i = 0; i < cams.length; i++) {
+      this._projScreen.multiplyMatrices(cams[i].projectionMatrix, cams[i].matrixWorldInverse);
+      this._frusta[i].setFromProjectionMatrix(this._projScreen);
+    }
+
+    const mw = this.root.matrixWorld.elements;
+    const cx = robotWorld ? robotWorld.x : 0;
+    const cy = robotWorld ? robotWorld.y : 0;
+    const cz = robotWorld ? robotWorld.z : 0;
+    const sp = this._sphere;
+    sp.radius = radius;
+
+    const mask = g.mask;
+    let n = 0;
+    for (let i = 0; i < g.count; i++) {
+      const ox = g.ox[i];
+      const oy = g.oy[i];
+      sp.center.set(cx + mw[0] * ox + mw[4] * oy,
+        cy + mw[1] * ox + mw[5] * oy,
+        cz + mw[2] * ox + mw[6] * oy);
+      let vis = false;
+      for (let k = 0; k < this._frusta.length; k++) {
+        if (this._frusta[k].intersectsSphere(sp)) { vis = true; break; }
+      }
+      mask[i] = vis ? 1 : 0;
+      if (vis) n++;
+    }
+    // 一份都不可见时退回「全画」：会话第一帧 xr.getCamera() 还没被 render 更新，
+    // 投影矩阵可能是单位阵，照撤会把 96 份全剔掉 → 头显里闪一下空白。
+    // 反过来用户真的背对矩阵时多画一些只是浪费，不会出错。
+    if (n === 0) {
+      mask.fill(1);
+      return g.count;
+    }
+    return n;
   }
 
   /** 关闭矩阵模式（原件重新按显示开关显示） */
@@ -387,8 +600,9 @@ export class MjScene {
 
   /** 刷新所有实例的 instanceMatrix（旋转部分共用，只有平移列随 offset 变） */
   _syncGrid() {
-    const { count, ox, oy, meshes, geoms } = this.grid;
+    const { count, ox, oy, meshes, geoms, mask } = this.grid;
     const tmp = this._gridTmp;
+    let drawn = 0;
     for (let k = 0; k < meshes.length; k++) {
       const e = this.objs[geoms[k]].matrix.elements;
       const arr = meshes[k].instanceMatrix.array;
@@ -396,14 +610,21 @@ export class MjScene {
       tmp[4] = e[4]; tmp[5] = e[5]; tmp[6] = e[6]; tmp[7] = 0;
       tmp[8] = e[8]; tmp[9] = e[9]; tmp[10] = e[10]; tmp[11] = 0;
       tmp[15] = 1;
+      // 只把可见的那些「紧凑」写到缓冲前段，然后用 count 限定绘制份数
+      let n = 0;
       for (let i = 0; i < count; i++) {
+        if (!mask[i]) continue;
         tmp[12] = e[12] + ox[i];
         tmp[13] = e[13] + oy[i];
         tmp[14] = e[14];
-        arr.set(tmp, i * 16);
+        arr.set(tmp, n * 16);
+        n++;
       }
+      meshes[k].count = n;
       meshes[k].instanceMatrix.needsUpdate = true;
+      drawn = n;
     }
+    this.grid.drawn = drawn;
   }
 
   /** 依据当前选项刷新可见性 */
@@ -436,6 +657,9 @@ export class MjScene {
       const obj = this.objs[gi];
       if (obj) obj.visible = o.showCollision;
     }
+    this._rebuildSyncIds();
+    this._writeStatic();  // 地形/地板刚变可见性，位姿要立刻写一次（它们之后不会再变）
+    this._dirty = true;   // 让主循环补一次 sync()（暂停/静止时也生效）
     return this;
   }
 
@@ -499,12 +723,11 @@ export class MjScene {
    * 也不会因为 matrixAutoUpdate=false 而被覆盖。
    */
   robotBounds() {
-    const THREE = this.THREE;
     const { data } = this;
     const P = data.geom_xpos;
     const M = data.geom_xmat;
     const box = this._box.makeEmpty();
-    const tmp = new THREE.Box3();
+    const tmp = this._box2;   // 复用，避免每帧 new Box3()（每帧 256 次 union 的 GC 来源）
     for (const gi of this.robotGeomIds) {
       const obj = this.objs[gi];
       if (!obj) continue;
@@ -578,7 +801,17 @@ export class MjScene {
   dispose() {
     this.disableRobotGrid();
     for (const d of this.disposables) d.dispose?.();
-    for (const obj of this.objs) obj?.material?.dispose?.();
+    // 材质现在是共享的，要按引用去重，否则同一个材质会被 dispose 多次
+    const seen = new Set();
+    for (const obj of this.objs) {
+      const m = obj && obj.material;
+      if (m && !seen.has(m)) { seen.add(m); m.dispose?.(); }
+    }
+    // 切过 Lambert 时，缓存的「另一套」材质不在任何 obj 上，也要一起释放
+    for (const m of this._matCache.values()) {
+      if (!seen.has(m)) { seen.add(m); m.dispose?.(); }
+    }
+    this._matCache.clear();
     this.disposables.length = 0;
   }
 }

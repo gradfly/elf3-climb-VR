@@ -8,7 +8,9 @@
  *  - 进入 VR 的瞬间自动把机器人摆到用户正前方并转成正面朝向，避免用户需要自己找。
  */
 
-const SNAP_ANGLE = Math.PI / 6; // 每次旋转 30°
+// 右摇杆连续转向：死区内完全不响应（挡住摇杆回中漂移），推到底的角速度见 turnSpeed。
+// 不再用「每次 30° + 0.28 s 冷却」的 snap turn —— 阶跃转向在头显里一顿一顿的。
+const TURN_DEADZONE = 0.15;
 
 export class VRNav {
   /**
@@ -28,10 +30,13 @@ export class VRNav {
 
     this.enabled = true;
     this.moveSpeed = 1.6;       // m/s
-    this.snapTurn = true;
+    this.turnSpeed = Math.PI / 2;   // rad/s：右摇杆推到底 90°/s，可现场改 __elf.vrNav.turnSpeed
+    this.turnDeadzone = TURN_DEADZONE;
     this.recenterDistance = 2.6;
-    this.turnCooldown = 0;
     this.follow = true;         // 回放时是否自动跟随机器人
+    // 手动转向 = 用户主动接管观察角度：回调让上层关掉自动跟随（和点视角预设一致），
+    // 否则连续转过大角度后 autoFollow 会慢慢把世界拉回正前方，看着像「转不动」。
+    this.onManualTurn = null;
     this.robotWorld = new THREE.Vector3();  // 机器人当前世界位置（由 main.js 每帧更新）
     // 舒适窗口：机器人在这个范围内就完全不动，避免和用户自己的摇杆移动打架
     this.followWindow = { min: 1.7, max: 4.8, front: -0.25 };
@@ -50,7 +55,10 @@ export class VRNav {
     const { THREE, renderer } = this;
     this.refSpaceType = 'local-floor';
     renderer.xr.setReferenceSpaceType(this.refSpaceType);
-    renderer.xr.setFoveation(0.5);
+    // 注视点渲染（fixed foveation）这里**不设** —— 唯一写入点是 XRControls（js/xr.js），
+    // 因为等级和 framebufferScale 一样必须早于 setSession 才可靠，且需要能现场调。
+    // 别在这里顺手拉满 1.0：边缘着色率降到每 N×N 像素一次后，细长/小/远的几何能不能
+    // 被采样到取决于亚像素对齐，左右眼网格不同 → 「单眼丢机器人」。详见 main.js 的 FFR。
     this.controllers = [];
 
     // —— 手柄：射线指针 + 简易手柄模型 ——
@@ -127,7 +135,10 @@ export class VRNav {
     const c = Math.cos(theta), sn = Math.sin(theta);
     s.position.x = p.x + (dx * c + dz * sn);
     s.position.z = p.z + (-dx * sn + dz * c);
-    s.rotation.y += theta;
+    // 连续转向会让 rotation.y 一直累加，转几十圈后浮点精度退化；
+    // 归一到 (-π, π] 与 autoFollow 的 dy 计算一致，旋转结果等价。
+    const y = s.rotation.y + theta;
+    s.rotation.y = (y > Math.PI || y < -Math.PI) ? Math.atan2(Math.sin(y), Math.cos(y)) : y;
   }
 
   /**
@@ -135,22 +146,54 @@ export class VRNav {
    * @param {THREE.Vector3} [robotWorld] 机器人当前世界位置；不传就用 this.robotWorld。
    *   机器人回放时会走到离世界原点好几米的地方，所以必须按它的**实际位置**摆位，
    *   否则"正对机器人"按钮会把镜头对到空地上。
+   * @param {number} [yawOff] 在「正对用户」基准上再绕竖直轴追加的转向（弧度）。
+   *   0 = 看正面；Math.PI = 看背面（原地转 180°，仍在正前方）；Math.PI/2 = 看侧面。
+   * @param {number} [dist] 机器人离用户的距离（米），默认 recenterDistance。
    */
-  recenterToRobot(robotWorld) {
+  recenterToRobot(robotWorld, yawOff = 0, dist = this.recenterDistance) {
     const p = this.headPosition(this._v1);
     const f = this.headForwardXZ(this._v2);
     const s = this.stage;
-    const yaw = Math.atan2(f.x, f.z);
+    const yaw = Math.atan2(f.x, f.z) + yawOff;
     const local = s.worldToLocal((robotWorld || this.robotWorld).clone());
     const c = Math.cos(yaw);
     const sn = Math.sin(yaw);
     const lx = local.x * c + local.z * sn;   // R_y(yaw)·local 的水平分量
     const lz = -local.x * sn + local.z * c;
     s.rotation.set(0, yaw, 0);
-    s.position.set(p.x + f.x * this.recenterDistance - lx, 0,
-      p.z + f.z * this.recenterDistance - lz);
-    s.updateMatrixWorld(true);
+    s.position.set(p.x + f.x * dist - lx, 0,
+      p.z + f.z * dist - lz);
+    // 这里不强制 updateMatrixWorld(true)：renderer.render 每帧都会做一次
+    // scene.updateMatrixWorld()，而 stage 的 matrixAutoUpdate 从没关过 ——
+    // 强制刷新只是把同一帧的活干第二遍（整棵子树 30+ 个对象）。
+    // 需要在改完之后读世界坐标的地方（worldToLocal）自己会 updateWorldMatrix。
     return this;
+  }
+
+  /**
+   * VR 里的「视角预设」：相机是头显姿态、不可改，所以改为把机器人相对用户摆到对应
+   * 观察角度——与桌面 applyView 等价（桌面动相机、VR 动世界 / stage）。
+   * 命名沿用 XR 面板里的 6 个视角按钮：front/back/side/squat/grid/wide。
+   *   front/back/side —— 原地转动机器人，让用户分别看其正 / 背 / 侧面（仍在正前方）；
+   *   squat/grid/wide —— 保持正面朝向、只改观察距离（近景 3/4 / 中景 / 远景全景）。
+   * 选了固定机位就关掉自动跟随，否则下一帧 autoFollow 又会把机器人拉回正前方，
+   * 按钮看着像"没反应"。
+   */
+  presentView(name) {
+    if (!this.renderer.xr.isPresenting) return false;
+    const presets = {
+      front: { yaw: 0, dist: this.recenterDistance },
+      back: { yaw: Math.PI, dist: this.recenterDistance },
+      side: { yaw: Math.PI / 2, dist: this.recenterDistance },
+      squat: { yaw: 0, dist: 2.0 },
+      grid: { yaw: 0, dist: 8.5 },
+      wide: { yaw: 0, dist: 12 },
+    };
+    const preset = presets[name];
+    if (!preset) return false;
+    this.recenterToRobot(undefined, preset.yaw, preset.dist);
+    this.follow = false;   // 见上方说明
+    return true;
   }
 
   /**
@@ -187,7 +230,6 @@ export class VRNav {
     while (dy > Math.PI) dy -= 2 * Math.PI;
     while (dy < -Math.PI) dy += 2 * Math.PI;
     s.rotation.y += dy * k;
-    s.updateMatrixWorld(true);
     return this;
   }
 
@@ -208,7 +250,6 @@ export class VRNav {
     s.rotation.set(0, a, 0);
     const p = this.headPosition(this._v1);
     s.position.set(p.x + Math.sin(a) * distance, 0, p.z + Math.cos(a) * distance);
-    s.updateMatrixWorld(true);
     return this;
   }
 
@@ -222,8 +263,6 @@ export class VRNav {
       this.recenterRequested = false;
       this.recenterToRobot();
     }
-
-    this.turnCooldown = Math.max(0, this.turnCooldown - dt);
 
     const session = renderer.xr.getSession();
     if (!session) return;
@@ -273,15 +312,19 @@ export class VRNav {
       if (mv.lengthSq() > 1e-8) {
         mv.normalize().multiplyScalar(this.moveSpeed * dt);
         this.stage.position.sub(mv);
-        this.stage.updateMatrixWorld(true);
       }
     }
 
-    // —— 转向 ——
-    if (Math.abs(turn) > 0.7 && this.turnCooldown <= 0) {
-      this._rotateAroundHead(Math.sign(turn) * SNAP_ANGLE);
-      this.stage.updateMatrixWorld(true);
-      this.turnCooldown = 0.28;
+    // —— 连续转向 ——
+    // 相机是头显姿态、动不了，所以按角速度连续旋转 stage = 用户原地平滑转身。
+    // 死区重映射：|turn| <= dead 完全不转，超过后线性放大到推到底的 turnSpeed；
+    // 半推摇杆就能慢慢转，不再有 30° 阶跃与 0.28 s 冷却。
+    const a = Math.abs(turn);
+    if (a > this.turnDeadzone) {
+      const t = Math.min(1, (a - this.turnDeadzone) / (1 - this.turnDeadzone));
+      const step = Math.min(dt, 0.1);  // 卡顿/切场景时 dt 异常大，限幅避免一次跳几十度
+      this._rotateAroundHead(Math.sign(turn) * this.turnSpeed * t * step);
+      if (this.onManualTurn) this.onManualTurn();
     }
   }
 }

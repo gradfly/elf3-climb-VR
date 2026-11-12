@@ -17,8 +17,9 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import loadMujoco from '../vendor/mujoco.js';
 import { MjScene } from './mjscene.js';
 import { VRNav } from './vrnav.js';
-import { MotionPlayer } from './motion.js';
+import { MotionPlayer, MOTION_PREFETCH } from './motion.js';
 import { XRControls } from './xr.js';
+import { XRPanel } from './xrpanel.js';
 
 // ---------------------------------------------------------------- 配置
 const CFG = {
@@ -33,7 +34,69 @@ const CFG = {
 };
 
 /** 矩阵场景的行列与间距（米，MuJoCo 坐标；整体以原点为中心） */
-const GRID = { rows: 10, cols: 20, pitchX: 0.72, pitchZ: 0.78 };
+const GRID = { rows: 8, cols: 12, pitchX: 1.08, pitchZ: 1.17 };
+
+// ---------------------------------------------------------------- 启动期画质参数
+/**
+ * 这两个值只能在启动时定，运行期改不了：
+ *   AA    —— 写进 WebGL context attributes。three 在 XR 里把 antialias 透传进
+ *            XRWebGLLayer，以及投影层的 `samples: antialias ? 4 : 0`
+ *            （vendor/three.module.js:27451），一体机上 4× MSAA 是最贵的一笔带宽。
+ *   XR_SS —— XRWebGLLayer / XRProjectionLayer 的 framebufferScaleFactor，必须早于
+ *            renderer.xr.setSession 才有意义（vendor:27303 在 presenting 时只警告）。
+ *
+ * 一体机（PICO / Quest 的浏览器 UA 都带 Android）默认关 MSAA，**帧缓冲不缩放（1.0）**。
+ *
+ * ⚠️ **不要把 XR_SS 默认调成 0.8**：three 在有 `XRWebGLBinding` 的设备上走投影层分支，
+ * 用 `scaleFactor` 创建 XRProjectionLayer 再按 textureWidth/Height 建 render target
+ * （vendor/three.module.js:27427-27453）。PICO 4 Ultra 上 0.8 会拿到无效尺寸
+ * （或合成器不接受该纹理），**整帧被丢弃 → 进入 VR 全黑**，连机器人和地面都看不到。
+ * 已实测：`?xrss=1` 恢复，0.8 全黑。要换性能请显式 `?xrss=0.8`，且必须先在真机确认能出图。
+ */
+const QS = new URLSearchParams(location.search);
+const IS_STANDALONE_XR = /Android/i.test(navigator.userAgent) && 'xr' in navigator;
+const AA = QS.has('aa') ? QS.get('aa') !== '0' : !IS_STANDALONE_XR;
+const XR_SS = (() => {
+  const v = Number(QS.get('xrss'));
+  return Number.isFinite(v) && v > 0 ? Math.min(1, Math.max(0.5, v)) : 1;
+})();
+
+/**
+ * 注视点渲染（fixed foveation）等级：0 = 全程全分辨率，1 = 边缘最狠。
+ *
+ * ⚠️ **不要默认拉满**。FFR 在头显侧是「按着色率（shading rate）分块」实现的：
+ * 边缘区域每 N×N 像素才真正着色一次。细长 / 面积小的几何能不能被采样到，取决于
+ * 三角形与采样网格的**亚像素对齐** —— 而左右眼是两个独立的采样网格（还有各自的
+ * 透镜/注视点映射），于是同一块几何可能「左眼有、右眼整只没了或只剩一半」。
+ * 越是细 / 小 / 远的物体越容易中招（机器人肢体、十几米外的整只机器人）；
+ * 地面网格虽然也被降采样，但它连成一片，少几条线看不出来，所以表现为「只有机器人丢」。
+ * 这也是为什么现象和场景强相关：正步/蹲起/高跳把机器人放在画面中心（fovea 区，全分辨率），
+ * 贴地爬行（低伏）、爬楼梯（远）、螃蟹步（偏边）都把它推到边缘区。
+ * 曾经把这里设成 1.0，在 PICO 4 上稳定复现「右眼没有机器人」。默认 0.5；
+ * 想省性能可 ?ffr=1，怀疑 FFR 就 ?ffr=0。
+ */
+const FFR = (() => {
+  if (!QS.has('ffr')) return 0.5;
+  const v = Number(QS.get('ffr'));
+  return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.5;
+})();
+
+/**
+ * 矩阵模式逐实例视锥剔除。`?cull=0` 关掉（万一边缘出现闪，用来排除）。
+ *
+ * GRID_CULL_R = 机器人包围球半径（约 0.9 m）+ 余量。余量要盖住两件事：
+ * ① 剔除用的是上一帧的机器人中心（1 帧位姿滞后，≤3 cm）；
+ * ② 头显快速转头时，本帧视锥和上一帧最多差 4~5°（10 m 处横向 ~0.8 m）。
+ */
+const CULL_GRID = QS.get('cull') !== '0';
+const GRID_CULL_R = 1.7;
+
+/**
+ * 机器人着色模型：`lambert`（默认，哑光塑料，片元成本约 1/2~1/3）或 `standard`
+ * （PBR + 环境贴图，金属质感）。见 `mjscene.setRobotMaterial`。
+ * `?mat=standard` 或运行期 `__elf.setRobotMaterial('standard')` 切回 PBR。
+ */
+const ROBOT_MAT = QS.get('mat') === 'standard' ? 'standard' : 'lambert';
 
 // ---------------------------------------------------------------- DOM
 const $ = (id) => document.getElementById(id);
@@ -46,6 +109,10 @@ const elLog = $('ld-log');
 const elHint = $('ld-hint');
 
 let logLines = 0;
+/** 只在值真的变了时才写 DOM（textContent 赋值会标脏样式/布局，XR 帧里白花时间） */
+function setText(el, s) {
+  if (el && el.textContent !== s) el.textContent = s;
+}
 function setProgress(pct, step) {
   const p = Math.max(0, Math.min(100, pct));
   elBar.style.width = `${p.toFixed(1)}%`;
@@ -142,20 +209,62 @@ function makeSkyTexture() {
 }
 
 // ---------------------------------------------------------------- 全局状态
-let renderer, scene, camera, controls, stage, mjScene, vrNav, xr, mujoco, model, data;
-let clock, simulating = false, physicsAcc = 0, timestep = CFG.defaultTimestep;
+let renderer, scene, camera, controls, stage, mjScene, vrNav, xr, xrPanel, mujoco, model, data;
+let simulating = false, physicsAcc = 0, timestep = CFG.defaultTimestep;
 let fpsAcc = 0, fpsFrames = 0, fps = 0;
 let standQpos = null; // 落地对齐后的静止站立姿态（复位用）
 let kinematics = null; // 回放用的前向计算（优先 mj_kinematics，比 mj_forward 省掉碰撞检测）
 let motion = null;     // 当前回放（MotionPlayer）
 let motionName = 'off';
 let following = true;  // 视角是否跟随机器人
-let sceneMode = 'matrix';     // 场景：'single' 单人 / 'matrix' 10×20 矩阵（默认矩阵）
+let sceneMode = 'matrix';     // 场景：'single' 单人 / 'matrix' 8×12 矩阵（默认矩阵）
 let terrainWanted = { stairs: true, crab: false };  // 当前回放需要的地形（矩阵模式下暂存，退出时恢复）
 let motionHudAcc = 0;
 let motionPausedUi = false;   // 暂停按钮当前显示的状态（冻结末帧时自动同步）
+let keyLight = null;          // 主方向光（投阴影那盏），VR 降载时关它的 castShadow
+let inXR = false;             // 当前是否处于"XR 降载"状态（由 enterXRQuality 置位）
+let preXr = null;             // 进 VR 前的 { shadows }，退出时还原阴影（场景保留 VR 里的选择）
+let lastWrittenTime = NaN;    // 上次真正写进 data.qpos 的回放时刻（跳帧用）
+let needSync = true;          // 一次性重算请求（复位姿态 / 换回放 / 切开关）
+let boundsAcc = 0;            // robotBounds 的节流累加器（VR 里降到 15 Hz）
+let motionReqId = 0;          // 换回放的请求序号：连点下拉时防「后发先至」
+let lastFrameTime = 0;        // 上一个 animation-frame 回调的 timestamp（ms），0 = 需重新锚定
+let dtSmooth = 1 / 72;        // 平滑帧间隔。只给「跟随 / 阻尼」用；播放时间必须用原始 dt，
+                              // 否则持续掉帧时会被 EMA 永久性拖慢
+const FT_N = 120;             // 帧时间环形缓冲长度（≈1.7 s @72 Hz）
+const _ft = new Float32Array(FT_N);
+let _ftIdx = 0;
+let _ftCount = 0;
 const _vRobot = new THREE.Vector3();
 const _vDelta = new THREE.Vector3();
+
+/**
+ * 帧时间统计（p50 / p95 / max / 标准差）。
+ *
+ * 头显上拿不到 GPU timer（没有 EXT_disjoint_timer_query_webgl2），所以「稳定低帧」
+ * 和「长任务抖动」只能靠分布区分：p95/p50 ≈ 1 → 稳定被 GPU 卡住（降几何/像素才有用）；
+ * p95/p50 > 2 → 帧里有长任务（GC / 纹理上传 / 着色器编译）。
+ */
+function frameStats() {
+  const n = _ftCount;
+  if (!n) return { frames: 0, p50: 0, p95: 0, max: 0, avg: 0, std: 0 };
+  const a = _ft.slice(0, n);          // 拷一份再排，别原地打乱环形缓冲
+  a.sort();
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += a[i];
+  const avg = sum / n;
+  let vs = 0;
+  for (let i = 0; i < n; i++) { const d = a[i] - avg; vs += d * d; }
+  const r = (v) => +v.toFixed(2);
+  return {
+    frames: n,
+    p50: r(a[Math.floor(0.5 * (n - 1))]),
+    p95: r(a[Math.floor(0.95 * (n - 1))]),
+    max: r(a[n - 1]),
+    avg: r(avg),
+    std: r(Math.sqrt(vs / n)),
+  };
+}
 
 const VIEWS = {
   front: { pos: [0.0, 1.30, 2.75], target: [0, 0.95, 0] },
@@ -174,10 +283,10 @@ const VIEWS = {
   // 正步 / 敬礼：机器人正面朝 three −Z（见 mjscene 的 yaw = +PI/2），所以
   // 正面 3/4 机位必须站在 −Z 一侧，否则看到的是后背（旧配置就吃到这个坑）。
   parade: { pos: [-1.45, 1.15, -1.75], target: [0, 0.98, 0] },
-  // 矩阵场景：10 行 × 20 列铺开约 14 m × 7 m，机位要退到十几米外并俯视 10°，
-  // 否则前排会把后排全挡住；8.7/9.9 这组刚好把整片四角都收进画面（再近就会裁掉
-  // 近端两角）。目标点抬到 0.4 m，避免整片机器人挤在画面下半部。
-  grid:  { pos: [8.0, 1.40, -7], target: [0, 0.40, 0] },
+  // 矩阵场景：8 行 × 12 列（间距 1.08 / 1.17 m）铺开约 13 m × 8 m，机位要退到十几米外
+  // 并俯视 10°，否则前排会把后排全挡住；目标点抬到 0.4 m，避免整片机器人挤在画面下半部。
+  // 这组位置按「16:9 下整片四角落在 NDC 0.9 以内」反解（列数 16→12 后横向收窄 3.2 m）。
+  grid:  { pos: [8.24, 1.40, -7.19], target: [0, 0.40, 0] },
   wide:  { pos: [7.20, 4.60, 10.5], target: [1.6, 0.90, 0] },
   // 高跳：略高的 3/4 机位，跟随看腾空弧线（机器人朝 +X，前跳幅度很小，基本原地起跳）
   jump:  { pos: [2.40, 1.60, 2.40], target: [0, 1.00, 0] },
@@ -190,7 +299,18 @@ const VIEWS = {
 
 function applyView(name) {
   const v = VIEWS[name];
-  if (!v || !controls) return;
+  if (!v) return;
+  // VR 沉浸会话里相机就是头显姿态、每帧被覆盖，不能用它改视角。
+  // 改为把机器人相对用户摆到对应观察角度（动世界 stage，等价桌面动相机）。
+  if (renderer.xr.isPresenting) {
+    if (vrNav && vrNav.presentView(name)) {
+      // 选了固定机位就关掉自动跟随，否则下一帧又被拉回正前方，按钮看着像没反应。
+      const fe = $('opt-follow');
+      if (fe && fe.checked) { fe.checked = false; fe.dispatchEvent(new Event('change')); }
+    }
+    return;
+  }
+  if (!controls) return;
   camera.position.set(...v.pos);
   controls.target.set(...v.target);
   controls.update();
@@ -202,7 +322,7 @@ async function boot() {
 
   renderer = new THREE.WebGLRenderer({
     canvas,
-    antialias: true,
+    antialias: AA,
     // alpha:true 是"半透明 VR（透视）"的前提：XR 帧缓冲带 alpha 通道，
     // 清屏 alpha=0 的地方才能透出头显摄像头的真实画面。桌面观感不受影响
     // （场景背景是天空盒贴图，始终不透明）。
@@ -257,12 +377,14 @@ async function boot() {
   key.shadow.bias = -0.0012;
   key.shadow.normalBias = 0.02;
   stage.add(key, key.target);
+  keyLight = key;          // 阴影开关的真正闸门（见 setShadows）
 
   const rim = new THREE.DirectionalLight(0x7fb6ff, 0.7);
   rim.position.set(-4.5, 3.2, -5.0);
   stage.add(rim);
 
-  clock = new THREE.Clock();
+  // 计时不用 THREE.Clock：frame(time) 直接用 animation-frame 的 timestamp，
+  // 见主循环注释（Clock 会把本帧自身耗时光算进 dt，掉帧时正反馈放大抖动）
 
   // ---------------- MuJoCo WASM ----------------
   setProgress(5, '加载 MuJoCo WebAssembly 引擎');
@@ -306,6 +428,9 @@ async function boot() {
   mjScene = new MjScene({ THREE, mujoco, model, data }).build();
   stage.add(mjScene.wrapZUp());
   log(`· 网格三角面 ${mjScene.stats.triangles.toLocaleString()} 个 / 几何体 ${mjScene.stats.geometries} 个`);
+  // 材质在 build() 里按 PBR 建好；默认是 Lambert，这里统一对齐到 ROBOT_MAT
+  if (mjScene.robotMaterial !== ROBOT_MAT) mjScene.setRobotMaterial(ROBOT_MAT);
+  if (ROBOT_MAT === 'standard') log('· 机器人材质：MeshStandard（PBR；?mat= 不传时默认是 Lambert）');
 
   // 回放时只需要几何位姿：mj_kinematics 不跑碰撞/约束，比 mj_forward 便宜很多
   kinematics = (typeof mujoco.mj_kinematics === 'function') ? mujoco.mj_kinematics : mujoco.mj_forward;
@@ -330,8 +455,12 @@ async function boot() {
   setupXR();
   onResize();
   window.addEventListener('resize', onResize);
+  // 标签页从后台切回来时时间基准要重新锚定，否则会按「离开的时长」积一次
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) lastFrameTime = 0;
+  });
 
-  // 场景：默认矩阵（10×20 = 200 份同步播放），URL 可用 ?scene=single 覆盖
+  // 场景：默认矩阵（8×12 = 96 份同步播放），URL 可用 ?scene=single 覆盖
   setSceneMode(new URLSearchParams(location.search).get('scene') === 'single' ? 'single' : 'matrix',
     { silent: true });
   log(`· 场景：${sceneMode === 'matrix'
@@ -345,10 +474,12 @@ async function boot() {
 
   // 调试句柄：控制台里可直接 __elf.applyView('front') / __elf.camera / __elf.mjScene
   window.__elf = {
-    THREE, renderer, scene, camera, controls, stage, mjScene, vrNav, xr,
+    THREE, renderer, scene, camera, controls, stage, mjScene, vrNav, xr, xrPanel,
     mujoco, model, data, applyView, setMotion, restoreStandPose,
-    setSceneMode, setTerrain, applyMotionView,
+    setSceneMode, setTerrain, applyMotionView, uiMode: applyUiMode,
     stats: () => mjScene && mjScene.stats,
+    // 左右眼现场体检：__elf.xrDiag()（见文件末尾），排查「单眼丢物体」用
+    xrDiag,
     get simulating() { return simulating; },
     get following() { return following; },
     get sceneMode() { return sceneMode; },
@@ -357,7 +488,59 @@ async function boot() {
     get seeThrough() { return xr ? xr.through : false; },
     xrCapabilities: () => (xr ? xr.capabilities() : null),
     get kinematicsName() { return kinematics === mujoco.mj_forward ? 'mj_forward' : 'mj_kinematics'; },
+    // —— VR 降载 / 性能观测（真机连 chrome://inspect 时用 perf()）——
+    xrQuality: {
+      enter: enterXRQuality,
+      exit: exitXRQuality,
+      // 会话里现场改 FFR：__elf.xrQuality.foveation(0) → 立刻生效，不用退出重进
+      foveation: (v) => xr.setFoveation(v),
+    },
+    get xrScale() { return XR_SS; },
+    get xrFoveation() { return xr ? xr.foveation : FFR; },
+    get aa() { return AA; },
+    get inXR() { return inXR; },
+    // 机器人着色模型（有损开关）：'standard' | 'lambert'
+    setRobotMaterial: (kind) => (mjScene ? mjScene.setRobotMaterial(kind) : null),
+    get robotMaterial() { return mjScene ? mjScene.robotMaterial : ROBOT_MAT; },
+    get shadows() {
+      return {
+        enabled: renderer.shadowMap.enabled,
+        cast: !!keyLight?.castShadow,
+        auto: renderer.shadowMap.autoUpdate,
+      };
+    },
+    perf: () => ({
+      fps: +fps.toFixed(1),
+      tris: renderer.info.render.triangles,
+      calls: renderer.info.render.calls,
+      programs: renderer.info.programs.length,
+      xrss: XR_SS,
+      aa: AA,
+      inXR,
+      sceneMode,
+      shadows: {
+        enabled: renderer.shadowMap.enabled,
+        cast: !!keyLight?.castShadow,
+        auto: renderer.shadowMap.autoUpdate,
+      },
+      syncIds: mjScene && mjScene._syncIds ? mjScene._syncIds.length : null,
+      syncCount: (mjScene && mjScene._syncCount) || 0,
+      rebuildCount: (xrPanel && xrPanel._rebuildCount) || 0,
+      // 矩阵实例：count 是总份数，drawn 是本帧真正提交的份数（VR 里做了视锥剔除）
+      gridDrawn: (mjScene && mjScene.grid && mjScene.grid.drawn) || 0,
+      gridTotal: (mjScene && mjScene.grid && mjScene.grid.count) || 0,
+      ft: frameStats(),          // 帧时间分布：p95/p50 ≈ 1 → GPU-bound；> 2 → 长任务
+      interp: (motion && motion.interp) || null,
+      robotMaterial: (mjScene && mjScene.robotMaterial) || ROBOT_MAT,
+      motionCache: MotionPlayer.cacheSize,
+    }),
     get motion() { return motion; },          // 调试/自检：可直接快进、查 loop 状态
+    // 回放数据缓存：自检用来验「预取之后切段不再走网络」
+    motionCache: {
+      get size() { return MotionPlayer.cacheSize; },
+      clear: () => MotionPlayer.clearCache(),
+      prefetch: (names) => MotionPlayer.prefetch(CFG.assetsBase, names),
+    },
     getMotion: () => (motion ? {
       name: motionName, kind: motion.kind, label: motion.label,
       nframes: motion.nframes, nq: motion.nq, fps: motion.fps,
@@ -372,6 +555,34 @@ async function boot() {
   $('panel').classList.remove('hidden');
   $('help').classList.remove('hidden');
   setTimeout(() => elLoading.classList.add('hidden'), 260);
+
+  // 首屏就绪之后再预热，不占启动时间
+  schedulePrefetch();
+}
+
+/**
+ * 空闲期预取全部回放数据（14 段 / 3.5 MB）。
+ *
+ * 现在 `MotionPlayer.load` 是纯按需的：切一段要等 json + bin 两个往返
+ * （Wi-Fi 上 0.3~2 s），而 VR 里那 1~2 s 就是纯黑/冻帧。全部预取之后切段是同步的。
+ *
+ * 三条约束：
+ *   1) 排在 `setProgress(100)` 与 `window.__elf` 之后 —— 不能拖慢启动（自检有 80 s 窗口）；
+ *   2) 只在没有 XR 会话时启动，别和头显串流抢带宽；
+ *   3) 失败完全静默：预取是锦上添花，不能影响主流程，更不能往 console 丢 warn
+ *      （自检把 console.warn 也算「控制台有报错」）。
+ */
+function schedulePrefetch() {
+  if (QS.get('noprefetch') === '1') return;
+  const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 800));
+  idle(() => {
+    if (renderer.xr.isPresenting) return;
+    MotionPlayer.prefetch(CFG.assetsBase, MOTION_PREFETCH, {
+      onProgress: (done, total) => {
+        if (done === total) log(`· 回放数据预取完成：${total} 段`);
+      },
+    }).catch(() => {});
+  }, { timeout: 3000 });
 }
 
 // ---------------------------------------------------------------- 运动仿真回放
@@ -422,9 +633,65 @@ function setTerrainWanted(t) {
   setTerrain(sceneMode === 'matrix' ? { stairs: false, crab: false } : t);
 }
 
-/** 什么时候需要每帧重算阴影贴图：跑物理、或单人模式下有回放 */
+/**
+ * 阴影总闸。
+ *
+ * 注意：只翻 renderer.shadowMap.enabled 是**没用的** —— three 的 needsProgramChange
+ * 判断里不含 shadowMapEnabled（vendor/three.module.js:30700-30802），材质不会重编译，
+ * 着色器里的 USE_SHADOWMAP / PCFSoft 采样照旧。真正的闸门是主光的 castShadow：
+ * 它一变，WebGLLights 的 hash.numDirectionalShadows 就变 → state.version 递增
+ * （vendor:22008/22015）→ 命中 lightsStateVersion 分支 → 自动换程序。
+ * 旧 program 留在 programs 缓存里，所以来回切第二次是 cache hit，不会反复编译。
+ */
+function setShadows(on, { syncUi = true } = {}) {
+  renderer.shadowMap.enabled = on;
+  if (keyLight) keyLight.castShadow = on;
+  renderer.shadowMap.needsUpdate = on;
+  const el = $('opt-shadow');
+  if (syncUi && el) el.checked = on;
+}
+
+/**
+ * 进入 XR 的自动降载：关阴影、压掉阴影每帧重算。
+ *
+ * **不动场景**：矩阵 8×12（96 份）在 VR 里照常显示，用户在头显里选了什么就是什么。
+ * 代价是 1980 万三角/单目、3950 万/双目 —— 一体机会明显掉帧，但这是用户的明确选择
+ * （「进 VR 保持矩阵，不降载」）。想流畅就自己在面板里切单人。
+ *
+ * 退出时只还原阴影，场景保留 VR 里的选择（见 exitXRQuality）。
+ */
+function enterXRQuality() {
+  if (inXR || !mjScene) return;
+  inXR = true;
+  preXr = { shadows: !!$('opt-shadow')?.checked };
+  setShadows(false);
+  // syncShadowAutoUpdate() 在「单人 + 有回放」时会把 autoUpdate 打开，这里压回去
+  renderer.shadowMap.autoUpdate = false;
+  // 关阴影会让「有阴影」那套 program 失效，下一帧要重编译。趁现在（会话刚建立、
+  // 合成器还在过渡）同步编好，别让它落到第一帧 XR 渲染里 —— 那就是「进 VR 卡一下」。
+  // 只在真的呈现时做：无头自检里 isPresenting 是 false，软渲染下编译要几分钟。
+  if (renderer.xr.isPresenting) {
+    try { renderer.compile(scene, camera); } catch { /* 预热失败不影响功能 */ }
+  }
+  // 帧时间基准重新锚定：进会话前后的间隔不可比
+  lastFrameTime = 0;
+  log(`· XR 降载：阴影 ${preXr.shadows ? '开' : '关'} → 关，场景保持 ${sceneMode}，`
+    + `帧缓冲 ${XR_SS}×，注视点 ${FFR}`);
+}
+
+function exitXRQuality() {
+  if (!inXR) return;
+  inXR = false;
+  setShadows(!!preXr?.shadows);
+  // 场景不还原：VR 里切过的模式带回桌面（用户在头显里做的选择不该被抹掉）
+  syncShadowAutoUpdate();
+  lastFrameTime = 0;
+  preXr = null;
+}
+
+/** 什么时候需要每帧重算阴影贴图：跑物理、或单人模式下有回放（XR 里一律不重算） */
 function syncShadowAutoUpdate() {
-  renderer.shadowMap.autoUpdate = simulating || (!!motion && sceneMode === 'single');
+  renderer.shadowMap.autoUpdate = !inXR && (simulating || (!!motion && sceneMode === 'single'));
   renderer.shadowMap.needsUpdate = true;
 }
 
@@ -440,15 +707,28 @@ function applyMotionView() {
 /**
  * 切换场景模式。
  *   single —— 只有一个机器人（就是模型本身，动画照旧）；
- *   matrix —— 把机器人视觉网格实例化成 10 行 × 20 列 = 200 份，同步播放同一段动画。
+ *   matrix —— 把机器人视觉网格实例化成 8 行 × 12 列 = 96 份，同步播放同一段动画。
  *
  * 矩阵用 InstancedMesh 实现（见 MjScene.enableRobotGrid）：几何 / 材质只有一份，
- * 绘制批次仍等于机器人几何数，200 份也不会掉帧；地形与阴影不参与复制。
+ * 绘制批次仍等于机器人几何数，96 份也不会掉帧；地形与阴影不参与复制。
+ *
+ * **VR 里同样可用**：不再拦截（用户明确要求「进 VR 保持矩阵」）。代价是双目
+ * 3950 万三角/帧，一体机会明显掉帧 —— 需要流畅就自己在面板里点「单人」。
+ *
+ * @param {'single'|'matrix'} mode
+ * @param {object} [o]
+ * @param {boolean} [o.silent]   不弹 toast / 不写日志（启动期与退出还原用）
+ * @param {boolean} [o.keepView] 不动机位。XR 期间三维画面由头显位姿决定，
+ *   applyView() 改的桌面相机每帧都会被 updateUserCamera 覆盖（vendor:27713），
+ *   真正需要保留的是 OrbitControls 的内部球坐标（退出 VR 后才用得上）。
  */
-function setSceneMode(mode, { silent = false } = {}) {
+function setSceneMode(mode, { silent = false, keepView = false } = {}) {
   if (!mjScene) return;
   const m = mode === 'single' ? 'single' : 'matrix';
   sceneMode = m;
+  // XR 里一律不动机位：桌面相机每帧被头显位姿覆盖，applyView 只会污染
+  // OrbitControls 的球坐标（退出后桌面会停在一个莫名其妙的角度）。
+  const freezeView = keepView || inXR || renderer.xr.isPresenting;
 
   for (const el of document.querySelectorAll('input[name="opt-scene"]')) {
     el.checked = el.value === m;
@@ -459,11 +739,11 @@ function setSceneMode(mode, { silent = false } = {}) {
   if (m === 'matrix') {
     info = mjScene.enableRobotGrid(GRID);
     setTerrain({ stairs: false, crab: false });   // 地形不复制，直接藏起来
-    applyView('grid');
+    if (!freezeView) applyView('grid');
   } else {
     mjScene.disableRobotGrid();
     setTerrain(terrainWanted);
-    applyMotionView();
+    if (!freezeView) applyMotionView();
   }
 
   syncShadowAutoUpdate();
@@ -491,11 +771,14 @@ function refreshSceneHud() {
   }
   const note = $('scene-note');
   if (note) {
+    const n = GRID.rows * GRID.cols;
+    const tris = Math.round(n * 20.6);     // 每份约 20.6 万三角 → 单目万面/帧（96 份 ≈ 1978 万）
     note.innerHTML = sceneMode === 'matrix'
-      ? '矩阵 = 把单人场景复制 <b>10 行 × 20 列 = 200 份</b>，同一段动画同步播放；地形 / 阴影不复制。'
-        + '<br>实例化渲染：绘制批次仍是 30 出头（不是 32×200），代价是三角形 ×200'
-        + '（约 4100 万面/帧）—— 独立显卡流畅，一体机 / 集显建议切回单人。'
-      : '单人 = 只有一个机器人。切到矩阵会把机器人复制 200 份同步播放（默认）。';
+      ? `矩阵 = 把单人场景复制 <b>${GRID.rows} 行 × ${GRID.cols} 列 = ${n} 份</b>`
+        + '（间距 1.08 / 1.17 m），同一段动画同步播放；地形 / 阴影不复制。'
+        + `<br>实例化渲染：绘制批次仍是 30 出头（不是 32×${n}），代价是三角形 ×${n}`
+        + `（约 ${tris} 万面/帧）—— 独立显卡流畅，一体机 / 集显建议切回单人。`
+      : `单人 = 只有一个机器人。切到矩阵会把机器人复制 ${GRID.rows * GRID.cols} 份同步播放（默认）。`;
   }
 }
 
@@ -533,6 +816,7 @@ function paradeSequenceNote(motion, s) {
  * 回放与本地 mj_step 物理互斥：开回放会自动关掉物理开关。
  */
 async function setMotion(name, { hideStairs = true } = {}) {
+  const req = ++motionReqId;    // 连点下拉时，只有最后一次的结果能落地
   const sel = $('opt-motion');
   // 下拉里只列当前提供的几段；用 URL / __elf 传了列表外的名字（如 squat_down）时
   // 不要硬写 value，否则 <select> 会变成空白项，看着像坏了。
@@ -564,10 +848,12 @@ async function setMotion(name, { hideStairs = true } = {}) {
   let player;
   try {
     player = await MotionPlayer.load(CFG.assetsBase, name);
+    if (req !== motionReqId) return null;      // 期间又选了别的，这次结果作废
     if (player.nq !== data.qpos.length) {
       throw new Error(`数据 nq=${player.nq} 与模型 nq=${data.qpos.length} 不一致`);
     }
   } catch (e) {
+    if (req !== motionReqId) return null;      // 慢请求的失败也别把 UI 重置成"加载失败"
     motion = null;
     motionName = 'off';
     if (sel) sel.value = 'off';
@@ -579,11 +865,16 @@ async function setMotion(name, { hideStairs = true } = {}) {
     return null;
   }
 
+  player.loop = player.meta.loop !== false;   // 单段蹲起播完冻结末帧
+  player.speed = Number($('opt-motion-speed').value) || 1;
+  player.restart();
+
   motion = player;
-  motion.loop = player.meta.loop !== false;   // 单段蹲起播完冻结末帧
-  motion.speed = Number($('opt-motion-speed').value) || 1;
-  motion.restart();
   motionPausedUi = false;
+  // 不在这里预先写第 0 帧：主循环下一帧就会写，提前写只会让「切片瞬间」的
+  // qpos 提前跳变（自检里「切片后 1.6 s 内位移变大」正是拿切片前的姿态当参照）。
+  lastWrittenTime = NaN;
+  needSync = true;
   $('btn-motion-pause').textContent = '暂停';
 
   // 两套地形共用同一个编译好的模型：紧凑障碍沿 +X（爬楼梯策略用的），
@@ -687,7 +978,7 @@ async function setMotion(name, { hideStairs = true } = {}) {
           + `<br>已知视觉遗留：撑地瞬间手 mesh 最低 ${s.visualMinZCm} cm`
           + '（拳头陷入地面），源轨迹与 sim 端一致，碰撞代理是腕部球，不影响动作本身。' : '')
         + '<br>单段回放：播完<b>冻结在趴姿</b>，想重看请点「从头播放」。'
-        + '<br>建议切「单人」场景观看（矩阵 10×20 的机位太远，看不清贴地细节）。'
+        + '<br>建议切「单人」场景观看（矩阵 8×12 的机位太远，看不清贴地细节）。'
       : motion.kind === 'squat'
       ? '参考动作：<code>logs/export/squat_{down,up}.npz</code> 的 29 关节极限蹲动作，'
         + '纯运动学装配（<b>无策略网络、不跑 mj_step</b>，所以不会摔倒）。'
@@ -734,10 +1025,10 @@ function robotCenterWorld(out) {
 }
 
 /** 每帧：让视角跟着机器人（桌面=平移相机，VR=交给 VRNav 舒适跟随） */
-function updateMotionCamera(dt) {
-  const c = robotCenterWorld(_vRobot);
+function updateMotionCamera(dt, refreshBounds = true) {
+  if (refreshBounds) robotCenterWorld(_vRobot);
   if (vrNav) {
-    vrNav.robotWorld.copy(c);
+    vrNav.robotWorld.copy(_vRobot);
     if (following) vrNav.autoFollow(dt);
     if (renderer.xr.isPresenting) return;
   }
@@ -746,7 +1037,7 @@ function updateMotionCamera(dt) {
   // 包围盒中心变化比其它回放大得多。默认 0.07/帧的跟随在低帧率下会明显滞后
   // （实测 8 fps 时末帧机器人被挤到画面右下并裁切），给这段单独加快到 0.25。
   const lerp = (motion && motion.kind === 'crawl') ? 0.25 : CFG.followLerp;
-  _vDelta.copy(c).sub(controls.target).multiplyScalar(lerp);
+  _vDelta.copy(_vRobot).sub(controls.target).multiplyScalar(lerp);
   if (_vDelta.lengthSq() > 1e-10) {
     controls.target.add(_vDelta);
     camera.position.add(_vDelta);
@@ -771,21 +1062,34 @@ function setupXR() {
     renderer,
     scene,
     slot: $('vr-slot'),
+    framebufferScale: XR_SS,
+    foveation: FFR,
     log,
     toast,
     onEnter: (id, info) => {
       controls.enabled = false;
-      renderer.shadowMap.needsUpdate = true;
+      // 先降载再建面板：xrPanel.show() 会立刻 rebuild()，这样面板第一帧显示的
+      // 就是实际的「单人 / 阴影关」，不会先画一帧矩阵状态再跳。
+      enterXRQuality();
+      const L = renderer.xr.getBaseLayer();
+      const fw = L ? (L.framebufferWidth ?? L.textureWidth) : 0;
+      const fh = L ? (L.framebufferHeight ?? L.textureHeight) : 0;
       refreshHudMode();
-      toast(id === 'ar'
-        ? `半透明 VR 已开启：背景透明（${info.blend}），能看到眼镜外的真实环境`
-        : '已进入 VR：左摇杆移动 · 右摇杆 30° 转向 · A/X 正对机器人', 4600);
+      applyUiMode(id);
+      toast((id === 'ar'
+        ? `半透明 VR 已开启（${info.blend}）`
+        : '已进入 VR：左摇杆移动 · 右摇杆连续转向 · 扳机点击面板')
+        + ` · 场景 ${sceneMode === 'matrix' ? `矩阵 ${GRID.rows}×${GRID.cols}` : '单人'}`
+        + (XR_SS < 1 ? ` / ${XR_SS}×` : '')
+        + (fw && fh ? ` / ${fw}×${fh}` : ''), 5200);
     },
     onExit: () => {
       controls.enabled = true;
-      renderer.shadowMap.needsUpdate = true;
-      applyView('front');
+      // 场景不还原（保留 VR 里的选择），只按当前模式给一个合适的桌面机位。
+      exitXRQuality();
+      applyView(sceneMode === 'matrix' ? 'grid' : 'front');
       refreshHudMode();
+      applyUiMode(null);
     },
     // 透视模式：地面网格淡化，真实地面透出来；退出时完全还原
     onSeeThrough: (on) => {
@@ -797,6 +1101,31 @@ function setupXR() {
 
   vrNav = new VRNav({ THREE, renderer, camera, scene, stage });
   vrNav.init();
+  // 手动转向 = 用户主动接管观察角度：关掉「视角跟随机器人」并同步面板复选框，
+  // 与 applyView() 里点视角预设的处理一致（否则转大角度会被 autoFollow 慢慢拉回）。
+  vrNav.onManualTurn = () => {
+    if (!following) return;
+    const fe = $('opt-follow');
+    if (fe && fe.checked) { fe.checked = false; fe.dispatchEvent(new Event('change')); }
+  };
+
+  // 头显内面板：WebXR 会话里浏览器只合成 WebGL 画布、DOM 不会进虚拟画面，
+  // 所以另画一块 CanvasTexture 贴图面板（见 xrpanel.js），控件仍由 #panel 的 DOM 驱动。
+  xrPanel = new XRPanel({ THREE, renderer, scene, camera, vrNav, panelEl: $('panel'), xr });
+  xrPanel.init();
+}
+
+/**
+ * XR 会话期间的界面形态：2D 面板进精简模式（只去说明段落），
+ * 头显里则显示贴图面板。退出会话全部还原。
+ * @param {'vr'|'ar'|null} id
+ */
+function applyUiMode(id) {
+  const on = !!id;
+  const panel = $('panel');
+  if (panel) panel.classList.toggle('compact', on);
+  if (!xrPanel) return;
+  if (on) xrPanel.show(); else xrPanel.hide();
 }
 
 /** HUD「状态」栏：XR 会话 > 回放 > 本地物理 > 静止站立（优先级从高到低） */
@@ -870,9 +1199,7 @@ function setupUI() {
 
   const shadowEl = $('opt-shadow');
   shadowEl.addEventListener('change', () => {
-    renderer.shadowMap.enabled = shadowEl.checked;
-    renderer.shadowMap.needsUpdate = true;
-    mjScene.applyOptions();
+    setShadows(shadowEl.checked, { syncUi: false });
   });
 
   // 视角预设
@@ -932,32 +1259,139 @@ function setupUI() {
 
 function onResize() {
   const w = window.innerWidth, h = window.innerHeight;
-  if (!renderer.xr.isPresenting) {
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
-  }
+  // XR 会话里帧缓冲尺寸是 three 按 glProjLayer.textureWidth/Height（或 XRWebGLLayer）
+  // 设好的；这里再 setSize 会把它改回窗口尺寸 —— 投影层路径上就是视口错位/黑屏。
+  if (renderer.xr.isPresenting) return;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
   renderer.setSize(w, h, false);
 }
 
+/**
+ * XR 现场体检：把**左右眼各自的视口 + 机器人包围盒在那一只眼里的 NDC 范围**打出来。
+ *
+ * 为什么需要它：three 的三目（stereo）绘制列表是**每帧一次、左右眼共用**的 ——
+ * `projectObject()` 只用 `cameraXR` 的联合视锥裁一次，之后 `renderScene()` 才按眼
+ * 分视口画。所以「只有一只眼丢物体」**不可能是剔除**，只可能是：
+ *   (a) 那只眼的视口 / 投影矩阵不对  → 下面两眼的 ndc 范围会明显不一样，或整段落在 ±1 之外；
+ *   (b) 几何两眼里都在，丢的是**片元**   → 两行 ndc 几乎一致，那就是降采样 / FFR 把
+ *       细小几何的采样点漏掉了（把 foveation 调 0 复测即可确认）。
+ *
+ * 头显用 chrome://inspect 连上后，在 console 里敲 `__elf.xrDiag()`（会话内、退出前都行）。
+ */
+function xrDiag() {
+  const camXR = renderer.xr.getCamera();
+  const L = renderer.xr.getBaseLayer ? renderer.xr.getBaseLayer() : null;
+  const box = mjScene ? mjScene.robotBounds() : null;   // MuJoCo 世界坐标
+  const pts = [];
+  if (box && !box.isEmpty()) {
+    for (let c = 0; c < 8; c++) {
+      // 8 个角点 → three 世界坐标（wrapZUp 那两层已经做完 Z-up→Y-up）
+      pts.push(mjScene.root.localToWorld(new THREE.Vector3(
+        c & 1 ? box.max.x : box.min.x,
+        c & 2 ? box.max.y : box.min.y,
+        c & 4 ? box.max.z : box.min.z,
+      )));
+    }
+  }
+  const eyes = (camXR.cameras || []).map((cam, i) => {
+    let x0 = Infinity; let x1 = -Infinity; let y0 = Infinity; let y1 = -Infinity;
+    let offNear = 0;
+    for (const p of pts) {
+      const q = p.clone().project(cam);       // → NDC
+      if (!(q.z >= -1 && q.z <= 1)) offNear++; // 近平面之后 project() 没有意义，单独计数
+      x0 = Math.min(x0, q.x); x1 = Math.max(x1, q.x);
+      y0 = Math.min(y0, q.y); y1 = Math.max(y1, q.y);
+    }
+    return {
+      eye: i === 0 ? 'L' : (i === 1 ? 'R' : `#${i}`),
+      viewport: cam.viewport
+        ? `${cam.viewport.x},${cam.viewport.y} ${cam.viewport.width}×${cam.viewport.height}` : '—',
+      'ndc x': pts.length ? `${x0.toFixed(2)} .. ${x1.toFixed(2)}` : '—',
+      'ndc y': pts.length ? `${y0.toFixed(2)} .. ${y1.toFixed(2)}` : '—',
+      inFrustum: pts.length && x1 > -1 && x0 < 1 && y1 > -1 && y0 < 1 ? 'yes' : 'NO',
+      offNear,
+    };
+  });
+  const info = {
+    presenting: renderer.xr.isPresenting,
+    mode: xr ? xr.active : null,
+    // 非会话时 getFoveation() 返回 undefined（还没有 baseLayer）→ 回落到现场值 / 启动参数
+    foveation: (renderer.xr.getFoveation ? renderer.xr.getFoveation() : undefined)
+      ?? (xr ? xr.foveation : FFR),
+    framebuffer: L ? `${L.framebufferWidth ?? L.textureWidth}×${L.framebufferHeight ?? L.textureHeight}` : '—',
+    xrss: XR_SS,
+    aa: AA,
+    sceneMode,
+    shadows: { enabled: renderer.shadowMap.enabled, cast: !!keyLight?.castShadow },
+    calls: renderer.info.render.calls,
+    triangles: renderer.info.render.triangles,
+  };
+  console.log('[xrDiag]', info);
+  console.table(eyes);
+  return { info, eyes };
+}
+
 // ---------------------------------------------------------------- 主循环
-function frame() {
-  const dt = Math.min(clock.getDelta(), 0.12);
+/**
+ * @param {number} [time] animation-frame 的 timestamp（ms）。WebXR 与桌面 rAF 都会传。
+ *
+ * 为什么不用 `clock.getDelta()`：它算的是「上一个回调结束 → 现在」，把本帧自身的耗时
+ * 也算进去，掉帧时会正反馈放大抖动；而且换基准点（进/出 VR、标签页切回来）会吐一个
+ * 巨大的 delta。改用绝对 timestamp 求差，进出会话时重新锚定即可。
+ */
+function frame(time) {
+  const now = (typeof time === 'number' && time > 0) ? time : performance.now();
+  let dt = lastFrameTime ? (now - lastFrameTime) / 1000 : 1 / 72;
+  lastFrameTime = now;
+  if (!(dt > 0)) dt = 1 / 72;                  // 首帧 / 时间戳回退
+  else if (dt > 0.1) dt = 0.1;                 // 长卡顿限幅，别一次跳过一整段
+  // 平滑值只喂「跟随 / 阻尼」；播放时间必须用原始 dt，否则持续掉帧会被 EMA 拖慢
+  dtSmooth += (dt - dtSmooth) * 0.2;
+  _ft[_ftIdx] = dt * 1000;
+  _ftIdx = (_ftIdx + 1) % FT_N;
+  if (_ftCount < FT_N) _ftCount++;
+
+  // 矩阵模式：按头显视锥逐实例剔除。
+  // InstancedMesh 的包围球罩住整片网格，three 只能「整体画 / 整体不画」，所以
+  // 视野外那几十份必须自己筛掉 —— 这是矩阵模式下唯一够大的无损收益。
+  if (CULL_GRID && renderer.xr.isPresenting && mjScene && mjScene.grid) {
+    mjScene.cullGrid(renderer.xr.getCamera(), _vRobot, GRID_CULL_R);
+  }
+
+  let synced = false;
 
   if (motion) {
     // 运动仿真回放：按时间插值写回 qpos → 刷新几何位姿 → 同步 three.js
     motion.advance(dt);
     if (motion.paused !== motionPausedUi) {       // 单段冻结末帧时自动改按钮文字
       motionPausedUi = motion.paused;
-      $('btn-motion-pause').textContent = motionPausedUi ? '继续' : '暂停';
+      setText($('btn-motion-pause'), motionPausedUi ? '继续' : '暂停');
     }
-    motion.writeQpos(data.qpos);
-    kinematics(model, data);
-    mjScene.sync();
-    updateMotionCamera(dt);
+    // 只有「回放时刻真的变了」才重算：暂停 / 播完冻结时整条
+    // qpos → mj_kinematics → 矩阵同步 的链子直接跳过。
+    // 注意用 lastWrittenTime 比较，不能用 advance() 前后 time 差 ——
+    // 自检里有 m.paused=true; m.seek(2.20) 这种「暂停下外部改 time」的用法。
+    if (motion.time !== lastWrittenTime || needSync || mjScene._dirty) {
+      motion.writeQpos(data.qpos);
+      kinematics(model, data);
+      mjScene.sync();
+      lastWrittenTime = motion.time;
+      needSync = false;
+      synced = true;
+    }
+    boundsAcc += dt;
+    // robotBounds 要遍历 32 个网格 × 8 个角点，VR 帧预算里没必要每帧算；
+    // 桌面保持每帧（视角跟随要顺滑）。
+    const due = !inXR || boundsAcc >= 1 / 15;
+    if (due) boundsAcc = 0;
+    updateMotionCamera(dtSmooth, due);
     motionHudAcc += dt;
     if (motionHudAcc >= 0.2) {
       motionHudAcc = 0;
-      $('hud-motion').textContent = motion.describe();
+      // 沉浸态浏览器只合成 WebGL 画布，DOM 根本看不见；写 textContent 只会标脏
+      // 样式/布局，白占 XR 帧预算
+      if (!renderer.xr.isPresenting) setText($('hud-motion'), motion.describe());
     }
   } else if (simulating && model && data) {
     physicsAcc += dt;
@@ -967,11 +1401,26 @@ function frame() {
       physicsAcc -= timestep;
       steps++;
     }
-    if (steps > 0) mjScene.sync();
+    if (steps > 0) { mjScene.sync(); synced = true; }
     if (physicsAcc > timestep * CFG.maxPhysicsStepsPerFrame) physicsAcc = 0;
   }
 
+  // 静止站立 / 暂停状态下改显示开关、切场景、复位姿态等一次性变化：补一次同步
+  if (!synced && (needSync || mjScene._dirty)) {
+    mjScene.sync();
+    needSync = false;
+  }
+
   if (vrNav) vrNav.update(dt);
+  // 头显内面板：头锁摆位、悬停、DOM 状态轮询。
+  // three 的动画循环是「先回调、后 requestAnimationFrame」，任何一帧抛异常都会永久
+  // 停掉渲染（头显里就是全黑）。这里熔断：面板坏掉只丢面板，场景照常渲染。
+  if (xrPanel) {
+    try { xrPanel.update(dt); } catch (e) {
+      console.error('xrPanel 更新失败，已禁用头显面板', e);
+      xrPanel = null;
+    }
+  }
   if (controls && controls.enabled && !renderer.xr.isPresenting) controls.update();
 
   renderer.render(scene, camera);
@@ -981,9 +1430,11 @@ function frame() {
   if (fpsAcc >= 0.5) {
     fps = fpsFrames / fpsAcc;
     fpsAcc = 0; fpsFrames = 0;
-    const r = renderer.info.render;
-    $('hud-render').textContent =
-      `${fps.toFixed(0)} fps · ${(r.triangles / 1000).toFixed(0)}k 三角 · ${r.calls} 批次`;
+    if (!renderer.xr.isPresenting) {
+      const r = renderer.info.render;
+      setText($('hud-render'),
+        `${fps.toFixed(0)} fps · ${(r.triangles / 1000).toFixed(0)}k 三角 · ${r.calls} 批次`);
+    }
   }
 }
 
