@@ -91,12 +91,34 @@ function handle(req, res) {
         console.log(`  ${req.method} ${pathname} → ${res.statusCode} (${st.size} B)`);
       });
     }
+
+    // 回放数据的 bin 由 motion.js 用 `?v=<version>` 版本化请求（meta.version 变了
+    // URL 就变了），所以可以放心 immutable —— 切一次回放不必再走一趟网络。
+    // ⚠️ 但 json 的 URL **不带** ?v=：给它发 immutable，重烘后浏览器会永远拿到旧
+    // meta → 旧 version → 永远请求旧 bin，改了没效果且极难排查。json 保持 no-cache。
+    const isMotionBin = /^\/assets\/motion_.*\.bin$/i.test(pathname);
+    const etag = `W/"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
+    const cacheControl = isMotionBin
+      ? 'public, max-age=31536000, immutable'
+      : 'no-cache, must-revalidate';
+
+    // 条件请求：命中就不发 body（模型 12 MB、wasm 10 MB 时刷新页面能省一大截）
+    const inm = req.headers['if-none-match'];
+    if (inm && inm === etag) {
+      res.writeHead(304, {
+        ETag: etag,
+        'Cache-Control': cacheControl,
+        'Last-Modified': st.mtime.toUTCString(),
+      }).end();
+      return;
+    }
+
     const headers = {
       'Content-Type': MIME[ext] || 'application/octet-stream',
       'Content-Length': st.size,
       'Last-Modified': st.mtime.toUTCString(),
-      // 开发用：避免浏览器缓存旧模型/旧代码
-      'Cache-Control': 'no-cache, must-revalidate',
+      ETag: etag,
+      'Cache-Control': cacheControl,
       'X-Content-Type-Options': 'nosniff',
     };
     if (ext === '.html' || ext === '.json' || ext === '.mjs' || ext === '.js' || ext === '.xml') {

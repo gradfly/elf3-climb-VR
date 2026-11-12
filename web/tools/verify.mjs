@@ -148,9 +148,9 @@ try {
   check('默认进矩阵场景（单选按钮 matrix / HUD 显示矩阵）',
     scn.mode === 'matrix' && scn.checked.join() === 'matrix' && scn.hud.includes('矩阵'),
     `mode=${scn.mode} checked=${scn.checked} hud=${scn.hud}`);
-  check('矩阵 = 10 行 × 20 列 = 200 份实例（每批 InstancedMesh 画 200 次）',
-    !!scn.grid && scn.grid.rows === 10 && scn.grid.cols === 20 && scn.grid.count === 200
-      && scn.grid.perInst === 200 && scn.grid.meshes === scn.robotGeoms,
+  check('矩阵 = 8 行 × 12 列 = 96 份实例（每批 InstancedMesh 画 96 次）',
+    !!scn.grid && scn.grid.rows === 8 && scn.grid.cols === 12 && scn.grid.count === 96
+      && scn.grid.perInst === 96 && scn.grid.meshes === scn.robotGeoms,
     JSON.stringify(scn.grid));
   check('矩阵模式隐藏地形（地形不参与复制）',
     scn.stairsOn === false && scn.crabOn === false,
@@ -160,8 +160,8 @@ try {
   check('矩阵机位是远景（相机离方阵中心 6 m 以上，在 OrbitControls 上限内）',
     scn.camDist > 6 && scn.camDist <= 40,
     `camera=${JSON.stringify(scn.cam)} 距 target ${scn.camDist} m`);
-  check('「机器人」开关能同时控制 200 份实例', scn.gridHidden && scn.gridVisible);
-  console.log(`  （矩阵模式绘制批次 ${scn.calls} 次 / 单人 30 个几何 —— 实例化没有把 draw call 乘 200）`);
+  check('「机器人」开关能同时控制 96 份实例', scn.gridHidden && scn.gridVisible);
+  console.log(`  （矩阵模式绘制批次 ${scn.calls} 次 / 单人 30 个几何 —— 实例化没有把 draw call 乘 96）`);
 
   const scn2 = await evalJs(ws, `(()=>{const s=__elf.mjScene,$=id=>document.getElementById(id);
     __elf.setSceneMode('single');
@@ -189,14 +189,15 @@ try {
     set('opt-floor',true);
     set('opt-collision',true); out.collisionShown=[...Array(s.model.ngeom).keys()].filter(g=>s.model.geom_group[g]===3&&s.objs[g]&&s.objs[g].visible).length;
     set('opt-collision',false);
-    set('opt-shadow',false); out.shadowOff=__elf.renderer.shadowMap.enabled===false;
-    set('opt-shadow',true);  out.shadowOn=__elf.renderer.shadowMap.enabled===true;
+    set('opt-shadow',false); out.shadowOff=__elf.renderer.shadowMap.enabled===false&&__elf.shadows.cast===false;
+    set('opt-shadow',true);  out.shadowOn =__elf.renderer.shadowMap.enabled===true &&__elf.shadows.cast===true;
     return out;})()`);
   check('“机器人”开关生效', toggles.robotHidden && toggles.robotShown);
   check('“楼梯/障碍”开关生效', toggles.stairsHidden);
   check('“地面网格”开关生效', toggles.floorHidden);
   check('“碰撞体”调试层可见', toggles.collisionShown > 0, `${toggles.collisionShown} 个碰撞几何`);
-  check('“阴影”开关生效', toggles.shadowOff && toggles.shadowOn);
+  check('“阴影”开关生效（同时翻主光 castShadow，着色器才真的换程序）',
+    toggles.shadowOff && toggles.shadowOn);
 
   // 4. 视角预设
   const views = await evalJs(ws, `(()=>{const out={};
@@ -581,6 +582,424 @@ try {
     through.off.bgBack && through.off.fogBack && through.off.alpha === through.before.alpha
       && Math.abs(through.off.floor - 1) < 1e-6 && through.off.transparent === false,
     JSON.stringify(through.off));
+
+  // 7.6 头显内面板（CanvasTexture 贴图）：DOM 在 XR 里不会被合成，面板画成场景里的平面。
+  //     无头环境把「头显姿态」换成桌面 camera，所以摆位 / 绘制 / 命中 / 派发都能在这里跑。
+  const xp = await evalJs(ws, `(async()=>{
+    __elf.uiMode('vr');                       // 等价于进入会话：2D 精简 + 显示贴图面板
+    await new Promise(r=>setTimeout(r,320));
+    const p=__elf.xrPanel;
+    const st=p.state();
+    const quad=__elf.scene.getObjectByName('xr-panel-quad');
+    const tab=__elf.scene.getObjectByName('xr-panel-tab');
+    const grp=__elf.scene.getObjectByName('xr-panel');
+    const note=document.getElementById('motion-note');
+    const P=new __elf.THREE.Vector3(), v=new __elf.THREE.Vector3();
+    __elf.camera.getWorldPosition(P);
+    grp.getWorldDirection(v);                 // 非相机对象的 +Z 轴
+    const want=P.clone().sub(grp.position).normalize();
+    return {
+      st,
+      quadVisible: !!quad && quad.visible === true,
+      inScene: !!grp && grp.parent === __elf.scene,
+      panelPos: grp? grp.position.toArray().map(v=>+v.toFixed(3)) : null,
+      camPos: __elf.camera.position.toArray().map(v=>+v.toFixed(3)),
+      dy: +(grp.position.y - P.y).toFixed(3),
+      normal: +v.dot(want).toFixed(3),
+      mat: {
+        q: [quad.material.transparent, quad.material.opacity, quad.material.depthWrite],
+        t: [tab.material.transparent, tab.material.opacity, tab.material.depthWrite],
+      },
+      compact: document.getElementById('panel').classList.contains('compact'),
+      noteDisplay: getComputedStyle(note).display,
+      keys: p.widgets().map(w=>w.key),
+    };})()`);
+  check('头显面板已建在 scene 里并显示（不挂 stage，摇杆漫游不会拖走它）',
+    xp.quadVisible && xp.inScene, `位置 ${JSON.stringify(xp.panelPos)} / 相机 ${JSON.stringify(xp.camPos)}`);
+  check('面板摆在相机正前方 1.5 m（无头时用桌面 camera 当代替）',
+    !!xp.panelPos && Math.abs(Math.hypot(xp.panelPos[0] - xp.camPos[0],
+      xp.panelPos[2] - xp.camPos[2]) - 1.5) < 0.02,
+    `水平距离 ${xp.panelPos && Math.hypot(xp.panelPos[0] - xp.camPos[0], xp.panelPos[2] - xp.camPos[2]).toFixed(2)} m`);
+  check('面板中心高于眼睛 0.5 m（默认置于视野上方）',
+    xp.dy > 0 && Math.abs(xp.dy - 0.5) < 0.05, `dy=${xp.dy} m`);
+  check('平面 +Z 法向指向眼睛（朝眼下倾，约 10.8°）',
+    xp.normal > 0.99, `dot=${xp.normal}`);
+  check('主面板与收起小签默认都是 50% 半透明、关闭深度写入',
+    JSON.stringify(xp.mat.q) === JSON.stringify([true, 0.5, false])
+      && JSON.stringify(xp.mat.t) === JSON.stringify([true, 0.5, false]),
+    `quad=${xp.mat.q} tab=${xp.mat.t}`);
+  check('state() 暴露默认透明度与头锁状态',
+    xp.st.opacity === 0.5 && xp.st.headLocked === true,
+    `opacity=${xp.st.opacity} headLocked=${xp.st.headLocked}`);
+  const WANT_KEYS = [
+    'radio:opt-scene:single', 'radio:opt-scene:matrix', 'select:opt-motion',
+    'btn:btn-motion-restart', 'btn:btn-motion-pause',
+    'btn:view:front', 'btn:view:back', 'btn:view:side',
+    'btn:view:squat', 'btn:view:grid', 'btn:view:wide',
+    'check:opt-follow',
+    'panel:collapse', 'panel:exit', 'panel:recenter', 'panel:opacity',
+  ].sort();
+  check('面板精简成固定两栏（场景 / 视角）',
+    xp.st.groups.join(',') === '场景,视角', xp.st.groups.join(','));
+  check('最小控件集 = 2 单选 + 1 下拉 + 1 复选 + 8 按钮 + 4 标题按钮，说明文字与多余控件全删',
+    xp.st.counts.radio === 2 && xp.st.counts.select === 1 && xp.st.counts.check === 1
+      && xp.st.counts.btn === 8 && xp.st.counts.panel === 4
+      && xp.keys.length === 16
+      && JSON.stringify(xp.keys.slice().sort()) === JSON.stringify(WANT_KEYS)
+      && !xp.keys.some((k) => /opt-motion-speed|btn-reset-stage|view:(head|top|crab)|note/.test(k)),
+    `${JSON.stringify(xp.st.counts)} keys=${xp.keys.length}`);
+  check('宽扁画布长宽比来自内容（文字物理大小恒定，不裁切）',
+    xp.st.canvas.w === 1024 && xp.st.canvas.h > 200 && xp.st.canvas.h < 420
+      && Math.abs(xp.st.world.h - 0.80 * xp.st.canvas.h / xp.st.canvas.w) < 1e-6,
+    `画布 ${xp.st.canvas.w}×${xp.st.canvas.h} → 平面 0.80×${xp.st.world.h.toFixed(2)} m`);
+  check('进会话时 2D 面板进精简模式：说明段落隐藏、其余照旧',
+    xp.compact === true && xp.noteDisplay === 'none',
+    `compact=${xp.compact} motion-note display=${xp.noteDisplay}`);
+
+  const xpTap = await evalJs(ws, `(async()=>{
+    const p=__elf.xrPanel, $=id=>document.getElementById(id), out={};
+    const quad=()=>__elf.scene.getObjectByName('xr-panel-quad');
+    const tab =()=>__elf.scene.getObjectByName('xr-panel-tab');
+    const label=()=>p.widgets().find(w=>w.key==='panel:opacity')?.label;
+    const f0=$('opt-follow').checked;
+    p.tap('check:opt-follow');
+    out.check={ before:f0, after:$('opt-follow').checked, follow:__elf.vrNav.follow };
+    p.tap('check:opt-follow');
+    out.checkBack=$('opt-follow').checked;
+
+    p.tap('radio:opt-scene:single');
+    await new Promise(r=>setTimeout(r,220));
+    out.radio={ mode:__elf.sceneMode,
+      on:[...document.querySelectorAll('#scene-mode label')].filter(l=>l.classList.contains('on')).length };
+    p.tap('radio:opt-scene:matrix');
+    await new Promise(r=>setTimeout(r,220));
+    out.radioBack=__elf.sceneMode;
+
+    // 回放下拉 11 项：短画布撑高 + 顶边锚定，选完再缩回。
+    // 先把 DOM 值改成 fight_policy 但**不派发 change**（避免触发 .bin 异步加载：
+    // 7.6 时场景仍是 matrix 96 份实例，软渲染下主线程极慢，加载会拖几分钟），
+    // 再选 option:off —— 既验证「选项写回 DOM + 派发 change」，又不会拉起下载。
+    $('opt-motion').value='fight_policy';
+    p.rebuild();
+    out.beforeSel=$('opt-motion').value;
+    const texBefore=p._tex;
+    p.tap('select:opt-motion');
+    out.overlayOpen = p.state().overlay;
+    out.overlayOpts = p.widgets().filter(w=>w.kind==='option').length;
+    const g=p.state(), q=quad();
+    out.grown={ h:g.canvas.h, baseH:g.baseH, dy:q.position.y, scaleY:q.scale.y };
+    // 纹理随画布尺寸重建：texStorage2D 不可变存储锁死首帧尺寸，画布从 290 撑到 782
+    // 必须换新 CanvasTexture，否则 GL 报 INVALID_VALUE、平面仍是拉伸的旧图。
+    out.texRebuilt = p._tex && p._tex !== texBefore && p._tex.image.height === g.canvas.h
+      && q.material.map === p._tex;
+    p.tap('option:off');
+    out.select={ value:$('opt-motion').value, overlayClosed:p.state().overlay };
+    const s=p.state();
+    out.shrunk={ h:s.canvas.h, dy:quad().position.y };
+
+    // 面板按钮 → DOM 点击派发：挂一次性监听，不依赖任何回放数据。
+    let clicks=0;
+    const btn=$('btn-motion-restart'), on=()=>{ clicks++; };
+    btn.addEventListener('click', on);
+    p.tap('btn:btn-motion-restart');
+    btn.removeEventListener('click', on);
+    out.restart={ clicks, label:$('btn-motion-pause').textContent.trim() };
+
+    // 视角按钮：先记下正面机位，挪到矩阵机位，再点面板上的「正面」
+    __elf.applyView('front');
+    const expected=__elf.camera.position.toArray().map(v=>+v.toFixed(3));
+    __elf.applyView('grid');
+    const gridPos=__elf.camera.position.toArray().map(v=>+v.toFixed(3));
+    p.tap('btn:view:front');
+    out.view={ expected, gridPos, frontPos:__elf.camera.position.toArray().map(v=>+v.toFixed(3)) };
+
+    // 透明度一键切换 50% ↔ 100%（两个材质 + chip 文案一起变）
+    p.tap('panel:opacity');
+    out.opacity1={ st:p.state().opacity, q:quad().material.opacity, t:tab().material.opacity, label:label() };
+    p.tap('panel:opacity');
+    out.opacity2={ st:p.state().opacity, q:quad().material.opacity, t:tab().material.opacity, label:label() };
+    return out;})()`);
+  check('面板复选框 → DOM 与视角跟随同步',
+    xpTap.check.before !== xpTap.check.after && xpTap.check.follow === xpTap.check.after
+      && xpTap.checkBack === xpTap.check.before, JSON.stringify(xpTap.check));
+  check('面板单选 → 场景模式切换（含 2D 高亮）',
+    xpTap.radio.mode === 'single' && xpTap.radio.on === 1 && xpTap.radioBack === 'matrix',
+    JSON.stringify(xpTap.radio));
+  check('面板下拉 → 覆盖层列出 11 段回放并可选中（写回 DOM + 派发 change）',
+    xpTap.overlayOpen === 'opt-motion' && xpTap.overlayOpts === 11
+      && xpTap.beforeSel === 'fight_policy' && xpTap.select.value === 'off'
+      && xpTap.select.overlayClosed === null,
+    `覆盖层=${xpTap.overlayOpen} 选项=${xpTap.overlayOpts} ${xpTap.beforeSel} → ${xpTap.select.value}`);
+  check('覆盖层撑高画布且顶边锚定，关闭后自动缩回宽扁条',
+    xpTap.grown.h >= 782 && xpTap.grown.baseH > 200 && xpTap.grown.baseH < 420
+      && xpTap.grown.dy < 0
+      && Math.abs(xpTap.grown.dy - (0.80 * (xpTap.grown.baseH - xpTap.grown.h) / 1024) / 2) < 1e-6
+      && Math.abs(xpTap.grown.scaleY - 0.80 * xpTap.grown.h / 1024) < 1e-6
+      && xpTap.shrunk.h === xpTap.grown.baseH && Math.abs(xpTap.shrunk.dy) < 1e-6,
+    `H=${xpTap.grown.h} baseH=${xpTap.grown.baseH} dy=${xpTap.grown.dy.toFixed(3)} → ${xpTap.shrunk.h}`);
+  check('撑高画布时纹理随之重建（新 CanvasTexture 贴到材质上，修「下拉被拉伸看不见」）',
+    xpTap.texRebuilt === true, `texRebuilt=${xpTap.texRebuilt}`);
+  check('面板视角按钮 → 相机切回正面机位',
+    xpTap.view.frontPos.every((v, i) => Math.abs(v - xpTap.view.expected[i]) < 0.05)
+      && xpTap.view.gridPos.some((v, i) => Math.abs(v - xpTap.view.expected[i]) > 0.5),
+    `grid=${xpTap.view.gridPos} → ${xpTap.view.frontPos}`);
+  check('面板「从头播放」→ 代点 DOM 按钮（零业务逻辑复制）',
+    xpTap.restart.clicks === 1,
+    `DOM click 次数=${xpTap.restart.clicks} 按钮文案=${xpTap.restart.label}`);
+  check('标题栏一键切换整个面板 50% ↔ 100%',
+    xpTap.opacity1.st === 1 && xpTap.opacity1.q === 1 && xpTap.opacity1.t === 1 && xpTap.opacity1.label === '100%'
+      && xpTap.opacity2.st === 0.5 && xpTap.opacity2.q === 0.5 && xpTap.opacity2.t === 0.5
+      && xpTap.opacity2.label === '50%',
+    `第一次=${JSON.stringify(xpTap.opacity1)} 第二次=${JSON.stringify(xpTap.opacity2)}`);
+
+  const xpLock = await evalJs(ws, `(async()=>{
+    const p=__elf.xrPanel, grp=__elf.scene.getObjectByName('xr-panel');
+    const P=new __elf.THREE.Vector3();
+    const frame=()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+    p.tap('panel:recenter');                        // 头锁 → 世界固定
+    const off={ locked:p.state().headLocked, pos:grp.position.toArray().map(v=>+v.toFixed(3)) };
+    __elf.camera.position.set(3,1.6,3); __elf.camera.updateMatrixWorld(true);
+    await frame(); await new Promise(r=>setTimeout(r,150));
+    off.posAfter=grp.position.toArray().map(v=>+v.toFixed(3));
+    p.tap('panel:recenter');                        // 世界固定 → 头锁，立即摆回视野上方
+    await frame();
+    __elf.camera.getWorldPosition(P);
+    const g=grp.position;
+    const on={ locked:p.state().headLocked,
+      dist:+Math.hypot(g.x-P.x,g.z-P.z).toFixed(3), dy:+(g.y-P.y).toFixed(3) };
+    __elf.applyView('front');                       // 还原相机，别影响后续小节
+    return {off,on};})()`);
+  check('「归位」切到世界固定：移动相机后面板留在原处',
+    xpLock.off.locked === false
+      && xpLock.off.pos.every((v, i) => Math.abs(v - xpLock.off.posAfter[i]) < 1e-3),
+    `${xpLock.off.pos} → ${xpLock.off.posAfter}`);
+  check('「归位」切回头锁：面板立即回到视线上方 1.5 m / +0.5 m',
+    xpLock.on.locked === true && Math.abs(xpLock.on.dist - 1.5) < 0.05
+      && Math.abs(xpLock.on.dy - 0.5) < 0.05,
+    `dist=${xpLock.on.dist} dy=${xpLock.on.dy}`);
+
+  const png = await evalJs(ws, `__elf.xrPanel.exportPNG()`);
+  let pngPath = null;
+  if (typeof png === 'string' && png.startsWith('data:image/png')) {
+    const buf = Buffer.from(png.split(',')[1], 'base64');
+    fs.mkdirSync('logs', { recursive: true });
+    pngPath = path.resolve('logs/xr_panel_debug.png');
+    fs.writeFileSync(pngPath, buf);
+  }
+  check('面板导出 PNG（可人眼确认中文没变豆腐块）',
+    !!pngPath, pngPath ? `${pngPath}（${(fs.statSync(pngPath).size / 1024).toFixed(0)} KB）` : '导出失败');
+
+  const xpCollapse = await evalJs(ws, `(async()=>{
+    const p=__elf.xrPanel, q=()=>__elf.scene.getObjectByName('xr-panel-quad').visible,
+      t=()=>__elf.scene.getObjectByName('xr-panel-tab').visible;
+    p.tap('panel:collapse'); await new Promise(r=>setTimeout(r,150));
+    const a={collapsed:p.state().collapsed, mesh:q(), tab:t()};
+    p.tap('panel:expand');   await new Promise(r=>setTimeout(r,150));
+    const b={collapsed:p.state().collapsed, mesh:q(), tab:t()};
+    return {a,b};})()`);
+  check('面板「收起 / 展开」在贴图与小签之间切换',
+    xpCollapse.a.collapsed && !xpCollapse.a.mesh && xpCollapse.a.tab
+      && !xpCollapse.b.collapsed && xpCollapse.b.mesh && !xpCollapse.b.tab,
+    JSON.stringify(xpCollapse));
+
+  const xpOff = await evalJs(ws, `(async()=>{
+    __elf.uiMode(null);
+    await new Promise(r=>setTimeout(r,200));
+    const grp=__elf.scene.getObjectByName('xr-panel');
+    return { visible:__elf.xrPanel.state().visible, groupVisible:grp.visible,
+      compact:document.getElementById('panel').classList.contains('compact'),
+      noteDisplay:getComputedStyle(document.getElementById('motion-note')).display };})()`);
+  check('退出会话后全部还原（面板隐藏、2D 说明段落回来）',
+    xpOff.visible === false && xpOff.groupVisible === false
+      && xpOff.compact === false && xpOff.noteDisplay !== 'none',
+    `panel=${xpOff.visible} compact=${xpOff.compact} note=${xpOff.noteDisplay}`);
+
+  // 7.7 VR 降载（进会话关阴影 + 帧缓冲缩放 + 每帧 CPU 瘦身；**场景不降载**）
+  //     不需要真头显：__elf.xrQuality.enter()/exit() 就是 onEnter/onExit 调的那两个函数。
+  const xq = await evalJs(ws, `(async()=>{
+    const r=__elf.renderer, s=__elf.mjScene;
+    __elf.setSceneMode('matrix');            // 先进矩阵，验证 VR 里会原样保留
+    const before={ mode:__elf.sceneMode, grid:!!s.grid, count:s.grid?s.grid.count:0,
+      shadow:r.shadowMap.enabled, cast:__elf.shadows.cast };
+    __elf.xrQuality.enter();
+    await new Promise(k=>requestAnimationFrame(()=>requestAnimationFrame(k)));
+    const on={ mode:__elf.sceneMode, grid:!!s.grid, count:s.grid?s.grid.count:0,
+      meshes:s.grid?s.grid.meshes.length:0,
+      shadow:r.shadowMap.enabled, cast:__elf.shadows.cast, auto:r.shadowMap.autoUpdate,
+      robotVisible:s.objs[s.robotGeomIds[0]].visible,
+      instVisible:s.grid? s.grid.meshes.filter(m=>m.visible).length : 0,
+      syncIds:s._syncIds?s._syncIds.length:null, ngeom:s.model.ngeom };
+    // VR 里切单人再切回矩阵：两次都必须真的生效（不再被拦）
+    __elf.setSceneMode('single');
+    const vSingle={ mode:__elf.sceneMode, grid:!!s.grid };
+    __elf.setSceneMode('matrix');
+    const vMatrix={ mode:__elf.sceneMode, grid:!!s.grid, count:s.grid?s.grid.count:0 };
+    __elf.xrQuality.exit();
+    await new Promise(k=>requestAnimationFrame(()=>requestAnimationFrame(k)));
+    const off={ mode:__elf.sceneMode, grid:!!s.grid, count:s.grid?s.grid.count:0,
+      shadow:r.shadowMap.enabled, cast:__elf.shadows.cast };
+    return { before, on, off, vSingle, vMatrix, aa:__elf.aa, xrss:__elf.xrScale,
+      inXR:__elf.inXR };})()`);
+  check('进 VR 保持矩阵场景（96 份实例原样留在场景里，不再自动降载）',
+    xq.on.mode === 'matrix' && xq.on.grid === true && xq.on.count === 96
+      && xq.on.meshes === 32 && xq.on.instVisible === 32
+      && xq.on.robotVisible === false,
+    `mode=${xq.on.mode} grid=${xq.on.grid} 实例=${xq.on.count}/${xq.on.meshes}个Mesh `
+      + `可见=${xq.on.instVisible} 原件可见=${xq.on.robotVisible}`);
+  check('进 VR 自动关阴影（连主光 castShadow 一起关，阴影贴图也不再每帧重算）',
+    xq.on.shadow === false && xq.on.cast === false && xq.on.auto === false,
+    `enabled=${xq.on.shadow} cast=${xq.on.cast} autoUpdate=${xq.on.auto}`);
+  check('VR 里场景可自由切换（单人 ↔ 矩阵都不被拦）',
+    xq.vSingle.mode === 'single' && xq.vSingle.grid === false
+      && xq.vMatrix.mode === 'matrix' && xq.vMatrix.grid === true
+      && xq.vMatrix.count === 96,
+    `入VR=${xq.on.mode} → 单人=${xq.vSingle.mode} → 矩阵=${xq.vMatrix.mode}(${xq.vMatrix.count})`);
+  check('退出 VR 保留 VR 里的场景选择，只还原阴影',
+    xq.off.mode === 'matrix' && xq.off.grid === true && xq.off.count === 96
+      && xq.off.shadow === xq.before.shadow && xq.off.cast === xq.before.cast
+      && xq.inXR === false,
+    `mode=${xq.off.mode} grid=${xq.off.grid} shadow=${xq.off.shadow} cast=${xq.off.cast}`);
+  check('同步清单已瘦身（只写可见 geom，不再遍历全部 94 个）',
+    typeof xq.on.syncIds === 'number' && xq.on.syncIds < xq.on.ngeom,
+    `${xq.on.syncIds} / ${xq.on.ngeom} 个 geom`);
+  check('启动期画质参数可查（桌面仍开抗锯齿，xrss 在 0.5~1 内）',
+    xq.aa === true && xq.xrss >= 0.5 && xq.xrss <= 1,
+    `antialias=${xq.aa} xrss=${xq.xrss}`);
+
+  const idleSync = await evalJs(ws, `(async()=>{
+    __elf.setMotion('off');
+    await new Promise(k=>setTimeout(k,250));
+    const a=__elf.mjScene._syncCount;
+    await new Promise(k=>setTimeout(k,400));
+    return { a, b:__elf.mjScene._syncCount };})()`);
+  check('静止 / 暂停时不再做无谓的 qpos→kinematics→sync 链',
+    idleSync.b - idleSync.a <= 1, `${idleSync.a} → ${idleSync.b} 次 sync / 400 ms`);
+
+  const idlePanel = await evalJs(ws, `(async()=>{
+    __elf.uiMode('vr');
+    await new Promise(k=>setTimeout(k,300));
+    const a=__elf.xrPanel._rebuildCount;
+    await new Promise(k=>setTimeout(k,800));
+    const b=__elf.xrPanel._rebuildCount;
+    __elf.uiMode(null);
+    return { a, b };})()`);
+  check('头显面板空闲时不再反复重绘（悬停重绘已去抖，一次重绘=3.2 MB 纹理上传）',
+    idlePanel.b - idlePanel.a <= 1, `${idlePanel.a} → ${idlePanel.b} 次重绘 / 800 ms`);
+
+  // 7.9 右摇杆连续转向：无头也能验（只查 VRNav 配置，不碰真实 XR 会话）
+  const turnCfg = await evalJs(ws, `(()=>{
+    const n=__elf.vrNav;
+    return { speed:n.turnSpeed, dead:n.turnDeadzone,
+      hasSnap:'snapTurn' in n, hasCooldown:'turnCooldown' in n,
+      onManualTurn:typeof n.onManualTurn };
+  })()`);
+  check('右摇杆为连续转向（90°/s + 死区，不再有 snap / 冷却）',
+    Math.abs(turnCfg.speed - Math.PI / 2) < 1e-6 && turnCfg.dead > 0
+      && !turnCfg.hasSnap && !turnCfg.hasCooldown,
+    `speed=${turnCfg.speed}, dead=${turnCfg.dead}`);
+  check('手动转向会关掉自动跟随（onManualTurn 已接上）',
+    turnCfg.onManualTurn === 'function');
+
+  // 7.10 预加载 / 插值曲线 / 矩阵实例剔除
+  const cacheTest = await evalJs(ws, `(async()=>{
+    const s0=__elf.motionCache.size;
+    await __elf.motionCache.prefetch(['crawl','parade_seq']);
+    const s1=__elf.motionCache.size;
+    const t0=performance.now();
+    await __elf.setMotion('crawl');
+    const ms=performance.now()-t0;
+    const out={ s0, s1, ms:+ms.toFixed(1), interp:__elf.perf().interp,
+      ft:__elf.perf().ft.frames, name:__elf.getMotion().name };
+    __elf.setMotion('off');
+    return out;})()`);
+  check('回放数据可预取并命中内存缓存（切段不再走网络）',
+    cacheTest.s1 >= 2 && cacheTest.s1 >= cacheTest.s0 && cacheTest.name === 'crawl',
+    `缓存 ${cacheTest.s0} → ${cacheTest.s1} 段，切段耗时 ${cacheTest.ms} ms`);
+  check('默认插值曲线是 Catmull-Rom（?interp=linear 可回退）',
+    cacheTest.interp === 'cr', `interp=${cacheTest.interp}`);
+  check('帧时间探针在跑（perf().ft）',
+    cacheTest.ft > 0, `${cacheTest.ft} 帧样本`);
+
+  const interpTest = await evalJs(ws, `(async()=>{
+    await __elf.setMotion('squat_cycle');
+    const m=__elf.motion; m.paused=true;
+    const nq=m.nq, f=m.frames, nf=m.nframes, fps=m.fps;
+    const out=new Float64Array(nq);
+    let samples=0, bad=0, worst=0;
+    // 每 7 帧取一个非整数时刻（a≈0.37），逐通道查是否落在相邻两帧之间。
+    // 四元数通道（3..6）要归一化，归一化会改变分量幅值，不参与这条判据。
+    for(let i=0;i<nf-2;i+=7){
+      m.seek((i+0.37)/fps);
+      const xf=m.time*fps, ii=Math.floor(xf), a=xf-ii;
+      if(ii>=nf-1||a<1e-6) continue;
+      m.writeQpos(out);
+      const o1=ii*nq, o2=(ii+1)*nq;
+      for(let k=0;k<nq;k++){
+        if(k>=3&&k<=6) continue;
+        const lo=Math.min(f[o1+k],f[o2+k]), hi=Math.max(f[o1+k],f[o2+k]);
+        const ov = out[k]>hi ? out[k]-hi : (out[k]<lo ? lo-out[k] : 0);
+        if(ov>1e-6) bad++;
+        if(ov>worst) worst=ov;
+      }
+      samples++;
+    }
+    const interp=m.interp;
+    __elf.setMotion('off');
+    return {samples, bad, worst:+worst.toFixed(6), interp};})()`);
+  check('Catmull-Rom 不越出相邻两帧（接缝钳制生效，脚不会压进地面）',
+    interpTest.interp === 'cr' && interpTest.samples > 30 && interpTest.bad === 0,
+    `${interpTest.samples} 个采样 / 越界 ${interpTest.bad} 次（最大 ${interpTest.worst}）`);
+
+  const cullTest = await evalJs(ws, `(()=>{
+    const s=__elf.mjScene, T=__elf.THREE;
+    if(!s.grid) return {skip:true};
+    const c=new T.Vector3();
+    s.robotBounds().getCenter(c);
+    s.root.localToWorld(c);
+    const cam=new T.PerspectiveCamera(48, 1, 0.1, 200);
+    cam.position.set(c.x, c.y+0.9, c.z+2.6);   // 站在机器人正前方 2.6 m
+    cam.lookAt(c.x, c.y, c.z);
+    cam.updateMatrixWorld(true);
+    const drawn=s.cullGrid(cam, c, 1.7);
+    s.sync();                                  // 让 im.count 落地
+    const applied=s.grid.meshes[0].count;
+    const total=s.grid.count;
+    s.grid.mask.fill(1);                       // 还原，别把桌面场景留在剔除状态
+    s.sync();
+    return {drawn, applied, total, after:s.grid.meshes[0].count};})()`);
+  check('矩阵实例按视锥剔除（视野外的不提交，桌面/无头保持全量）',
+    !cullTest.skip && cullTest.drawn > 0 && cullTest.drawn < cullTest.total
+      && cullTest.applied === cullTest.drawn && cullTest.after === cullTest.total,
+    `可见 ${cullTest.drawn}/${cullTest.total}，提交 ${cullTest.applied}，还原后 ${cullTest.after}`);
+
+  // 7.11 机器人着色模型可切换（有损开关，用来评估「为帧率值不值得牺牲金属感」）
+  const matTest = await evalJs(ws, `(()=>{
+    const s=__elf.mjScene, ids=s.robotGeomIds;
+    const kind=()=>ids.map(i=>s.objs[i].material.type);
+    const uniq=(a)=>[...new Set(a)];
+    const before=uniq(kind());
+    __elf.setRobotMaterial('standard');
+    const std=uniq(kind());
+    __elf.setRobotMaterial('lambert');
+    const lam=uniq(kind());
+    const lamGrid=s.grid?uniq(s.grid.meshes.map(m=>m.material.type)):[];
+    const lamFlag=__elf.perf().robotMaterial;
+    __elf.setRobotMaterial('lambert');
+    const back=uniq(kind());
+    const backGrid=s.grid?uniq(s.grid.meshes.map(m=>m.material.type)):[];
+    return {before, std, lam, lamGrid, lamFlag, back, backGrid,
+      flag:__elf.perf().robotMaterial};})()`);
+  check('机器人材质可切 MeshStandard 并还原（矩阵实例材质同步）',
+    matTest.before.join() === 'MeshLambertMaterial'
+      && matTest.std.join() === 'MeshStandardMaterial'
+      && matTest.lam.join() === 'MeshLambertMaterial'
+      && matTest.lamGrid.join() === 'MeshLambertMaterial'
+      && matTest.back.join() === 'MeshLambertMaterial'
+      && matTest.backGrid.join() === 'MeshLambertMaterial',
+    `默认 ${matTest.before} → ${matTest.std}（实例 ${matTest.backGrid}）→ ${matTest.back}`);
+  check('切换后 perf().robotMaterial 与实际材质一致',
+    matTest.lamFlag === 'lambert' && matTest.flag === 'lambert',
+    `${matTest.lamFlag} → ${matTest.flag}`);
 
   // 8. URL 参数路径（一键脚本 start_vr_motion.bat / .sh 走的就是这条）
   const q = `${url}${url.includes('?') ? '&' : '?'}motion=fight_policy&speed=0.5&follow=0`;

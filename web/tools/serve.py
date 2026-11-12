@@ -28,8 +28,10 @@ from __future__ import annotations
 import argparse
 import functools
 import http.server
+import re
 import socketserver
 import sys
+import urllib.parse
 from pathlib import Path
 
 WEB = Path(__file__).resolve().parent.parent          # web/
@@ -67,9 +69,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     }
 
     def end_headers(self) -> None:
-        # 与 server.mjs 一致：开发期禁缓存，否则重新烘焙的 motion_*.bin 会被浏览器
-        # 拿旧副本，改了没效果。
-        self.send_header("Cache-Control", "no-cache, must-revalidate")
+        # 与 server.mjs 对齐：默认禁缓存（重新烘焙的模型/代码立刻生效）。
+        # 唯一例外是 motion_*.bin —— 它的 URL 由 motion.js 带 `?v=<version>` 版本化，
+        # 重烘后 URL 会变，所以可以 immutable，切回放不必再走一趟网络。
+        # ⚠️ motion_*.json 不在例外里：它的 URL 不带 ?v=，缓存住会永远读到旧 version
+        # → 永远请求旧 bin，改了没效果且极难排查。
+        path = urllib.parse.urlparse(self.path).path
+        if re.search(r"/assets/motion_[^/]*\.bin$", path, re.I):
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        else:
+            self.send_header("Cache-Control", "no-cache, must-revalidate")
         self.send_header("X-Content-Type-Options", "nosniff")
         super().end_headers()
 

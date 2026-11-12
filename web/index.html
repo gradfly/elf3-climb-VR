@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-<title>elf3 · MuJoCo 网页仿真 + VR 沉浸式观看</title>
+<title>ELF3 · MuJoCo 网页仿真 + VR 沉浸式观看</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231b2735'/%3E%3Ccircle cx='16' cy='9' r='4' fill='%234fc3f7'/%3E%3Crect x='11' y='14' width='10' height='9' rx='2' fill='%234fc3f7'/%3E%3Crect x='8' y='24' width='4' height='6' rx='1.6' fill='%234fc3f7'/%3E%3Crect x='20' y='24' width='4' height='6' rx='1.6' fill='%234fc3f7'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="./css/app.css" />
 <script type="importmap">
@@ -22,7 +22,7 @@
 <!-- ======================== 加载层 ======================== -->
 <div id="loading">
   <div class="card">
-    <h1>elf3 <span>MuJoCo · WebAssembly</span></h1>
+    <h1>ELF3 <span>MuJoCo · WebAssembly</span></h1>
     <p class="sub">机器人静止站立 · 支持 VR 头显沉浸式观看</p>
     <div class="bar"><i id="ld-bar"></i></div>
     <div class="row">
@@ -34,19 +34,39 @@
   </div>
 </div>
 
-<!-- ======================== 顶部信息 ======================== -->
+<!-- ======================== 顶部信息 + 操作说明 ======================== -->
 <header id="hud" class="panel hidden">
-  <div class="title">
-    <b>elf3</b><span class="tag">MuJoCo&nbsp;WASM</span>
+  <div class="hud-main">
+    <div class="title">
+      <b>ELF3</b><span class="tag">MuJoCo&nbsp;WASM</span>
+    </div>
+    <dl>
+      <div><dt>状态</dt><dd id="hud-mode">静止站立</dd></div>
+      <div><dt>场景</dt><dd id="hud-scene">矩阵 8×12</dd></div>
+      <div><dt>回放</dt><dd id="hud-motion">—</dd></div>
+      <div class="hud-stat-hidden"><dt>结构</dt><dd id="hud-model">—</dd></div>
+      <div><dt>渲染</dt><dd id="hud-render">—</dd></div>
+    </dl>
   </div>
-  <dl>
-    <div><dt>状态</dt><dd id="hud-mode">静止站立</dd></div>
-    <div><dt>场景</dt><dd id="hud-scene">矩阵 10×20</dd></div>
-    <div><dt>回放</dt><dd id="hud-motion">—</dd></div>
-    <div><dt>结构</dt><dd id="hud-model">—</dd></div>
-    <div><dt>渲染</dt><dd id="hud-render">—</dd></div>
-  </dl>
+  <div id="help" class="hidden">
+    <div class="title">
+      <b>操作说明</b><span class="tag">PICO 4 ULTRA</span>
+    </div>
+    <div class="col">
+      <h3>桌面</h3>
+      <p>左键拖动 = 旋转</p>
+      <p>滚轮滑动 = 缩放</p>
+      <p>右键拖动 = 平移</p>
+    </div>
+    <div class="col">
+      <h3>头显</h3>
+      <p>左摇杆 = 前后左右移动 · 右摇杆 = 视角转向</p>
+      <p>A / X = 把机器人摆到正前方 · B / Y = 世界复位</p>
+      <p>扳机 = 点击头显里的设置面板 · 摇杆按下 = 收起 / 展开面板</p>
+    </div>
+  </div>
 </header>
+
 
 <!-- ======================== 设置面板 ======================== -->
 <section id="panel" class="panel hidden">
@@ -55,9 +75,8 @@
     <h2>场景</h2>
     <div class="seg" id="scene-mode" role="radiogroup" aria-label="场景">
       <label><input type="radio" name="opt-scene" value="single" /><span>单人</span></label>
-      <label class="on"><input type="radio" name="opt-scene" value="matrix" checked /><span>矩阵 10×20</span></label>
+      <label class="on"><input type="radio" name="opt-scene" value="matrix" checked /><span>矩阵 8×12</span></label>
     </div>
-    <p class="note" id="scene-note">矩阵 = 把单人场景复制 <b>10 行 × 20 列 = 200 份</b>，同一段动画同步播放；地形 / 阴影不复制。</p>
 
     <h2>运动仿真</h2>
     <label class="rowsel"><span>回放</span>
@@ -69,7 +88,7 @@
         <option value="crab">参考动作 · 螃蟹步横移上楼</option>
         <option value="policy_crab">策略仿真 · 螃蟹步横移上楼</option>
         <option value="squat_cycle">参考动作 · 蹲下起立循环</option>
-        <option value="crawl">参考动作 · 贴地爬行（蹲下→撑地→后伸→爬行）</option>
+        <option value="crawl">参考动作 · 贴地爬行</option>
         <option value="goose_walk">参考动作 · 走正步（前进）</option>
         <option value="parade_seq">参考动作 · 正步 + 敬礼（连贯）</option>
         <option value="longjump_hi">参考动作 · 高跳（自驱摆臂 + 蹬腿）</option>
@@ -118,21 +137,7 @@
   </div>
 </section>
 
-<!-- ======================== 底部操作说明 ======================== -->
-<footer id="help" class="panel hidden">
-  <div class="col">
-    <h3>桌面</h3>
-    <p>左键拖动 = 旋转 · 滚轮 = 缩放 · 右键拖动 = 平移</p>
-    <p>右侧「场景」= 单人（1 个机器人）/ 矩阵（10×20 = 200 份同步播放）</p>
-    <p>右侧「运动仿真」= 回放策略跟踪打拳的动作</p>
-  </div>
-  <div class="col">
-    <h3>头显（Quest 等）</h3>
-    <p>左摇杆 = 前后左右移动 · 右摇杆 = 30° 转向</p>
-    <p>A / X = 把机器人摆到正前方 · B / Y = 世界复位</p>
-    <p>底部「进入 VR」= 沉浸式；「半透明 VR」= 背景透明，能看到眼镜外的真实环境</p>
-  </div>
-</footer>
+<!-- 操作说明已并入 #hud 右侧 -->
 
 <div id="vr-slot"></div>
 <div id="toast" class="hidden"></div>
