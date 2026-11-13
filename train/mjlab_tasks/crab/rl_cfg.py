@@ -123,3 +123,25 @@ def elf3_squat_ppo_runner_cfg(which: str = "squat") -> RslRlOnPolicyRunnerCfg:
     # 共用一个 experiment_name 的话，找 checkpoint 和看曲线都分不开。
     cfg.experiment_name = f"elf3_squat_{which}"
     return cfg
+
+
+def elf3_prone_ppo_runner_cfg(which: str = "crawl") -> RslRlOnPolicyRunnerCfg:
+    """趴姿三段动作（站立->趴 / 爬行 / 趴->站立）的 PPO 配置。
+
+    与蹲起版的差别及理由：
+
+    * `num_steps_per_env` 32 -> **48**：回合 2.6~5.5 s（130~275 步），48 步覆盖
+      18%~37%；趴/站切换的接触事件（手撑地、膝落地）很稀疏，rollout 太短
+      采不到完整的「撑起-转移重心-站稳」因果链；
+    * `init_std` 0.8 保持：残差限幅比蹲起大（手 0.45 / 腿 0.40），0.8 合适；
+    * `max_iterations` 6000：爬行是周期动作，需要更长时间把相位对齐学稳；
+    * `save_interval` 100：便于用中间 checkpoint 做 early-stop 选择。
+    """
+    cfg = elf3_crab_ppo_runner_cfg()
+    cfg.actor.distribution_cfg["init_std"] = 0.8
+    cfg.num_steps_per_env = 48
+    cfg.max_iterations = 6000
+    cfg.save_interval = 100
+    # logs/rsl_rl/elf3_prone_{stand2crawl,crawl,crawl2stand}/<时间戳>/
+    cfg.experiment_name = f"elf3_prone_{which}"
+    return cfg

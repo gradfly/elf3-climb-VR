@@ -10,6 +10,9 @@
   - Elf3-Squat-Down / -Up      蹲下 / 起立（时间轴跟踪 + 残差）
   - Elf3-Squat-Hold            极限蹲保持（参考帧冻结，20 s 全程保持）
   - Elf3-Stand-Hold            站姿保持
+  - Elf3-Prone-Stand2Crawl     站立 -> 趴姿（含 1 s 冻结尾）
+  - Elf3-Prone-Crawl           趴姿爬行
+  - Elf3-Prone-Crawl2Stand     趴姿 -> 站立
 """
 from __future__ import annotations
 
@@ -18,7 +21,11 @@ from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
 from .env_cfg import crab_env_cfg
 from .env_cfg_residual import crab_residual_env_cfg
-from .rl_cfg import elf3_crab_ppo_runner_cfg, elf3_squat_ppo_runner_cfg
+from .rl_cfg import (
+    elf3_crab_ppo_runner_cfg,
+    elf3_prone_ppo_runner_cfg,
+    elf3_squat_ppo_runner_cfg,
+)
 from .squat_env_cfg import squat_env_cfg
 
 register_mjlab_task(
@@ -100,3 +107,33 @@ try:
 except Exception as _e:                                   # noqa: BLE001
     print(f"[hold][ERR] 保持任务注册失败，本次不注册 Elf3-*-Hold：{_e!r}")
     print("[hold][ERR] 同样依赖 train/assets/ref_tables/squat_ref_v1.npz")
+
+# ---- 趴姿三段动作（参考轨迹 + 残差，见 prone_env_cfg.py）----
+# 依赖 logs/export/prone_{stand2crawl,crawl,crawl2stand}.npz 烘焙出的参考表：
+#     python scripts/build_prone_parts.py
+#     python train/assets/build_prone_ref.py [--preset fast]
+try:
+    from .prone_env_cfg import prone_env_cfg
+
+    for _which, _tag in (
+        ("stand2crawl", "Stand2Crawl"),
+        ("crawl", "Crawl"),
+        ("crawl2stand", "Crawl2Stand"),
+    ):
+        _pn_cfg = prone_env_cfg(which=_which, play=False)
+        _pn_play = prone_env_cfg(which=_which, play=True)
+        _pn_rl = elf3_prone_ppo_runner_cfg(_which)
+        for _suffix in ("", "-Play"):
+            register_mjlab_task(
+                task_id=f"Elf3-Prone-{_tag}{_suffix}",
+                env_cfg=_pn_cfg,
+                play_env_cfg=_pn_play,
+                rl_cfg=_pn_rl,
+                runner_cls=VelocityOnPolicyRunner,
+            )
+        print(f"[prone] 已注册 Elf3-Prone-{_tag} / Elf3-Prone-{_tag}-Play")
+except Exception as _e:                                   # noqa: BLE001
+    print(f"[prone][ERR] 趴姿任务注册失败，本次不注册 Elf3-Prone-*：{_e!r}")
+    print("[prone][ERR] 最常见原因：train/assets/ref_tables/prone_ref_v1.npz 缺失，"
+          "\n             补救：python scripts/build_prone_parts.py && "
+          "python train/assets/build_prone_ref.py")

@@ -263,6 +263,13 @@ class TrajTrackAction(JointPositionAction):
         return self._traj.z[self._idx.clamp(max=self._traj.T - 1)]
 
     @property
+    def ref_base_xy(self) -> torch.Tensor | None:
+        """参考基座水平位置 [B,2]；参考表没有 xy 键时返回 None。"""
+        if self._traj.xy is None:
+            return None
+        return self._traj.xy[self._idx.clamp(max=self._traj.T - 1)]
+
+    @property
     def ref_up(self) -> torch.Tensor:
         return self._traj.up[self._idx.clamp(max=self._traj.T - 1)]
 
