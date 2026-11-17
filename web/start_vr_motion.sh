@@ -48,7 +48,7 @@ fi
 MOTION="assets/motion_fight_policy.bin"
 if [ "$REBAKE" = 1 ] || [ ! -f "$MOTION" ]; then
   echo
-  echo " [1/3] 本地录制运动仿真数据（MuJoCo + policy.onnx 闭环）…"
+  echo " [1/3] 本地录制运动仿真数据（MuJoCo + fight.onnx 闭环）…"
   echo
   if [ -n "$PY" ]; then
     "$PY" tools/bake_motion.py || echo " [警告] 录制失败，沿用已有回放数据。"

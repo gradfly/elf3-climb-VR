@@ -4,7 +4,7 @@
 就得先在本地把仿真跑一遍、把每个控制步的 `qpos` 录下来，网页端只做插值回放。
 
 录两种：
-  * policy —— 真·运动仿真：`elf3_play.py` 的 MuJoCo + policy.onnx 闭环（含物理接触）。
+  * policy —— 真·运动仿真：`elf3_play.py` 的 MuJoCo + fight.onnx 闭环（含物理接触）。
   * ref    —— 参考动作：直接取 fight.npz 的 body_pos_w/body_quat_w/joint_pos，
               纯运动学装配（无物理），用来和策略仿真对照。
 
@@ -80,7 +80,7 @@ def main() -> int:
 
     t_start = time.time()
 
-    params = ep.load_params_from_onnx(ROOT / "policy.onnx")
+    params = ep.load_params_from_onnx(ROOT / "fight.onnx")
     motion = ep.Motion(ROOT / "fight.npz", params.joint_names, params.body_names)
     model = ep.build_model(params, scene="plane", joint_damping=args.joint_damping)
     jqadr = np.array([model.jnt_qposadr[ep._jid(model, n)] for n in params.joint_names])
@@ -119,7 +119,7 @@ def main() -> int:
     # ---------------------------------------------------------------- 策略仿真
     if args.only in ("both", "policy"):
         player = ep.Elf3Player(model, params, motion,
-                               policy_path=ROOT / "policy.onnx", policy="onnx")
+                               policy_path=ROOT / "fight.onnx", policy="onnx")
         frames = np.zeros((steps + 1, nq), dtype=np.float64)
         player.reset_to_frame(0)
         frames[0] = player.data.qpos
@@ -173,7 +173,7 @@ def main() -> int:
             **common,
             "name": f"{args.out}_policy",
             "kind": "policy",
-            "label": "策略仿真（MuJoCo + policy.onnx）",
+            "label": "策略仿真（MuJoCo + fight.onnx）",
             "source": f"elf3_play.py 闭环仿真（joint_damping={args.joint_damping}）",
             "steps": int(cut),
             "truncated": bool(cut < steps),

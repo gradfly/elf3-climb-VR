@@ -11,11 +11,11 @@
   * 动作：`ctrl = default_joint_pos + action_scale * policy_output`
     （等价 mjlab `JointPositionActionCfg(use_default_offset=True)`）。
   * 控制频率：timestep 0.005 s × decimation 4 = 50 Hz，与动作数据 50 fps 对齐。
-  * 策略：policy.onnx（内含 obs 归一化），输入 obs[1,160] + time_step[1,1]。
+  * 策略：fight.onnx（内含 obs 归一化），输入 obs[1,160] + time_step[1,1]。
 
 参数真值来源
 ------------
-policy.onnx 的 ONNX metadata 里保存了训练时的全部关键参数
+fight.onnx 的 ONNX metadata 里保存了训练时的全部关键参数
 （joint_stiffness / joint_damping / default_joint_pos / action_scale /
 observation_names / anchor_body_name / body_names），本脚本直接读取，无需猜测。
 所以“先跑通普通任务（基础链路自检），再跑 motion-tracking”两种用法：
@@ -47,12 +47,12 @@ import mujoco
 # 目录布局（2026-10-13 文件搬迁后）：
 #   <vendor>/bxi_controller_ros2/src/bxi_example_py_elf3/launch/elf3_play.py   <- 本文件
 #   <vendor>/bxi_controller_ros2/src/bxi_example_py_elf3/data/mujoco_simulation/elf3.xml
-#   <vendor>/policy.onnx, <vendor>/fight.npz
+#   <vendor>/fight.onnx, <vendor>/fight.npz
 HERE = Path(__file__).resolve().parent                     # .../bxi_example_py_elf3/launch
 FW = HERE.parent                                           # .../bxi_example_py_elf3
 MODEL_DIR = FW / "data" / "mujoco_simulation"              # elf3.xml + meshes/ + terrains/
 ELF3_XML = MODEL_DIR / "elf3.xml"
-RUN_DIR = HERE.parents[3]                                  # 工作区 vendor/（policy.onnx / fight.npz）
+RUN_DIR = HERE.parents[3]                                  # 工作区 vendor/（fight.onnx / fight.npz）
 
 
 def _first_existing(*candidates: Path) -> Path:
@@ -63,11 +63,11 @@ def _first_existing(*candidates: Path) -> Path:
     return candidates[0]
 
 
-DEFAULT_ONNX = _first_existing(RUN_DIR / "policy.onnx", HERE / "policy.onnx")
+DEFAULT_ONNX = _first_existing(RUN_DIR / "fight.onnx", HERE / "fight.onnx")
 DEFAULT_MOTION = _first_existing(RUN_DIR / "fight.npz", HERE / "fight.npz")
 
 # ---------------------------------------------------------------------------
-# 1. 训练时参数的兜底常量（正常情况下从 policy.onnx metadata 读取并覆盖）
+# 1. 训练时参数的兜底常量（正常情况下从 fight.onnx metadata 读取并覆盖）
 # ---------------------------------------------------------------------------
 
 JOINT_NAMES = [
@@ -166,7 +166,7 @@ class TrainParams:
 
 
 def load_params_from_onnx(onnx_path: Path) -> TrainParams:
-    """从 policy.onnx 的 metadata 读取训练参数（读不到就抛异常，调用方回退）。"""
+    """从 fight.onnx 的 metadata 读取训练参数（读不到就抛异常，调用方回退）。"""
     import onnxruntime as ort
 
     sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
@@ -443,7 +443,7 @@ class Elf3Player:
         self.in_names = None
         if policy == "onnx":
             if policy_path is None:
-                raise ValueError("policy=onnx 需要 policy.onnx")
+                raise ValueError("policy=onnx 需要 fight.onnx")
             import onnxruntime as ort
             self.sess = ort.InferenceSession(str(policy_path),
                                              providers=["CPUExecutionProvider"])

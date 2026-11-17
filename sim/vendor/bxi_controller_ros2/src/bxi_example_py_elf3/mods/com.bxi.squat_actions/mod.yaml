@@ -1,0 +1,80 @@
+schema: 1
+id: com.bxi.squat_actions
+name: 自训蹲起动作
+version: 1.0.0
+api: ">=4,<5"
+enable: true
+entrypoint: plugin:create_mod
+visibility: public
+requires:
+  - id: com.bxi.basic_actions
+    version: ">=1,<2"
+conflicts: []
+python_exports: []
+runtime_requirements:
+  python: []
+  ros: []
+  system: []
+
+events:
+  squat_down:
+    slot: btn_10
+    value: 3
+  squat_up:
+    slot: btn_10
+    value: 4
+
+states:
+  squat_down:
+    manifest:
+      label: 下蹲
+      priority: 900
+      group: Advanced
+      icon: arrow_downward
+      confirm: true
+      confirm_message: 请确保机器人周围1米范围内没有障碍物，建议上吊架
+  squat_hold:
+    manifest:
+      label: 蹲姿保持
+      priority: 890
+      group: Advanced
+      icon: accessibility
+      confirm: true
+      confirm_message: 蹲姿保持期间仅允许起立或安全打断
+  squat_up:
+    manifest:
+      label: 起立
+      priority: 880
+      group: Advanced
+      icon: arrow_upward
+      confirm: true
+      confirm_message: 请确保机器人周围1米范围内没有障碍物
+
+routes:
+  # 入口：从走路态进下蹲
+  - from: com.bxi.basic_actions/normal
+    event: squat_down
+    to: squat_down
+    transition: soft_switch
+
+  # hold 的唯一动作类出口是 squat_up；安全事件 route 必须排在它之前
+  # （_handle_events 命中第一条即 return）
+  - from: squat_hold
+    event: com.bxi.basic_actions/zero_torque
+    to: com.bxi.basic_actions/zero_torque
+  - from: squat_hold
+    event: squat_up
+    to: squat_up
+    transition: soft_switch
+
+  # down/up 两态同样保留 btn_2 零力矩安全打断
+  - from: squat_down
+    event: com.bxi.basic_actions/zero_torque
+    to: com.bxi.basic_actions/zero_torque
+  - from: squat_up
+    event: com.bxi.basic_actions/zero_torque
+    to: com.bxi.basic_actions/zero_torque
+
+# 说明：down→hold、up→normal 是代码驱动（state.py 里 ctx.request_state），
+# 不写成 route（mod.yaml 的 route 字段不支持 after/完成事件）。
+# IMU 失联保护由 daemon force=True 直接切状态，绕过 routes，任何态都能打断。

@@ -17,7 +17,7 @@ elf3-climb-VR/
 │   ├── vendor/
 │   │   ├── elf3_check.py         # 14 项自检
 │   │   ├── play.py
-│   │   ├── policy.onnx           # motion-tracking 打拳策略
+│   │   ├── fight.onnx           # motion-tracking 打拳策略
 │   │   ├── fight.npz             # 打拳参考动作
 │   │   ├── climb_stairs.py       # 深度视觉闭环爬楼梯 runner
 │   │   ├── climb_normal_depth.mp4  # 55s 通关录像

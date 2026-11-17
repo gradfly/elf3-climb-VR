@@ -4,7 +4,7 @@
 `scene_bx.xml`（地形）渲染成三维场景，并支持用 **VR 头显沉浸式观看**。  
 默认状态是**静止站立**：机器人保持 XML 里的初始位形，不跑物理。  
 也可以在网页 / VR 里回放**策略跑出来的运动仿真**：`elf3_play.py` 那条
-MuJoCo + `policy.onnx` 闭环、跟踪 `fight.npz` 打拳动作的画面，以及
+MuJoCo + `fight.onnx` 闭环、跟踪 `fight.npz` 打拳动作的画面，以及
 `climb_stairs.py` 那条**深度视觉闭环爬楼梯**的画面（地形为 `universal_test`
 紧凑障碍），以及**蹲下 / 起立的 29 关节参考动作**（纯运动学回放，无需训练 / GPU）
 —— 见 §3、§7.8。
@@ -160,7 +160,7 @@ python view_mujoco.py --drop   # 落地对齐：消除脚底悬空
 
 | 回放数据 | 内容 | 时长 |
 | --- | --- | --- |
-| 策略仿真 · 打拳 | `elf3_play.py` 链路：本机跑 **MuJoCo + policy.onnx** 闭环仿真录制的 qpos（含物理接触、关节跟踪） | 146.8 s |
+| 策略仿真 · 打拳 | `elf3_play.py` 链路：本机跑 **MuJoCo + fight.onnx** 闭环仿真录制的 qpos（含物理接触、关节跟踪） | 146.8 s |
 | 参考动作 · 打拳 | 直接取 `fight.npz` 里重定向后的运动（纯运动学，无物理） | 244.9 s |
 | 策略仿真 · 爬楼梯 | `climb_stairs.py` 链路：本机跑**深度视觉闭环**（MuJoCo 渲染深度图 → `normal_depth.onnx` → PD 力矩 → `mj_step`），在 `universal_test` 紧凑地形上从低楼梯爬过终点线 | 26.4 s |
 | 参考动作 · 蹲下起立循环 | `logs/export/squat_{down,up}.npz` 烘焙的 29 关节极限蹲：下蹲 → 蹲姿保持 1 s → 起立 → 站姿保持 1 s，首尾同姿态无缝循环 | 6.5 s |
@@ -170,7 +170,7 @@ python view_mujoco.py --drop   # 落地对齐：消除脚底悬空
 | 参考动作 · 贴地爬行 | `scripts/build_prone_crawl_sequence.py` 把动作 1（站立→蹲下→**双手撑地**→双脚后伸→趴姿，250 帧）与动作 2（俯卧爬行 4 循环，399 帧）拼成一条 38 维序列，再按关节名烘焙成 36 维；接缝 qpos 差 1.3e-4 rad，播完冻结 | 13.0 s |
 
 > 「参考动作」是**统一叫法**：面板里只区分「参考动作」（本机烘焙好的轨迹：打拳参考动作 /
-> 蹲起 / 螃蟹步 / 正步）与「策略仿真」（`policy.onnx`、`normal_depth.onnx` 闭环录制）。
+> 蹲起 / 螃蟹步 / 正步）与「策略仿真」（`fight.onnx`、`normal_depth.onnx` 闭环录制）。
 > 单段的「下蹲」「起立」、「原地正步」「敬礼」四段数据仍在 `assets/` 里，
 > 但**已从下拉菜单移除**（`?motion=squat_down` / `goose_inplace` / `salute` 仍可直达）。
 > 正步与敬礼的「连贯版」已经加进下拉（`?motion=parade_seq`），就是下面那张表的最后一行。
@@ -734,7 +734,7 @@ HUD / 冻结末帧 / 蹲姿高度 / 暂停按钮 / 从头播放）。
 | `shoot.mjs`         | 用 CDP 等页面就绪后截图（可注入 JS 改相机、改可见性）                      |
 | `dump-geoms.mjs`    | 列出每个视觉网格的世界 AABB，用于和 MuJoCo 对账                       |
 | `make-manifest.mjs` | 重新生成 `assets/manifest.json`                          |
-| `bake_motion.py`    | 本机跑 MuJoCo + `policy.onnx`，把每步 qpos 录成 `assets/motion_*.bin` |
+| `bake_motion.py`    | 本机跑 MuJoCo + `fight.onnx`，把每步 qpos 录成 `assets/motion_*.bin` |
 | `bake_climb.py`     | 本机跑 MuJoCo + `normal_depth.onnx` 深度视觉闭环（复用 climb stairs 工作区的 `climb_stairs.py`），把爬楼梯的每步 qpos 录成 `assets/motion_climb_policy.bin` |
 | `bake_crab.py`      | 跑 `gen_crab_stairs.py` + `crab_climb.py`（脚本烘焙的参考动作，无策略网络），录成 `assets/motion_crab.bin`，并把台阶几何同步到 `assets/scene_crab.xml` |
 | `bake_squat.py`     | 把 `logs/export/squat_{down,up}.npz` 的 38 维 qpos 按关节名对账成网页 36 维，逐帧做落地自检，烘焙出 `motion_squat_{down,up,cycle}.bin/.json`（纯运动学，不跑策略） |

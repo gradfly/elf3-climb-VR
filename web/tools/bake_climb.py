@@ -2,7 +2,7 @@
 
 和 bake_motion.py 是同一套思路，区别只在"跑哪条链路"：
 
-  * bake_motion.py —— 平地打拳：elf3_play.py 的 MuJoCo + policy.onnx 动作跟踪。
+  * bake_motion.py —— 平地打拳：elf3_play.py 的 MuJoCo + fight.onnx 动作跟踪。
   * bake_climb.py  —— 爬楼梯：climb_stairs.py 的深度视觉闭环
                       （MuJoCo 渲染深度图 -> normal_depth.onnx -> PD 力矩 -> mj_step），
                       地形是 universal_test 紧凑障碍（10cm 低楼梯 / 15cm 高楼梯 / 壕沟）。

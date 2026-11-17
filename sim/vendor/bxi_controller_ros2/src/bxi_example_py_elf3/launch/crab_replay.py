@@ -32,7 +32,7 @@ policy 策略回放：加载训练导出的 ONNX 策略，闭环跑真实物理�
   python crab_replay.py --mode phys           # 物理回放（看它什么时候摔）
   python crab_replay.py --record out/crab     # 离屏渲染，存 PNG 序列
   python crab_replay.py --traj xxx.npz --scene xxx.xml
-  python crab_replay.py --policy onnx --onnx policy.onnx   # 基线策略（290 维）
+  python crab_replay.py --policy onnx --onnx fight.onnx   # 基线策略（290 维）
   python crab_replay.py --policy onnx-residual --onnx res.onnx --cmd-vy 0.18
                                               # 残差策略（393 维，会自己估 rise）
 
@@ -868,7 +868,7 @@ def main() -> None:
 
     if args.policy in ("onnx", "onnx-residual"):
         if not args.onnx:
-            raise SystemExit(f"[错误] --policy {args.policy} 需要 --onnx <policy.onnx>")
+            raise SystemExit(f"[错误] --policy {args.policy} 需要 --onnx <fight.onnx>")
         onnx_path = Path(args.onnx)
         if not onnx_path.is_file():
             raise SystemExit(f"[错误] 找不到 ONNX {onnx_path}")

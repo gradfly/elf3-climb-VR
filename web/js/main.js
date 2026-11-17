@@ -7,7 +7,7 @@
  * 三种"看什么"：
  *   1) 静止站立（默认）：mj_forward 一次，机器人保持装配姿态；
  *   2) 运动仿真回放：读 web/assets/motion_*.bin（本机用 tools/bake_motion.py
- *      跑 MuJoCo + policy.onnx 闭环录下来的 qpos 序列），按时间插值写回 data.qpos，
+ *      跑 MuJoCo + fight.onnx 闭环录下来的 qpos 序列），按时间插值写回 data.qpos，
  *      再 mj_kinematics 刷新几何位姿 → 就是"策略跟踪打拳动作"的仿真画面，VR 里也能看；
  *   3) 本地物理（可选）：直接跑 mj_step，无控制器，机器人会倒地（演示物理用）。
  */
@@ -1003,7 +1003,7 @@ async function setMotion(name, { hideStairs = true } = {}) {
             + '（躯干俯视深度相机；地形 = <code>universal_test</code> 紧凑障碍）。'
             + (s ? `<br>最远 x = ${s.maxX} m（终点线 13.2 m），躯干高度 `
               + `${s.rootZMin} ~ ${s.rootZMax} m，${s.fell ? '末段摔倒' : '全程未摔倒'}。` : '')
-          : '策略仿真：本机跑 MuJoCo + <code>policy.onnx</code> 闭环录制。'
+          : '策略仿真：本机跑 MuJoCo + <code>fight.onnx</code> 闭环录制。'
             + (s ? `跟踪误差：均值 ${s.anchorErrMean} m / 最大 ${s.anchorErrMax} m，`
               + `躯干最大倾角 ${s.tiltMax}°。` : '');
   $('motion-note').innerHTML = note

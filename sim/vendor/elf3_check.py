@@ -1,8 +1,8 @@
 """elf3 复刻链路的一致性校验（无 GPU、无 mjlab 也能跑）。
 
 逐项确认逆向工程得到的对应关系仍然成立：
-  1) policy.onnx metadata 里的训练参数是否齐全、与内置常量一致
-  2) policy.onnx 内嵌的参考动作表是否与 fight.npz 逐帧一致
+  1) fight.onnx metadata 里的训练参数是否齐全、与内置常量一致
+  2) fight.onnx 内嵌的参考动作表是否与 fight.npz 逐帧一致
   3) elf3.xml 的 13 个跟踪 body 世界位姿是否与 fight.npz 一致（模型即训练模型）
   4) velocimeter / gyro 传感器输出的参考系（机体系）
   5) 观测向量 160 维拼接是否与 ONNX 输入一致，策略输出是否有限
@@ -20,7 +20,7 @@ import mujoco
 import onnxruntime as ort
 
 # 2026-10-13 文件搬迁后的目录布局：
-#   vendor/elf3_check.py                     <- 本文件（与 policy.onnx / fight.npz 同目录）
+#   vendor/elf3_check.py                     <- 本文件（与 fight.onnx / fight.npz 同目录）
 #   .../bxi_example_py_elf3/launch/elf3_play.py  <- 被导入的模块
 _HERE = Path(__file__).resolve().parent
 _WS = _HERE.parent
@@ -43,9 +43,9 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 
 def main() -> int:
-    # policy.onnx / fight.npz 与本脚本同在 vendor/ 目录
+    # fight.onnx / fight.npz 与本脚本同在 vendor/ 目录
     here = _HERE
-    onnx_path = here / "policy.onnx"
+    onnx_path = here / "fight.onnx"
     motion_path = here / "fight.npz"
 
     # ---------- 1. metadata ----------

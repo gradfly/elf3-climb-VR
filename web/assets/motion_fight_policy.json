@@ -83,7 +83,7 @@
   ],
   "name": "fight_policy",
   "kind": "policy",
-  "label": "策略仿真（MuJoCo + policy.onnx）",
+  "label": "策略仿真（MuJoCo + fight.onnx）",
   "source": "elf3_play.py 闭环仿真（joint_damping=xml）",
   "steps": 7341,
   "truncated": true,

@@ -70,7 +70,7 @@ if not defined PY (
     goto run
 )
 echo.
-echo [1/3] Re-recording motion replay data (MuJoCo + policy.onnx, 20-40 s) ...
+echo [1/3] Re-recording motion replay data (MuJoCo + fight.onnx, 20-40 s) ...
 echo.
 "!PY!" "tools\bake_motion.py"
 if errorlevel 1 echo [WARN] Recording failed - keeping the existing replay data.
@@ -78,7 +78,7 @@ goto run
 
 :bake_none
 echo.
-echo [1/3] First run - recording motion replay data locally (MuJoCo + policy.onnx) ...
+echo [1/3] First run - recording motion replay data locally (MuJoCo + fight.onnx) ...
 echo.
 if defined PY (
     "!PY!" "tools\bake_motion.py"
