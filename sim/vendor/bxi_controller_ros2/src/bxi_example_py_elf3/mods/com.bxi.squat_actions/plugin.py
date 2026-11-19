@@ -46,7 +46,10 @@ def create_mod(context: ModLoadContext) -> ModDefinition:
                 state.name, state.state_id, context.resource(POLICY_DOWN)
             ),
             "squat_hold": lambda state: SquatHoldState(
-                state.name, state.state_id, context.resource(POLICY_HOLD)
+                state.name, state.state_id, context.resource(POLICY_HOLD),
+                # open_loop：固定参考蹲姿 + kp×8，长期保持 60 s 零漂移（默认）。
+                # 重训 hold 完成并复验长期稳定后可改回 "onnx"（短过渡省电模式）。
+                hold_mode="open_loop",
             ),
             "squat_up": lambda state: SquatUpState(
                 state.name, state.state_id, context.resource(POLICY_UP)

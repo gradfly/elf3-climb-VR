@@ -216,7 +216,7 @@ class SquatResidualPolicy(JointPolicy):
         return self._frame >= (self._last_frame - trim)
 
     # ------------------------------------------------------------------ obs
-    def _build_obs(self, frame: InferenceFrame, joints, q_ref, z_ref) -> np.ndarray:
+    def _build_obs(self, frame: InferenceFrame, joints, q_ref) -> np.ndarray:
         obs = self._obs[0]
         off = 0
 
@@ -254,8 +254,11 @@ class SquatResidualPolicy(JointPolicy):
         obs[off:off + 29] = joints.position - q_ref
         off += 29
 
-        # 129:130 traj_height_err —— 真机无基座高度反馈，z_meas 取 0
-        obs[off] = -z_ref
+        # 129:130 traj_height_err —— 真机无基座高度反馈。
+        # 近似为"贴合参考"（err=0）：蹲起时真实 err 仅几 cm，落训练噪声 Unoise(±0.005) 附近
+        # （squat_env_cfg.py:158）。千万别填 -z_ref（=假设 z_meas=0，err 达 -1.0，
+        # 深度分布外且落入训练 base_too_low 终止区，策略会误判"已摔倒"）。
+        obs[off] = 0.0
         off += 1
 
         # 130:132 traj_progress（hold 不拼）
@@ -283,8 +286,7 @@ class SquatResidualPolicy(JointPolicy):
         joints = self.bind_joints(frame)
         idx = self.frame
         q_ref = self._q_ref[idx]
-        z_ref = self._z_ref[idx]
-        self._build_obs(frame, joints, q_ref, z_ref)
+        self._build_obs(frame, joints, q_ref)
 
         outputs = self._backend.run(self._inputs)
         raw = np.asarray(outputs["actions"]).reshape(-1)

@@ -31,3 +31,5 @@ web/certs/*.pem
 # ---- editor / OS ----
 .DS_Store
 Thumbs.db
+# ---- 仿真离屏渲染产物（GIF/PNG，本地验证用，勿入库）----
+sim/vendor/bxi_controller_ros2/src/bxi_example_py_elf3/render/

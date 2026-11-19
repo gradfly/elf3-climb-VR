@@ -19,8 +19,15 @@ normal（走路） ──btn_10=3──> squat_down（2.46s）──完成自动
 
 - `squat_hold` **只有 `btn_10=4`（起立）一个动作出口**，其他动作键全被屏蔽；
   但 `btn_2`（零力矩急停）和 IMU 失联保护仍可随时打断。
+- **hold 默认开环保持**（`hold_mode="open_loop"`，2026-11-19）：不跑 ONNX，
+  固定参考蹲姿 + kp×8，可**长期保持**（实测 60 s 零漂移）；现版 squat_hold.onnx
+  是慢发散（hold 5-10 s 必倒），仅作短过渡备用，详见 §2 与验证报告 §8.3。
 - `down→hold`、`up→normal` 是代码驱动（`state.py` 里 `ctx.request_state`），
-  **不是** `mod.yaml` route——route 字段不支持"动作完成"事件。
+  **不是** `mod.yaml` route——route 字段不支持"动作完成"事件；
+  `down→hold`、`up→normal` 均带 0.3 s `dual_running_blend` 平滑（切换目标角插值，
+  消除两网络残差突跳）。
+- up 提前 8 帧（`end_frame_trim=8`）切走路态：末段失稳流形的兜底，实测
+  trim 点姿态已站直（z 1.027 m / tilt 6.3°）。
 - `btn_10` 的 value 3/4 与厂家已用的 2/5/6/7/8 不冲突。
 - `mod.yaml` 里 states 的 `confirm: true` 只是 UI 元数据，框架不消费它，
   遥控按键触发**不需要**二次确认。
@@ -76,23 +83,29 @@ python src/bxi_example_py_elf3/mods/com.bxi.squat_actions/verify_policy.py
 
 ---
 
-## 2. 首跑降刚度（强烈建议）
+## 2. 首跑增益说明（2026-11-19 修订）
 
 真机框架**没有**全局 `kp_scale` 参数（`kp_scale` 只存在于本地仿真脚本）。
-降刚度用适配层自带的 `gain_scale`（构造参数，默认 1.0，kp/kd 统一乘这个系数）：
+增益用适配层自带的 `gain_scale`（构造参数，默认 1.0，kp/kd 统一乘这个系数）。
 
-编辑 `src/bxi_example_py_elf3/mods/com.bxi.squat_actions/plugin.py` 的 `_make_loader`：
+**蹲起策略保持默认 `gain_scale=1.0`（训练原值），不要降到 0.3**：
 
-```python
-return SquatResidualPolicy(
-    str(context.asset(f"assets/squat_{mode}.onnx")),
-    str(context.asset("assets/squat_ref_v1.npz")),
-    mode=mode,
-    gain_scale=0.3,      # ← 首跑加这行；稳定后改回 1.0 再 build
-)
-```
+- RL 策略是在训练 kp 下学的蹲起，偏离训练增益 = 策略分布外；
+- 本地仿真（`docs/squat_onnx_sim_verify.md`）显示训练柔顺 kp 本身在深蹲下
+  支撑就偏软（hold 下沉、up 末段失稳），再降到 0.3 支撑更软、更易下沉；
+- 安全靠**吊架 + btn_2 零力矩急停 + 命令丢失 >100 ms 失能**保证，不靠降增益。
 
-改完**重新 colcon build**。首跑必须上吊架。
+若首跑想更保守，可用 `gain_scale=0.7` 试探后尽快回 1.0（仿真未验证 0.7，
+真机自行判断）；`0.3` 已实测不可行，勿用。改完 `colcon build`。
+
+### hold 段的增益是独立的 ×8（勿改）
+
+`squat_hold` 状态默认 `hold_mode="open_loop"`（state.py）：不跑 ONNX，固定下发
+参考蹲姿 + kp/kd=训练×8（`_OPEN_LOOP_GAIN=8.0`）。这是实测唯一能**长期保持**
+蹲姿的配置（60 s 零漂移；现版 squat_hold.onnx 是慢发散、hold 5-10 s 必倒，
+详见 verify 报告 §8.3）。`gain_scale` 不影响 hold 的开环增益；如需调整改
+state.py 的 `_OPEN_LOOP_GAIN` 常量。重训 hold 完成（`docs/squat_hold_retrain.md`）
+并本地验收后，可把 plugin.py 的 `hold_mode` 改回 `"onnx"` 切换对比。
 
 ---
 
@@ -153,26 +166,35 @@ ros2 launch bxi_example_py_elf3 example_launch_demo_hw.py \
 | IMU 失联 | >0.1 s 由守护进程 `force=True` 直接打断，绕过 routes，任何态都能切走 |
 | 命令丢失 | >100 ms 电机失能 |
 | 动作异常 | 走软急停（冻结目标 + 阻尼下电），**不要照搬训练 reset**（关节目标会瞬间跳几十度） |
-| hold 卡帧 | 看门狗超时会自行切零力矩 |
+| hold 卡帧 / 输出非法 | 看门狗强制切零力矩（onnx 模式） |
+| hold 姿态漂移 | 实际关节偏离固定目标 > 0.5 rad（被推/踩空/打滑）→ 看门狗切零力矩（open_loop 模式） |
 
 ---
 
 ## 8. 收尾
 
 1. 按 `btn_2` 回 `zero_torque`，关闭电机电源，再处理吊架。
-2. 稳定后把 `plugin.py` 的 `gain_scale` 改回 `1.0`，重新 `colcon build`。
+2. 若首跑用了试探性 `gain_scale<1.0`，稳定后改回 `1.0` 重新 `colcon build`。
 
 ---
 
 ## 9. 是否需要回云服务器重训
 
-**默认不用重训**。只有真机/仿真对拍中 `|q−q_ref| > clip_rad` 的帧比例持续 >5%，
-或反复站不稳，才升级为训练议题：改 `train/mjlab_tasks/crab/squat_env_cfg.py` 的观测定义
-（删掉真机拿不到的 `base_lin_vel`，必要时连 `traj_height_err` 一起删），
-再用 `train/export_onnx.py --squat down/up/hold-*` 重新导出。
+**按 2026-11-19 仿真结论修订（`docs/squat_onnx_sim_verify.md` §8.5）**：
 
-真机近似处理：无全局 odom → `base_lin_vel` 填 0；无基座高度 → `z_meas` 由腿部正运动学估或填 0；
-无头关节编码器 → 填 metadata 默认值 0。三份模型 `history_length` 全为 0，无历史帧。
+- **hold（唯一确定要重训的）**：现版 ONNX 慢发散（每秒 +2.2° 前倾，5-10 s 必倒），
+  无法长期保持；过渡期 hold 走开环×8（默认，长期稳+省电 11%），根治按
+  **`docs/squat_hold_retrain.md`** 重训（收紧终止 55°→30°、min_z 0.35→0.48、
+  姿态奖励加权、回合 40 s；不动执行器/obs/导出链）。
+- **down / up：不用重训**。真机缺失观测的填 0 近似已被 P0 修复证实成立
+  （`traj_height_err` 填 0 而非 `-z_ref`；`base_lin_vel` 填 0 在训练噪声 ±0.3 内），
+  deploy 模式仿真与真值模式几乎重合（down 完成/12.4°，up k92/11.8°）。
+  up 末段失稳属参考轨迹动力学问题，重训同一参考不解决，已用 `end_frame_trim=8`
+  兜底（trim 点姿态很稳：z 1.027/tilt 6.3°/裕度 +10 cm）。
+
+真机近似处理：无全局 odom → `base_lin_vel` 填 0；无基座高度 → `traj_height_err`
+**填 0（=假设贴合参考，勿填 -z_ref）**；无头关节编码器 → 填 metadata 默认值 0。
+三份模型 `history_length` 全为 0，无历史帧。
 观测分块：down/up = `3+3+3+31+31+29+29+1+2` = 132；hold 去掉末 2 维 = 130。
 归一化已烘焙进 ONNX 图，**部署侧绝不能再归一化**。
 输出的 29 维是**残差**：`q_target = q_ref(frame) + ACTION_SCALE * clip(a, ±clip_rad/scale)`，
