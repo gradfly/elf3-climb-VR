@@ -1,21 +1,31 @@
 """自训蹲起 ONNX 的适配层（obs 拼装 + 残差后处理 + 参考帧计数）。
 
 三份 ONNX（squat_down / squat_up / squat_hold）的契约：
-  - INPUT  obs  [1, 132]（down/up）/ [1, 130]（hold，无 traj_progress）
+  - INPUT  obs  [1, 132]（down/up）/ [1, 126 或 130]（hold）
   - OUTPUT actions [1, 29] —— 是**残差**，不是关节目标
   - 12 键 CSV metadata；归一化已烘焙进图，部署侧不能再归一化
   - joint_names 有 31 个（末两个是被动头关节 head_z/head_y），action 是 29 维
 
-obs 分块（严格按 metadata 的 observation_names 顺序，见 docs/squat_rl_training.md §7）：
+hold 有两个契约版本（2026-11-19 重训起为「真机对齐版」，旧 ONNX 仍可加载回归）：
+  - 126 维（新，真机对齐）：base_ang_vel / projected_gravity / joint_pos /
+    joint_vel / actions / traj_joint_err —— 真机传感器能给全的六项，
+    训练时就拿掉了 base_lin_vel 与 traj_height_err，部署侧不再需要"填 0"近似；
+  - 130 维（旧，legacy）：在上面基础上多 base_lin_vel(填 0) 与
+    traj_height_err(填 0)。
+
+obs 分块由 metadata 的 observation_names **驱动**（逐项查 _TERM_SIZES 算偏移），
+不按固定下标硬拼 —— 换新版 ONNX 时改文件即可，适配层自动跟随。
+
+down/up 的 obs 分块（132 维）：
   0:3   base_lin_vel       真机无 odom → 填 0
   3:6   base_ang_vel       IMU 角速度
   6:9   projected_gravity  IMU 四元数反投影
-  9:40  joint_pos          29 关节 + 头关节默认角(2)
+  9:40  joint_pos          29 关节 + 头关节 0(2)（相对 default 的偏差）
   40:71 joint_vel          29 关节速度 + 头关节 0(2)
   71:100 actions           上一步**截幅前 raw** 输出
   100:129 traj_joint_err   q_meas - q_ref[frame]
-  129:130 traj_height_err  z_meas - z_ref[frame]（真机无基座高度 → 填 0）
-  130:132 traj_progress    [sin(pi*p), cos(pi*p)]（hold 无此块）
+  129:130 traj_height_err  真机无基座高度 → 填 0
+  130:132 traj_progress    [sin(pi*p), cos(pi*p)]
 
 动作后处理：q_target = q_ref[frame] + scale * clip(a, -clip_rad/scale, clip_rad/scale)
 clip_rad = 腿 0.35 / 腰 0.15 / 臂 0.12 rad。
@@ -42,12 +52,26 @@ from bxi_example_py_elf3.policies.joints import ELF3_POLICY_JOINTS
 # 控制周期 / 参考表推进（20 ms 一帧，见 docs/squat_rl_training.md §6.3）
 DT = 0.02
 
-# 期望的观测项顺序（down/up 9 项；hold 去掉末尾 traj_progress）
+# 每个观测项的维数（与训练侧 _build_observations 一一对应）
+_TERM_SIZES = {
+    "base_lin_vel": 3, "base_ang_vel": 3, "projected_gravity": 3,
+    "joint_pos": 31, "joint_vel": 31, "actions": 29,
+    "traj_joint_err": 29, "traj_height_err": 1, "traj_progress": 2,
+}
+# 期望的观测项顺序（严格按训练侧字典构造序）
+# down/up：9 项 132 维
 _OBS_TERMS_MOTION = (
     "base_lin_vel", "base_ang_vel", "projected_gravity", "joint_pos", "joint_vel",
     "actions", "traj_joint_err", "traj_height_err", "traj_progress",
 )
-_OBS_TERMS_HOLD = _OBS_TERMS_MOTION[:-1]
+# hold（legacy 130 维）：base_lin_vel / traj_height_err 真机没有，部署填 0
+_OBS_TERMS_HOLD_LEGACY = _OBS_TERMS_MOTION[:-1]
+# hold（真机对齐 126 维，2026-11-19 重训）：真机传感器能给全的六项，
+# 训练时就拿掉了 base_lin_vel 与 traj_height_err（squat_hold_cfg.py）
+_OBS_TERMS_HOLD_ALIGNED = (
+    "base_ang_vel", "projected_gravity", "joint_pos", "joint_vel",
+    "actions", "traj_joint_err",
+)
 
 # 残差限幅（rad）：腰 3 / 腿 12 / 臂 14，顺序与 ELF3_POLICY_JOINTS 一致
 _CLIP_WAIST = 0.15
@@ -129,8 +153,7 @@ class SquatResidualPolicy(JointPolicy):
         # hold 冻结帧 = down 表末帧 123（export_onnx.py SQUAT_MODES hold-squat freeze=-1）
         self._freeze_frame = self._last_frame if mode == "hold" else None
 
-        # 观测缓冲与状态
-        self._obs_dim = 130 if mode == "hold" else 132
+        # 观测缓冲与状态（obs_dim / 布局由 _validate_metadata 按 metadata 决定）
         self._obs = np.zeros((1, self._obs_dim), dtype=np.float32)
         self._inputs = {"obs": self._obs}
         self._previous_action = np.zeros(
@@ -162,24 +185,47 @@ class SquatResidualPolicy(JointPolicy):
         if len(names) != 31:
             raise ValueError(f"expected 31 joint_names in metadata, got {len(names)}")
 
-        expected_terms = _OBS_TERMS_HOLD if self.mode == "hold" else _OBS_TERMS_MOTION
+        # 观测项顺序校验 + 布局解析（偏移表）。hold 兼容两个契约版本：
+        #   130 维 legacy（base_lin_vel / traj_height_err 由部署侧填 0）
+        #   126 维 真机对齐（训练已去掉这两项，部署侧无近似）
         terms = tuple(t.strip() for t in metadata["observation_names"].split(","))
-        if terms != expected_terms:
+        if self.mode == "hold":
+            if terms not in (_OBS_TERMS_HOLD_ALIGNED, _OBS_TERMS_HOLD_LEGACY):
+                raise ValueError(
+                    f"observation_names mismatch for hold: {terms} "
+                    f"(expected 126-dim aligned {_OBS_TERMS_HOLD_ALIGNED} "
+                    f"or 130-dim legacy {_OBS_TERMS_HOLD_LEGACY})"
+                )
+        elif terms != _OBS_TERMS_MOTION:
             raise ValueError(
                 f"observation_names mismatch for mode {self.mode!r}: {terms}"
             )
+        self._terms = terms
+        offsets: dict[str, tuple[int, int]] = {}
+        off = 0
+        for t in terms:
+            size = _TERM_SIZES.get(t)
+            if size is None:
+                raise ValueError(f"unknown observation term {t!r} in metadata")
+            offsets[t] = (off, size)
+            off += size
+        self._obs_offsets = offsets
+        self._obs_dim = off
 
         # 无历史帧、观测 scale 全 1（归一化已烘焙进图）
         hist = _csv_floats(metadata["observation_terms_history_length"])
         if np.any(hist != 0.0):
             raise ValueError("squat ONNX unexpectedly uses observation history")
         scale = _csv_floats(metadata["observation_terms_scale"])
-        if scale.shape != (len(expected_terms),) or np.any(scale != 1.0):
+        if scale.shape != (len(terms),) or np.any(scale != 1.0):
             raise ValueError("unexpected observation_terms_scale")
 
         shape = self._backend.input_shape("obs")
-        if len(shape) != 2 or shape[1] != (130 if self.mode == "hold" else 132):
-            raise ValueError(f"unexpected obs input shape: {shape}")
+        if len(shape) != 2 or shape[1] != self._obs_dim:
+            raise ValueError(
+                f"obs input shape {shape} != metadata-derived dim {self._obs_dim} "
+                f"(terms: {terms})"
+            )
 
     # ------------------------------------------------------------------ 时间轴
     @property
@@ -217,58 +263,46 @@ class SquatResidualPolicy(JointPolicy):
 
     # ------------------------------------------------------------------ obs
     def _build_obs(self, frame: InferenceFrame, joints, q_ref) -> np.ndarray:
+        """按 metadata 声明的观测项逐块拼装（偏移由 _obs_offsets 决定）。
+
+        各项语义与训练侧 _build_observations 严格一致：
+          - joint_pos = joint_pos_rel(biased=True) = 绝对角 - default_joint_pos
+            （见 .workbuddy/mjlab_ref/observations.py:51 与已跑通的 crab_replay.py:656）；
+          - 两个被动头关节真机无编码器，训练时其观测恒为 0 偏差，直接填 0；
+          - base_lin_vel / traj_height_err 仅出现在 130 维 legacy hold 与
+            down/up 里：真机没有这两个量源，填 0（训练噪声 ±0.3 / ±0.005 内的
+            近似；126 维新 hold 已在训练侧拿掉，无需近似）。
+        """
         obs = self._obs[0]
-        off = 0
-
-        # 0:3 base_lin_vel —— 真机无 odom，填 0
-        obs[off:off + 3] = 0.0
-        off += 3
-
-        # 3:6 base_ang_vel
-        obs[off:off + 3] = frame.angular_velocity
-        off += 3
-
-        # 6:9 projected_gravity
-        obs[off:off + 3] = get_gravity_orientation(frame.quat_wxyz)
-        off += 3
-
-        # 9:40 joint_pos：训练里 joint_pos_rel(biased=True) = q - default_joint_pos，
-        # 即**相对默认姿态的偏差**，不是绝对角（见 .workbuddy/mjlab_ref/observations.py:51
-        # 与已跑通的 crab_replay.py:656）。真机读到的 joints.position 是绝对角，必须减掉
-        # metadata 里的 default_joint_pos 前 29 维。两个被动头关节真机无编码器，而训练时
-        # 它们的观测也恒为 0 偏差，故直接填 0（不要填 head_default 本身）。
-        obs[off:off + 29] = joints.position - self._parameters.default_position
-        obs[off + 29:off + 31] = 0.0
-        off += 31
-
-        # 40:71 joint_vel（29 可控 + 2 头关节 0）
-        obs[off:off + 29] = joints.velocity
-        obs[off + 29:off + 31] = 0.0
-        off += 31
-
-        # 71:100 actions —— 截幅前 raw
-        obs[off:off + 29] = self._previous_action
-        off += 29
-
-        # 100:129 traj_joint_err
-        obs[off:off + 29] = joints.position - q_ref
-        off += 29
-
-        # 129:130 traj_height_err —— 真机无基座高度反馈。
-        # 近似为"贴合参考"（err=0）：蹲起时真实 err 仅几 cm，落训练噪声 Unoise(±0.005) 附近
-        # （squat_env_cfg.py:158）。千万别填 -z_ref（=假设 z_meas=0，err 达 -1.0，
-        # 深度分布外且落入训练 base_too_low 终止区，策略会误判"已摔倒"）。
-        obs[off] = 0.0
-        off += 1
-
-        # 130:132 traj_progress（hold 不拼）
-        if self.mode != "hold":
-            p = self._frame / self._last_frame if self._last_frame > 0 else 0.0
-            obs[off] = np.sin(np.pi * p)
-            obs[off + 1] = np.cos(np.pi * p)
-            off += 2
-
-        assert off == self._obs_dim, (off, self._obs_dim)
+        for name in self._terms:
+            start, size = self._obs_offsets[name]
+            if name == "base_lin_vel":                # 真机无 odom
+                obs[start:start + size] = 0.0
+            elif name == "base_ang_vel":
+                obs[start:start + size] = frame.angular_velocity
+            elif name == "projected_gravity":
+                obs[start:start + size] = get_gravity_orientation(frame.quat_wxyz)
+            elif name == "joint_pos":                 # 29 可控 + 2 被动头关节
+                obs[start:start + 29] = joints.position - self._parameters.default_position
+                obs[start + 29:start + 31] = 0.0
+            elif name == "joint_vel":
+                obs[start:start + 29] = joints.velocity
+                obs[start + 29:start + 31] = 0.0
+            elif name == "actions":                   # 截幅前 raw
+                obs[start:start + size] = self._previous_action
+            elif name == "traj_joint_err":
+                obs[start:start + size] = joints.position - q_ref
+            elif name == "traj_height_err":           # 真机无基座高度
+                # 近似为"贴合参考"（err=0）：蹲起时真实 err 仅几 cm，落训练噪声
+                # Unoise(±0.005) 附近。千万别填 -z_ref（=假设 z_meas=0，err 达 -1.0，
+                # 深度分布外且落入训练 base_too_low 终止区，策略会误判"已摔倒"）。
+                obs[start] = 0.0
+            elif name == "traj_progress":
+                p = self._frame / self._last_frame if self._last_frame > 0 else 0.0
+                obs[start] = np.sin(np.pi * p)
+                obs[start + 1] = np.cos(np.pi * p)
+            else:                                     # pragma: no cover
+                raise ValueError(f"unhandled observation term {name!r}")
         return self._obs
 
     # ------------------------------------------------------------------ step

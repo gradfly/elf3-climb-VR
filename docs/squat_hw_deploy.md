@@ -78,8 +78,10 @@ source ./install/setup.bash
 python src/bxi_example_py_elf3/mods/com.bxi.squat_actions/verify_policy.py
 ```
 
-应输出三份 ONNX 加载成功、obs 维度 132/130、帧数 124/102、hold 锁帧、
-后处理与直接 ORT 推理逐帧一致（`<1e-3`）。需 `onnxruntime`、`pyyaml`。
+应输出三份 ONNX 加载成功、obs 维度 132 / 130(legacy)|126(真机对齐版)、帧数
+124/102、hold 锁帧、后处理与直接 ORT 推理逐帧一致（`<1e-3`）。
+需 `onnxruntime`、`pyyaml`。适配层按 metadata 的 observation_names 自动识别
+hold 的新旧契约（2026-11-19 重训 hold 为 126 维真机对齐版，旧 130 维仍兼容）。
 
 ---
 
@@ -184,18 +186,27 @@ ros2 launch bxi_example_py_elf3 example_launch_demo_hw.py \
 
 - **hold（唯一确定要重训的）**：现版 ONNX 慢发散（每秒 +2.2° 前倾，5-10 s 必倒），
   无法长期保持；过渡期 hold 走开环×8（默认，长期稳+省电 11%），根治按
-  **`docs/squat_hold_retrain.md`** 重训（收紧终止 55°→30°、min_z 0.35→0.48、
-  姿态奖励加权、回合 40 s；不动执行器/obs/导出链）。
+  **`docs/squat_hold_retrain.md`** 重训。2026-11-19 重训方案已落到
+  `squat_hold_cfg.py`：收紧终止 55°→30°、min_z 0.35→0.48、姿态奖励加权、
+  回合 40 s；**obs 去掉 base_lin_vel/traj_height_err（130→126 维，与真机完全
+  一致，部署侧不再需要填 0 近似）**；新增外力触碰扰动 touch_robot
+  （±35 N 持续 0.2~0.5 s，模拟真人推搡/碰撞）。不动执行器 kp/kd 与导出链。
 - **down / up：不用重训**。真机缺失观测的填 0 近似已被 P0 修复证实成立
   （`traj_height_err` 填 0 而非 `-z_ref`；`base_lin_vel` 填 0 在训练噪声 ±0.3 内），
   deploy 模式仿真与真值模式几乎重合（down 完成/12.4°，up k92/11.8°）。
   up 末段失稳属参考轨迹动力学问题，重训同一参考不解决，已用 `end_frame_trim=8`
   兜底（trim 点姿态很稳：z 1.027/tilt 6.3°/裕度 +10 cm）。
 
-真机近似处理：无全局 odom → `base_lin_vel` 填 0；无基座高度 → `traj_height_err`
-**填 0（=假设贴合参考，勿填 -z_ref）**；无头关节编码器 → 填 metadata 默认值 0。
+真机近似处理（按模型区分）：
+  - **新 hold（126 维）**：训练侧已去掉真机缺失项，**无任何近似**，obs 全部
+    来自真机传感器（IMU 角速度/重力投影/关节编码器/上一步动作/参考误差）。
+  - **down / up（132 维）与 legacy 130 维 hold**：无全局 odom → `base_lin_vel`
+    填 0；无基座高度 → `traj_height_err` **填 0（=假设贴合参考，勿填 -z_ref）**；
+    无头关节编码器 → 填 metadata 默认值 0。
 三份模型 `history_length` 全为 0，无历史帧。
-观测分块：down/up = `3+3+3+31+31+29+29+1+2` = 132；hold 去掉末 2 维 = 130。
+观测分块：down/up = `3+3+3+31+31+29+29+1+2` = 132；legacy hold = 130；
+新 hold = `3+3+31+31+29+29` = 126（无 base_lin_vel / traj_height_err）。
+适配层按 metadata 的 observation_names 自动拼块，无需按模型改代码。
 归一化已烘焙进 ONNX 图，**部署侧绝不能再归一化**。
 输出的 29 维是**残差**：`q_target = q_ref(frame) + ACTION_SCALE * clip(a, ±clip_rad/scale)`，
 不能当绝对关节角下发。

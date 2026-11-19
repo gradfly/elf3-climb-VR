@@ -5,7 +5,7 @@
 
 检查：
   1. 三份 ONNX 能被 SquatResidualPolicy 加载（含 metadata 12 键校验）
-  2. obs 维度 132/130 与各块布局正确
+  2. obs 维度 132 / 130(legacy)|126(真机对齐) 与各块布局正确（按 metadata 驱动）
   3. 残差后处理 q_target = q_ref + scale*clip(a) 与直接 ORT 推理逐帧一致
   4. down/up 帧计数推进到 T-1、finished 正确；hold 帧锁死且 finished 恒 False
   5. last_action 回填的是截幅前 raw
@@ -60,14 +60,17 @@ def main() -> int:
 
     failures = []
     for mode, onnx_name, expect_dim, expect_frames in (
-        ("down", "squat_down.onnx", 132, 124),
-        ("up", "squat_up.onnx", 132, 102),
-        ("hold", "squat_hold.onnx", 130, 124),
+        # hold 的 obs_dim：130 = legacy（base_lin_vel/traj_height_err 部署填 0），
+        # 126 = 真机对齐版（2026-11-19 重训，训练侧已去掉这两项）。两者都合法。
+        ("down", "squat_down.onnx", (132,), 124),
+        ("up", "squat_up.onnx", (132,), 102),
+        ("hold", "squat_hold.onnx", (130, 126), 124),
     ):
         policy = sp.SquatResidualPolicy(str(assets / onnx_name), ref_path, mode=mode)
         print(f"\n=== {mode}: obs_dim={policy._obs_dim}, frames={policy.frames} ===")
-        if policy._obs_dim != expect_dim:
-            failures.append(f"{mode}: obs_dim {policy._obs_dim} != {expect_dim}")
+        print(f"  obs terms: {'+'.join(policy._terms)}")
+        if policy._obs_dim not in expect_dim:
+            failures.append(f"{mode}: obs_dim {policy._obs_dim} not in {expect_dim}")
         if policy.frames != expect_frames:
             failures.append(f"{mode}: frames {policy.frames} != {expect_frames}")
 

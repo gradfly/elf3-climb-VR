@@ -22,6 +22,9 @@
        --obs-mode deploy : 与真机一致，base_lin_vel 填 0、基座高度填 0（默认，检验真机近似是否可行）
        --obs-mode train  : 喂仿真的 torso_lin_vel / 基座高度真值（检验策略本身在训练分布下是否成立）
      两者结果对比即可回答「真机填 0 近似会不会毁掉策略」。
+     ⚠️ 2026-11-19 重训的 hold（obs 126 维真机对齐版）训练侧已无这两项观测，
+     train 模式自动退化为 deploy（脚本会提示）；down/up 与 legacy 130 维 hold
+     仍会做真值覆盖。
   4. 初始姿态用源轨迹 squat_extreme_{down,up}_traj.npz 的完整 38 维 qpos
      （含蹲姿前倾 18.5° 的根节点四元数、COM 稳定裕度 +9.65cm），与训练 reset 精确对齐。
      只用 q_ref+z 拼姿态会因四元数符号/根节点位置错误，导致开局就倒（已踩坑）。
@@ -251,12 +254,21 @@ def main() -> int:
             out = pol.step(frame, dt, advance=True)
             target = np.asarray(out.joints.position, dtype=np.float64).copy()
 
-            # 观测模式覆盖：step() 内已按 deploy 填 0；train 模式用仿真真值重算 obs 再推一次
+            # 观测模式覆盖：step() 内已按 deploy 填 0；train 模式用仿真真值重算 obs 再推一次。
+            # 偏移按策略实际布局查（126 维真机对齐版 hold 没有这两项 → 自动跳过）。
             if args.obs_mode == "train":
-                pol._obs[0, 0:3] = data.sensordata[lin_sl]  # base_lin_vel
+                _off_lv = pol._obs_offsets.get("base_lin_vel")
+                if _off_lv is not None:
+                    pol._obs[0, _off_lv[0]:_off_lv[0] + _off_lv[1]] = data.sensordata[lin_sl]
+                _off_hz = pol._obs_offsets.get("traj_height_err")
                 z_meas = float(data.qpos[2])
                 idx = pol.frame
-                pol._obs[0, 129] = z_meas - float(pol._z_ref[idx])
+                if _off_hz is not None:
+                    pol._obs[0, _off_hz[0]] = z_meas - float(pol._z_ref[idx])
+                if _off_lv is None and _off_hz is None and not hasattr(pol, "_train_note_shown"):
+                    pol._train_note_shown = True
+                    print(f"    [train] {mode} 为 126 维真机对齐版（无 base_lin_vel/"
+                          f"traj_height_err 观测），train 与 deploy 一致")
                 outputs = pol._backend.run(pol._inputs)
                 raw = np.asarray(outputs["actions"]).reshape(-1)
                 a = np.clip(raw, -pol._clip_rad / pol._scale, pol._clip_rad / pol._scale)
