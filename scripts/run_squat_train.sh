@@ -75,10 +75,13 @@ fi
 
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYTHONUNBUFFERED=1
-# 这几个在任务包 import 时就生效（配置是 import 时 build 的），必须先 export
-export ELF3_SQUAT_HOLD="${HOLD:-5.0}"
-export ELF3_SQUAT_ARM_GUARD="${ARM_GUARD:-1}"
-export ELF3_HOLD_EPISODE="${HOLD_EPISODE:-20.0}"
+# 这几个在任务包 import 时就生效（配置是 import 时 build 的），必须先 export。
+# 优先级：脚本短名（HOLD/ARM_GUARD/HOLD_EPISODE）> 外部 ELF3_* 同名变量 > 默认值。
+# （2026-11-19 修：此前无条件用默认值覆盖外部 ELF3_HOLD_EPISODE，文档里
+#   ELF3_HOLD_EPISODE=40 bash ... 的写法实际不生效，只有 HOLD_EPISODE=40 生效。）
+export ELF3_SQUAT_HOLD="${HOLD:-${ELF3_SQUAT_HOLD:-5.0}}"
+export ELF3_SQUAT_ARM_GUARD="${ARM_GUARD:-${ELF3_SQUAT_ARM_GUARD:-1}}"
+export ELF3_HOLD_EPISODE="${HOLD_EPISODE:-${ELF3_HOLD_EPISODE:-20.0}}"
 
 step() { echo; echo "==> $*"; }
 
@@ -159,7 +162,9 @@ smoke() {
   echo "     先确认上面有这几行（没有就是配置没生效，别开训）："
   echo "       [squat] down: 参考 2.46 s + 保持 5.0 s = 7.96 s/回合"
   echo "       [squat] 已加手臂-腿接触传感器 arm_leg_contact"
-  echo "       [hold] squat（极限蹲保持）：20.0 s/回合，参考冻结在 down 第 123/123 帧"
+  echo "       [hold] squat（极限蹲保持）：<回合长度>s/回合，参考冻结在 down 第 123/123 帧"
+  echo "              （回合长度 = HOLD_EPISODE / ELF3_HOLD_EPISODE，默认 20.0；"
+  echo "                紧接着会打印 actor 观测 126 维 + touch_robot，确认重训配置生效）"
   echo "       [traj] down: ... 冻结在第 123 帧（不推进，参考=静态位形，z=0.523 m）"
 }
 
